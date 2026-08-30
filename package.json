@@ -1,0 +1,22 @@
+{
+  "name": "laburapp",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["apps/*", "packages/*"],
+  "scripts": {
+    "dev": "concurrently -n MOBILE,ADMIN -c blue,cyan \"npm run mobile\" \"npm run admin\"",
+    "mobile": "npm run start --workspace mobile",
+    "admin": "npm run dev --workspace admin",
+    "lint": "npm run lint --workspace admin",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspace @laburapp/shared",
+    "test:e2e": "npm run test:e2e --workspace @laburapp/shared",
+    "build": "npm run build --workspace admin"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
