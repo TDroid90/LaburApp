@@ -9,7 +9,7 @@ Foundation local de una plataforma argentina para encontrar, contratar y pagar d
 Requisitos: Node.js 22 o posterior, Git y, solo para Supabase local, Docker Desktop abierto.
 
 ```powershell
-cd C:\Users\TD\Documents\Codex\LaburApp
+cd LaburApp
 npm install
 npm run dev
 ```
@@ -35,7 +35,7 @@ En un celular Android o iPhone, instalá Expo Go, conectá el teléfono a la mis
 Con Docker Desktop abierto:
 
 ```powershell
-cd C:\Users\TD\Documents\Codex\LaburApp
+cd LaburApp
 npx supabase start
 npx supabase db reset
 ```
