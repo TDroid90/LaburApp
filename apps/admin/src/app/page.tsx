@@ -17,7 +17,7 @@ const reviews = [
 export default function Home() {
   return <div className={styles.shell}>
     <aside className={styles.sidebar}>
-      <div className={styles.brand}><Image src="/brand/laburapp-logo.jpg" alt="LaburApp" width={132} height={88} priority /><small>Administración</small></div>
+      <div className={styles.brand}><Image src="/brand/laburapp-wordmark-clean.png" alt="LaburApp" width={185} height={48} priority /><small>Administración</small></div>
       <nav>{["Resumen", "Usuarios", "Prestadores", "Matrículas", "Trabajos", "Pagos mock", "Denuncias", "Publicidad", "Configuración", "Auditoría"].map((item, index) => <a className={index === 0 ? styles.active : ""} href={`#${item.toLowerCase()}`} key={item}>{item}</a>)}</nav>
       <div className={styles.session}><span>AD</span><div><strong>Admin demo</strong><small>Entorno local</small></div></div>
     </aside>
