@@ -1,5 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Image, Modal, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from "react-native";
+import { loadLocalState, saveLocalState, SavedProviderProfile, SavedRequest, SavedSession } from "../lib/local-store";
+import { backendMode } from "../lib/supabase";
 
 const providers = [
   { name: "Martín Gómez", trade: "Gasista", city: "Río Grande", rating: "4,9", jobs: 52, badge: "Matrícula verificada", skills: "Calefones · Pérdidas" },
@@ -59,7 +61,6 @@ const quickSearches = ["Gasista", "Plomería", "Electricidad", "Limpieza", "Adul
 type Provider = typeof providers[number];
 
 const colors = { navy: "#063C78", blue: "#078EE9", cyan: "#39BCEB", snow: "#F4FAFD", stone: "#5E7183", orange: "#FF7800", green: "#16825B", line: "#D6E8F2" };
-const officialLogo = require("../assets/brand/laburapp-logo.jpg");
 const officialWordmark = require("../assets/brand/laburapp-wordmark-clean.png");
 
 export default function Home() {
@@ -69,6 +70,10 @@ export default function Home() {
   const [requested, setRequested] = useState<string | null>(null);
   const [authMode, setAuthMode] = useState<"login" | "register" | null>(null);
   const [signedInName, setSignedInName] = useState<string | null>(null);
+  const [session, setSession] = useState<SavedSession | null>(null);
+  const [requests, setRequests] = useState<SavedRequest[]>([]);
+  const [providerProfile, setProviderProfile] = useState<SavedProviderProfile | null>(null);
+  const [hydrated, setHydrated] = useState(false);
   const [authName, setAuthName] = useState("");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
@@ -79,8 +84,28 @@ export default function Home() {
   const [quoteDescription, setQuoteDescription] = useState("");
   const [quoteZone, setQuoteZone] = useState("");
   const [quoteDate, setQuoteDate] = useState("");
+  const [profileModal, setProfileModal] = useState(false);
+  const [profileStep, setProfileStep] = useState(1);
+  const [profileDraft, setProfileDraft] = useState<SavedProviderProfile>({ displayName: "", city: "", trade: "", bio: "", skills: "", zones: "", availability: "", published: false });
+  const [profileError, setProfileError] = useState("");
   const compactHeader = width < 720;
   const authButtonLabel = signedInName ? `Hola, ${signedInName.split(" ")[0]}` : "Ingresar";
+
+  useEffect(() => {
+    loadLocalState().then((saved) => {
+      setSession(saved.session);
+      setSignedInName(saved.session?.name ?? null);
+      setRequests(saved.requests);
+      setProviderProfile(saved.providerProfile);
+      if (saved.providerProfile) setProfileDraft(saved.providerProfile);
+      setHydrated(true);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    saveLocalState({ session, requests, providerProfile }).catch(() => setRequested("No pudimos guardar los cambios en este dispositivo."));
+  }, [hydrated, session, requests, providerProfile]);
 
   function submitAuth() {
     setAuthError("");
@@ -88,22 +113,59 @@ export default function Home() {
     if (authPassword.length < 6) return setAuthError("La contraseña debe tener al menos 6 caracteres.");
     if (authMode === "register" && authName.trim().length < 2) return setAuthError("Ingresá tu nombre y apellido.");
     if (authMode === "register" && !acceptedTerms) return setAuthError("Aceptá los términos y la política de privacidad para continuar.");
-    setSignedInName(authMode === "register" ? authName.trim() : authEmail.split("@")[0]);
+    const name = authMode === "register" ? authName.trim() : authEmail.split("@")[0];
+    const nextSession: SavedSession = { name, email: authEmail.trim().toLowerCase(), role: authMode === "register" ? authRole : "client" };
+    setSession(nextSession); setSignedInName(name);
     setAuthMode(null); setAuthPassword("");
+    if (authMode === "register" && authRole === "provider") {
+      setProfileDraft((current) => ({ ...current, displayName: name }));
+      setProfileStep(1); setProfileModal(true);
+    }
   }
 
   function submitQuote() {
     if (!quoteProvider) return;
     if (quoteDescription.trim().length < 10) return setRequested("Contanos un poco más (mínimo 10 caracteres)");
-    setRequested(`Solicitud demo creada para ${quoteProvider.name}`);
+    const nextRequest: SavedRequest = {
+      id: `${Date.now()}`,
+      provider: quoteProvider.name,
+      trade: quoteProvider.trade,
+      description: quoteDescription.trim(),
+      zone: quoteZone.trim(),
+      desiredAt: quoteDate.trim(),
+      createdAt: new Date().toISOString(),
+      status: "request_sent",
+    };
+    setRequests((current) => [nextRequest, ...current]);
+    setRequested(`Solicitud creada para ${quoteProvider.name}`);
     setQuoteProvider(null); setQuoteDescription(""); setQuoteZone(""); setQuoteDate("");
+  }
+
+  function openProviderProfile() {
+    if (!session) { setAuthMode("register"); setAuthRole("provider"); return; }
+    setProfileDraft(providerProfile ?? { displayName: session.name, city: "", trade: "", bio: "", skills: "", zones: "", availability: "", published: false });
+    setProfileStep(1); setProfileError(""); setProfileModal(true);
+  }
+
+  function advanceProfile() {
+    setProfileError("");
+    if (profileStep === 1 && (!profileDraft.displayName.trim() || !profileDraft.city.trim())) return setProfileError("Completá tu nombre visible y ciudad.");
+    if (profileStep === 2 && (!profileDraft.trade.trim() || profileDraft.bio.trim().length < 20)) return setProfileError("Indicá tu oficio y contanos al menos 20 caracteres sobre tu experiencia.");
+    if (profileStep < 3) return setProfileStep((step) => step + 1);
+    if (!profileDraft.zones.trim() || !profileDraft.availability.trim()) return setProfileError("Indicá las zonas donde trabajás y tu disponibilidad.");
+    setProviderProfile({ ...profileDraft, published: true });
+    setProfileModal(false); setRequested("Perfil de prestador guardado y publicado.");
+  }
+
+  function signOut() {
+    setSession(null); setSignedInName(null); setTab("Inicio"); setRequested("Cerraste sesión en este dispositivo.");
   }
   const filtered = useMemo(() => providers.filter((p) => `${p.name} ${p.trade} ${p.city} ${p.skills}`.toLowerCase().includes(query.toLowerCase())), [query]);
 
   return <SafeAreaView style={styles.safe}>
     <View style={[styles.header, compactHeader && styles.headerCompact]}>
       <View style={styles.brandRow}>
-        {compactHeader ? <Image source={officialWordmark} accessibilityLabel="LaburApp" resizeMode="contain" style={styles.wordmarkLogo} /> : <Image source={officialLogo} accessibilityLabel="Logo oficial de LaburApp con Tito, el gato laburante" resizeMode="contain" style={styles.officialLogo} />}
+        <Image source={officialWordmark} accessibilityLabel="LaburApp" resizeMode="contain" style={[styles.wordmarkLogo, !compactHeader && styles.wordmarkLogoWide]} />
       </View>
       <TouchableOpacity accessibilityRole="button" accessibilityLabel="Ingresar a LaburApp" style={styles.loginButton} onPress={() => signedInName ? setTab("Perfil") : setAuthMode("login")}>
         <Text style={styles.loginButtonText}>{authButtonLabel}</Text>
@@ -133,11 +195,49 @@ export default function Home() {
           </View>
         </View>)}
         {filtered.length === 0 && <View style={styles.empty}><Text style={styles.emptyTitle}>Tito no encontró coincidencias</Text><Text style={styles.heroCopy}>Probá con “gasista”, “plomería” o una ciudad.</Text></View>}
-      </> : <View style={styles.empty}>
-        <Text style={styles.catLarge}>{tab === "Trabajos" ? "🧰" : "👤"}</Text>
-        <Text style={styles.emptyTitle}>{tab}</Text>
-        <Text style={styles.heroCopy}>{tab === "Trabajos" ? "Acá vas a seguir solicitudes, presupuestos y trabajos activos." : signedInName ? `Sesión iniciada como ${signedInName}. Tu perfil puede funcionar como cliente y prestador.` : "Tu perfil puede funcionar como cliente y prestador con una sola cuenta."}</Text>
-        <TouchableOpacity style={styles.secondaryButton}><Text style={styles.secondaryText}>Explorar modo demo</Text></TouchableOpacity>
+      </> : tab === "Trabajos" ? <View style={styles.sectionPage}>
+        <Text style={styles.pageTitle}>Mis trabajos</Text>
+        <Text style={styles.pageCopy}>Seguí en un solo lugar tus solicitudes, presupuestos y trabajos activos.</Text>
+        {requests.length === 0 ? <View style={styles.emptyPanel}>
+          <Text style={styles.emptyIcon}>🧰</Text><Text style={styles.emptyTitle}>Todavía no hay solicitudes</Text>
+          <Text style={styles.centerCopy}>Elegí un profesional y pedile presupuesto. La solicitud va a aparecer acá.</Text>
+          <TouchableOpacity style={styles.secondaryButton} onPress={() => setTab("Inicio")}><Text style={styles.secondaryText}>Buscar profesionales</Text></TouchableOpacity>
+        </View> : requests.map((request) => <View key={request.id} style={styles.workCard}>
+          <View style={styles.workCardTop}><Text style={styles.workStatus}>● Solicitud enviada</Text><Text style={styles.workDate}>{new Date(request.createdAt).toLocaleDateString("es-AR")}</Text></View>
+          <Text style={styles.workProvider}>{request.provider}</Text>
+          <Text style={styles.trade}>{request.trade}</Text>
+          <Text style={styles.workDescription}>{request.description}</Text>
+          {!!request.zone && <Text style={styles.workMeta}>Zona: {request.zone}</Text>}
+          {!!request.desiredAt && <Text style={styles.workMeta}>Cuándo: {request.desiredAt}</Text>}
+          <View style={styles.nextStep}><Text style={styles.nextStepText}>Próximo paso: el profesional responde con un presupuesto.</Text></View>
+        </View>)}
+      </View> : <View style={styles.sectionPage}>
+        <Text style={styles.pageTitle}>Mi perfil</Text>
+        {!session ? <View style={styles.emptyPanel}>
+          <Text style={styles.emptyIcon}>👤</Text><Text style={styles.emptyTitle}>Ingresá para continuar</Text>
+          <Text style={styles.centerCopy}>Una sola cuenta sirve para contratar profesionales y ofrecer tus servicios.</Text>
+          <TouchableOpacity style={styles.modalPrimary} onPress={() => setAuthMode("login")}><Text style={styles.modalPrimaryText}>Ingresar</Text></TouchableOpacity>
+          <TouchableOpacity style={styles.secondaryButton} onPress={() => setAuthMode("register")}><Text style={styles.secondaryText}>Crear cuenta</Text></TouchableOpacity>
+        </View> : <>
+          <View style={styles.accountCard}>
+            <View style={styles.profileAvatar}><Text style={styles.profileAvatarText}>{session.name.slice(0, 1).toUpperCase()}</Text></View>
+            <View style={styles.accountBody}><Text style={styles.accountName}>{session.name}</Text><Text style={styles.accountEmail}>{session.email}</Text><Text style={styles.localBadge}>{backendMode === "supabase" ? "Conectado a Supabase" : "Guardado en este dispositivo"}</Text></View>
+          </View>
+          {providerProfile?.published ? <View style={styles.providerPanel}>
+            <View style={styles.workCardTop}><Text style={styles.panelEyebrow}>PERFIL DE PRESTADOR</Text><Text style={styles.publishedBadge}>Publicado</Text></View>
+            <Text style={styles.providerTrade}>{providerProfile.trade}</Text>
+            <Text style={styles.workDescription}>{providerProfile.bio}</Text>
+            <Text style={styles.workMeta}>📍 {providerProfile.city} · {providerProfile.zones}</Text>
+            <Text style={styles.workMeta}>🕐 {providerProfile.availability}</Text>
+            <Text style={styles.skillsLine}>{providerProfile.skills}</Text>
+            <TouchableOpacity style={styles.secondaryButton} onPress={openProviderProfile}><Text style={styles.secondaryText}>Editar perfil profesional</Text></TouchableOpacity>
+          </View> : <View style={styles.providerInvite}>
+            <Text style={styles.providerInviteTitle}>¿Querés ofrecer tus servicios?</Text>
+            <Text style={styles.pageCopy}>Creá tu perfil profesional paso a paso y empezá a recibir solicitudes.</Text>
+            <TouchableOpacity style={styles.modalPrimary} onPress={openProviderProfile}><Text style={styles.modalPrimaryText}>Crear perfil de prestador</Text></TouchableOpacity>
+          </View>}
+          <TouchableOpacity style={styles.logoutButton} onPress={signOut}><Text style={styles.logoutText}>Cerrar sesión</Text></TouchableOpacity>
+        </>}
       </View>}
     </ScrollView>
     {requested && <View style={styles.toast}><Text style={styles.toastText}>{requested}</Text><TouchableOpacity onPress={() => setRequested(null)}><Text style={styles.toastClose}>Cerrar</Text></TouchableOpacity></View>}
@@ -159,6 +259,31 @@ export default function Home() {
         <TouchableOpacity onPress={() => { setAuthError(""); setAuthMode(authMode === "login" ? "register" : "login"); }}><Text style={styles.modalSwitch}>{authMode === "login" ? "¿No tenés cuenta? Registrate" : "¿Ya tenés cuenta? Ingresá"}</Text></TouchableOpacity>
       </View></View>
     </Modal>
+    <Modal visible={profileModal} transparent animationType="slide" onRequestClose={() => setProfileModal(false)}>
+      <View style={styles.modalBackdrop}><View style={styles.modalCard}>
+        <TouchableOpacity style={styles.modalClose} onPress={() => setProfileModal(false)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+        <Text style={styles.stepLabel}>PASO {profileStep} DE 3</Text>
+        <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${profileStep * 33.333}%` }]} /></View>
+        <Text style={styles.modalTitle}>{profileStep === 1 ? "Tu información básica" : profileStep === 2 ? "Tu experiencia" : "Dónde y cuándo trabajás"}</Text>
+        <Text style={styles.modalCopy}>{profileStep === 1 ? "Estos datos van a identificarte ante posibles clientes." : profileStep === 2 ? "Explicá con claridad qué hacés y en qué te destacás." : "Definí tu zona de cobertura y disponibilidad habitual."}</Text>
+        {profileStep === 1 && <>
+          <TextInput value={profileDraft.displayName} onChangeText={(displayName) => setProfileDraft({ ...profileDraft, displayName })} placeholder="Nombre visible" placeholderTextColor="#71818B" style={styles.modalInput} />
+          <TextInput value={profileDraft.city} onChangeText={(city) => setProfileDraft({ ...profileDraft, city })} placeholder="Ciudad" placeholderTextColor="#71818B" style={styles.modalInput} />
+        </>}
+        {profileStep === 2 && <>
+          <TextInput value={profileDraft.trade} onChangeText={(trade) => setProfileDraft({ ...profileDraft, trade })} placeholder="Oficio o profesión principal" placeholderTextColor="#71818B" style={styles.modalInput} />
+          <TextInput multiline value={profileDraft.bio} onChangeText={(bio) => setProfileDraft({ ...profileDraft, bio })} placeholder="Contá tu experiencia, cómo trabajás y qué ofrecés" placeholderTextColor="#71818B" style={[styles.modalInput, styles.multiline]} />
+          <TextInput value={profileDraft.skills} onChangeText={(skills) => setProfileDraft({ ...profileDraft, skills })} placeholder="Especialidades separadas por comas" placeholderTextColor="#71818B" style={styles.modalInput} />
+        </>}
+        {profileStep === 3 && <>
+          <TextInput value={profileDraft.zones} onChangeText={(zones) => setProfileDraft({ ...profileDraft, zones })} placeholder="Zonas donde trabajás" placeholderTextColor="#71818B" style={styles.modalInput} />
+          <TextInput value={profileDraft.availability} onChangeText={(availability) => setProfileDraft({ ...profileDraft, availability })} placeholder="Disponibilidad (ej. lunes a viernes, 9 a 18)" placeholderTextColor="#71818B" style={styles.modalInput} />
+          <View style={styles.reviewBox}><Text style={styles.reviewTitle}>Antes de publicar</Text><Text style={styles.reviewText}>No incluyas teléfono, correo ni domicilio. Más adelante vas a poder sumar fotos y documentación para verificar tu perfil.</Text></View>
+        </>}
+        {!!profileError && <Text style={styles.modalError}>{profileError}</Text>}
+        <View style={styles.wizardActions}>{profileStep > 1 && <TouchableOpacity style={styles.wizardBack} onPress={() => { setProfileError(""); setProfileStep((step) => step - 1); }}><Text style={styles.wizardBackText}>Atrás</Text></TouchableOpacity>}<TouchableOpacity style={[styles.modalPrimary, styles.wizardPrimary]} onPress={advanceProfile}><Text style={styles.modalPrimaryText}>{profileStep === 3 ? "Publicar perfil" : "Continuar"}</Text></TouchableOpacity></View>
+      </View></View>
+    </Modal>
     <Modal visible={quoteProvider !== null} transparent animationType="slide" onRequestClose={() => setQuoteProvider(null)}>
       <View style={styles.modalBackdrop}><View style={styles.modalCard}>
         <TouchableOpacity style={styles.modalClose} onPress={() => setQuoteProvider(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
@@ -177,11 +302,15 @@ export default function Home() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.snow }, header: { minHeight: 88, paddingHorizontal: 16, paddingVertical: 6, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#000000", borderBottomWidth: 3, borderBottomColor: colors.blue }, headerCompact: { minHeight: 64, paddingVertical: 6, backgroundColor: "#000000" },
-  brandRow: { flexDirection: "row", alignItems: "center" }, officialLogo: { width: 126, height: 78 }, wordmarkLogo: { width: 176, height: 48 },
+  brandRow: { flexDirection: "row", alignItems: "center" }, wordmarkLogo: { width: 176, height: 48 }, wordmarkLogoWide: { width: 210, height: 60 },
   loginButton: { minHeight: 40, justifyContent: "center", paddingHorizontal: 15, borderRadius: 12, borderWidth: 1, borderColor: colors.cyan, backgroundColor: "#063C78" }, loginButtonText: { color: "white", fontWeight: "800", fontSize: 14 },
   content: { padding: 18, paddingBottom: 110 }, hero: { backgroundColor: colors.navy, borderRadius: 24, padding: 22, marginBottom: 24 }, heroTitle: { color: "white", fontSize: 30, lineHeight: 34, fontWeight: "900" }, heroCopy: { color: "#D6E6EE", fontSize: 15, lineHeight: 21, marginTop: 8 }, search: { backgroundColor: "white", color: colors.navy, borderRadius: 14, minHeight: 52, marginTop: 18, paddingHorizontal: 16, fontSize: 16 }, quickSearches: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 12 }, quickSearch: { minHeight: 26, justifyContent: "center", paddingHorizontal: 9, paddingVertical: 4, borderRadius: 13, borderWidth: 1, borderColor: "rgba(255,255,255,0.28)", backgroundColor: "rgba(255,255,255,0.08)" }, quickSearchActive: { backgroundColor: colors.orange, borderColor: colors.orange }, quickSearchText: { color: "#D8EEFA", fontSize: 11, lineHeight: 14, fontWeight: "700" }, quickSearchTextActive: { color: "white" },
   sectionTitle: { fontSize: 20, fontWeight: "800", color: colors.navy, marginBottom: 12 }, card: { backgroundColor: "white", borderRadius: 18, borderWidth: 1, borderColor: colors.line, padding: 15, marginBottom: 12, flexDirection: "row" }, avatar: { width: 52, height: 52, borderRadius: 16, backgroundColor: "#DDF0F7", alignItems: "center", justifyContent: "center", marginRight: 13 }, avatarText: { color: colors.navy, fontWeight: "900" }, cardBody: { flex: 1 }, row: { flexDirection: "row", justifyContent: "space-between", gap: 8 }, name: { color: colors.navy, fontSize: 17, fontWeight: "800", flex: 1 }, rating: { color: colors.navy, fontWeight: "700" }, trade: { color: colors.blue, fontWeight: "700", marginTop: 2 }, skills: { color: colors.stone, marginTop: 6 }, badge: { color: colors.green, fontSize: 12, fontWeight: "700", marginTop: 7 }, button: { backgroundColor: colors.orange, borderRadius: 12, paddingVertical: 11, alignItems: "center", marginTop: 12 }, buttonText: { color: "white", fontWeight: "800" },
   empty: { minHeight: 360, justifyContent: "center", alignItems: "center", padding: 28 }, emptyTitle: { color: colors.navy, fontSize: 22, fontWeight: "900", textAlign: "center" }, catLarge: { fontSize: 58, marginBottom: 14 }, secondaryButton: { marginTop: 20, borderWidth: 1, borderColor: colors.blue, borderRadius: 12, paddingVertical: 12, paddingHorizontal: 18 }, secondaryText: { color: colors.blue, fontWeight: "800" },
+  sectionPage: { width: "100%", maxWidth: 760, alignSelf: "center" }, pageTitle: { color: colors.navy, fontSize: 28, fontWeight: "900" }, pageCopy: { color: colors.stone, fontSize: 15, lineHeight: 21, marginTop: 5, marginBottom: 18 }, emptyPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 20, padding: 26, alignItems: "center", marginTop: 8 }, emptyIcon: { fontSize: 48, marginBottom: 12 }, centerCopy: { color: colors.stone, textAlign: "center", lineHeight: 21, marginTop: 8, maxWidth: 430 },
+  workCard: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 17, marginTop: 12 }, workCardTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }, workStatus: { color: colors.orange, fontSize: 12, fontWeight: "900" }, workDate: { color: colors.stone, fontSize: 12 }, workProvider: { color: colors.navy, fontSize: 19, fontWeight: "900", marginTop: 12 }, workDescription: { color: colors.stone, lineHeight: 20, marginTop: 10 }, workMeta: { color: colors.navy, fontSize: 13, marginTop: 7 }, nextStep: { backgroundColor: "#FFF3E8", borderRadius: 10, padding: 11, marginTop: 13 }, nextStepText: { color: "#9A4700", fontSize: 12, fontWeight: "700" },
+  accountCard: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 16, flexDirection: "row", alignItems: "center", marginTop: 8 }, profileAvatar: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.navy, alignItems: "center", justifyContent: "center", marginRight: 13 }, profileAvatarText: { color: "white", fontSize: 23, fontWeight: "900" }, accountBody: { flex: 1 }, accountName: { color: colors.navy, fontSize: 18, fontWeight: "900" }, accountEmail: { color: colors.stone, marginTop: 2 }, localBadge: { color: colors.green, fontSize: 11, fontWeight: "800", marginTop: 7 }, providerPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 17, marginTop: 14 }, panelEyebrow: { color: colors.stone, fontSize: 11, fontWeight: "900" }, publishedBadge: { color: colors.green, backgroundColor: "#E7F7F0", borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4, fontSize: 11, fontWeight: "900" }, providerTrade: { color: colors.navy, fontSize: 21, fontWeight: "900", marginTop: 13 }, skillsLine: { color: colors.blue, fontSize: 13, fontWeight: "700", marginTop: 10 }, providerInvite: { backgroundColor: colors.navy, borderRadius: 20, padding: 20, marginTop: 14 }, providerInviteTitle: { color: "white", fontSize: 20, fontWeight: "900" }, logoutButton: { alignSelf: "center", padding: 14, marginTop: 13 }, logoutText: { color: "#B7452B", fontWeight: "800" },
   toast: { position: "absolute", bottom: 72, left: 18, right: 18, backgroundColor: colors.green, borderRadius: 14, padding: 14, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, toastText: { color: "white", fontWeight: "700", flex: 1 }, toastClose: { color: "white", textDecorationLine: "underline", marginLeft: 12 }, nav: { position: "absolute", bottom: 0, left: 0, right: 0, height: 66, backgroundColor: "white", borderTopWidth: 1, borderTopColor: colors.line, flexDirection: "row" }, navItem: { flex: 1, alignItems: "center", justifyContent: "center" }, navText: { color: colors.stone, fontWeight: "700" }, navActive: { color: colors.orange },
   modalBackdrop: { flex: 1, backgroundColor: "rgba(0,19,40,0.62)", justifyContent: "flex-end" }, modalCard: { backgroundColor: "white", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 22, paddingBottom: 30, maxHeight: "92%" }, modalClose: { position: "absolute", right: 18, top: 12, zIndex: 2, width: 36, height: 36, borderRadius: 18, backgroundColor: "#EEF5F8", alignItems: "center", justifyContent: "center" }, modalCloseText: { color: colors.navy, fontSize: 27, lineHeight: 29 }, modalTitle: { color: colors.navy, fontSize: 24, fontWeight: "900", marginTop: 4, paddingRight: 36 }, modalCopy: { color: colors.stone, fontSize: 14, lineHeight: 20, marginTop: 6, marginBottom: 14 }, modalInput: { minHeight: 48, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 14, color: colors.navy, fontSize: 15, marginBottom: 10, backgroundColor: "#FBFDFE" }, multiline: { minHeight: 88, paddingTop: 13, textAlignVertical: "top" }, modalLabel: { color: colors.navy, fontSize: 13, fontWeight: "800", marginTop: 2, marginBottom: 8 }, roleRow: { flexDirection: "row", gap: 8, marginBottom: 12 }, roleChoice: { flex: 1, minHeight: 42, borderWidth: 1, borderColor: colors.line, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 }, roleChoiceActive: { borderColor: colors.blue, backgroundColor: "#E8F6FD" }, roleChoiceText: { color: colors.stone, fontSize: 12, fontWeight: "800" }, roleChoiceTextActive: { color: colors.navy }, termsRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 }, checkbox: { color: colors.orange, fontSize: 22, marginRight: 7 }, termsText: { color: colors.stone, fontSize: 12, flex: 1 }, modalError: { color: "#BF4525", fontSize: 13, fontWeight: "700", marginBottom: 10 }, modalPrimary: { minHeight: 50, borderRadius: 12, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", marginTop: 4 }, modalPrimaryText: { color: "white", fontSize: 15, fontWeight: "900" }, modalSwitch: { color: colors.blue, fontWeight: "800", textAlign: "center", marginTop: 15 }, privacyHint: { color: colors.stone, fontSize: 12, lineHeight: 17, marginBottom: 10 },
+  stepLabel: { color: colors.orange, fontSize: 11, fontWeight: "900", letterSpacing: 0.7, marginTop: 2 }, progressTrack: { height: 5, borderRadius: 3, backgroundColor: "#E4EDF2", marginTop: 9, marginBottom: 15, overflow: "hidden" }, progressFill: { height: 5, borderRadius: 3, backgroundColor: colors.orange }, reviewBox: { backgroundColor: "#EEF7FB", borderRadius: 12, padding: 13, marginBottom: 10 }, reviewTitle: { color: colors.navy, fontWeight: "900", marginBottom: 4 }, reviewText: { color: colors.stone, fontSize: 12, lineHeight: 17 }, wizardActions: { flexDirection: "row", gap: 9, alignItems: "center" }, wizardBack: { minHeight: 50, minWidth: 86, borderRadius: 12, borderWidth: 1, borderColor: colors.blue, alignItems: "center", justifyContent: "center", marginTop: 4 }, wizardBackText: { color: colors.blue, fontWeight: "900" }, wizardPrimary: { flex: 1 },
 });

@@ -40,7 +40,7 @@ npx supabase start
 npx supabase db reset
 ```
 
-Copiá `.env.example` como `.env.local` en cada aplicación y completá la URL local y la clave `anon` que muestra Supabase. La interfaz demo funciona aunque no lo hagas; las operaciones persistentes requieren esta conexión.
+Copiá `.env.example` como `.env.local` en cada aplicación y completá la URL local y la clave `anon` que muestra Supabase. La interfaz demo funciona aunque no lo hagas: sesión demo, solicitudes y perfil profesional se guardan en el dispositivo. Cuando las variables están configuradas, queda disponible el cliente de Supabase con sesión persistente para conectar los flujos reales.
 
 ## Verificación
 
