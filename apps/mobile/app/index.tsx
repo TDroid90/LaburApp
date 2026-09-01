@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { Image, Modal, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from "react-native";
-import { loadLocalState, saveLocalState, SavedProviderProfile, SavedRequest, SavedSession } from "../lib/local-store";
+import type { ReactNode } from "react";
+import { Image, Modal, Platform, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from "react-native";
+import { containsContactAttempt, reviewIsEligible } from "@laburapp/shared";
+import { applyDemoAction, createDemoScenarios, DemoAction, primaryActionFor, statusPresentation } from "../lib/demo-flow";
+import { loadLocalState, saveLocalState, SavedMessage, SavedProviderProfile, SavedRequest, SavedSession } from "../lib/local-store";
 import { backendMode } from "../lib/supabase";
 
 const providers = [
@@ -63,12 +66,18 @@ type Provider = typeof providers[number];
 const colors = { navy: "#063C78", blue: "#078EE9", cyan: "#39BCEB", snow: "#F4FAFD", stone: "#5E7183", orange: "#FF7800", green: "#16825B", line: "#D6E8F2" };
 const officialWordmark = require("../assets/brand/laburapp-wordmark-clean.png");
 
+function AppModal({ visible, onRequestClose, children }: { visible: boolean; onRequestClose: () => void; children: ReactNode }) {
+  if (!visible) return null;
+  if (Platform.OS === "web") return <>{children}</>;
+  return <Modal visible transparent animationType="slide" onRequestClose={onRequestClose}>{children}</Modal>;
+}
+
 export default function Home() {
   const { width } = useWindowDimensions();
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState("Inicio");
   const [requested, setRequested] = useState<string | null>(null);
-  const [authMode, setAuthMode] = useState<"login" | "register" | null>(null);
+  const [authMode, setAuthMode] = useState<"login" | "register" | "recovery" | null>(null);
   const [signedInName, setSignedInName] = useState<string | null>(null);
   const [session, setSession] = useState<SavedSession | null>(null);
   const [requests, setRequests] = useState<SavedRequest[]>([]);
@@ -88,6 +97,13 @@ export default function Home() {
   const [profileStep, setProfileStep] = useState(1);
   const [profileDraft, setProfileDraft] = useState<SavedProviderProfile>({ displayName: "", city: "", trade: "", bio: "", skills: "", zones: "", availability: "", published: false });
   const [profileError, setProfileError] = useState("");
+  const [chatRequestId, setChatRequestId] = useState<string | null>(null);
+  const [chatMessage, setChatMessage] = useState("");
+  const [chatError, setChatError] = useState("");
+  const [reviewRequestId, setReviewRequestId] = useState<string | null>(null);
+  const [reviewRating, setReviewRating] = useState(5);
+  const [reviewComment, setReviewComment] = useState("");
+  const [reviewError, setReviewError] = useState("");
   const compactHeader = width < 720;
   const authButtonLabel = signedInName ? `Hola, ${signedInName.split(" ")[0]}` : "Ingresar";
 
@@ -110,6 +126,10 @@ export default function Home() {
   function submitAuth() {
     setAuthError("");
     if (!authEmail.includes("@")) return setAuthError("Ingresá un correo válido.");
+    if (authMode === "recovery") {
+      setAuthMode(null); setRequested("Si el correo está registrado, vas a recibir las instrucciones para recuperar tu cuenta.");
+      return;
+    }
     if (authPassword.length < 6) return setAuthError("La contraseña debe tener al menos 6 caracteres.");
     if (authMode === "register" && authName.trim().length < 2) return setAuthError("Ingresá tu nombre y apellido.");
     if (authMode === "register" && !acceptedTerms) return setAuthError("Aceptá los términos y la política de privacidad para continuar.");
@@ -141,6 +161,15 @@ export default function Home() {
     setQuoteProvider(null); setQuoteDescription(""); setQuoteZone(""); setQuoteDate("");
   }
 
+  function startQuote(provider: Provider) {
+    if (!session) {
+      setAuthMode("register");
+      setRequested("Creá una cuenta o ingresá para solicitar un presupuesto.");
+      return;
+    }
+    setQuoteProvider(provider);
+  }
+
   function openProviderProfile() {
     if (!session) { setAuthMode("register"); setAuthRole("provider"); return; }
     setProfileDraft(providerProfile ?? { displayName: session.name, city: "", trade: "", bio: "", skills: "", zones: "", availability: "", published: false });
@@ -160,6 +189,46 @@ export default function Home() {
   function signOut() {
     setSession(null); setSignedInName(null); setTab("Inicio"); setRequested("Cerraste sesión en este dispositivo.");
   }
+
+  function updateRequest(id: string, updater: (request: SavedRequest) => SavedRequest) {
+    setRequests((current) => current.map((request) => request.id === id ? updater(request) : request));
+  }
+
+  function runDemoAction(id: string, action: DemoAction) {
+    try {
+      updateRequest(id, (request) => applyDemoAction(request, action));
+      setRequested(action === "pay" ? "Pago simulado aprobado y protegido." : "Estado del trabajo actualizado.");
+    } catch {
+      setRequested("No se pudo avanzar: el estado del trabajo cambió.");
+    }
+  }
+
+  function loadSimulations() {
+    setRequests((current) => [...createDemoScenarios(), ...current]);
+    setRequested("Se cargaron tres casos para probar presupuestos, pagos y estados.");
+  }
+
+  function sendChatMessage() {
+    const body = chatMessage.trim();
+    setChatError("");
+    if (!chatRequestId || !body) return setChatError("Escribí un mensaje para enviarlo.");
+    if (containsContactAttempt(body)) return setChatError("Por seguridad, no compartas teléfonos, correos, redes ni enlaces antes de contratar.");
+    const message: SavedMessage = { id: `${Date.now()}-client`, sender: "client", body, createdAt: new Date().toISOString() };
+    updateRequest(chatRequestId, (request) => ({ ...request, messages: [...(request.messages ?? []), message] }));
+    setChatMessage("");
+  }
+
+  function submitReview() {
+    const request = requests.find((item) => item.id === reviewRequestId);
+    setReviewError("");
+    if (!request || !reviewIsEligible({ isClient: true, paidInApp: !!request.payment?.protected, status: request.status, alreadyReviewed: !!request.review })) return setReviewError("Esta reseña todavía no está habilitada.");
+    if (reviewComment.trim().length < 5) return setReviewError("Contá brevemente cómo fue el trabajo.");
+    updateRequest(request.id, (item) => ({ ...item, review: { rating: reviewRating, comment: reviewComment.trim(), createdAt: new Date().toISOString() } }));
+    setReviewRequestId(null); setReviewComment(""); setReviewRating(5); setRequested("Reseña verificada publicada.");
+  }
+
+  const chatRequest = requests.find((request) => request.id === chatRequestId) ?? null;
+  const reviewRequest = requests.find((request) => request.id === reviewRequestId) ?? null;
   const filtered = useMemo(() => providers.filter((p) => `${p.name} ${p.trade} ${p.city} ${p.skills}`.toLowerCase().includes(query.toLowerCase())), [query]);
 
   return <SafeAreaView style={styles.safe}>
@@ -191,26 +260,48 @@ export default function Home() {
             <Text style={styles.trade}>{provider.trade} · {provider.city}</Text>
             <Text style={styles.skills}>{provider.skills}</Text>
             <Text style={styles.badge}>✓ {provider.badge} · {provider.jobs} trabajos</Text>
-            <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => setQuoteProvider(provider)}><Text style={styles.buttonText}>Solicitar presupuesto</Text></TouchableOpacity>
+            <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => startQuote(provider)}><Text style={styles.buttonText}>Solicitar presupuesto</Text></TouchableOpacity>
           </View>
         </View>)}
         {filtered.length === 0 && <View style={styles.empty}><Text style={styles.emptyTitle}>Tito no encontró coincidencias</Text><Text style={styles.heroCopy}>Probá con “gasista”, “plomería” o una ciudad.</Text></View>}
       </> : tab === "Trabajos" ? <View style={styles.sectionPage}>
         <Text style={styles.pageTitle}>Mis trabajos</Text>
         <Text style={styles.pageCopy}>Seguí en un solo lugar tus solicitudes, presupuestos y trabajos activos.</Text>
+        <View style={styles.simulatorBanner}><View style={styles.simulatorCopy}><Text style={styles.simulatorTitle}>Simulador del PMV</Text><Text style={styles.simulatorText}>Cargá casos ficticios para recorrer el circuito sin pagos ni operaciones reales.</Text></View><TouchableOpacity accessibilityRole="button" style={styles.simulatorButton} onPress={loadSimulations}><Text style={styles.simulatorButtonText}>Cargar 3 casos</Text></TouchableOpacity></View>
         {requests.length === 0 ? <View style={styles.emptyPanel}>
           <Text style={styles.emptyIcon}>🧰</Text><Text style={styles.emptyTitle}>Todavía no hay solicitudes</Text>
           <Text style={styles.centerCopy}>Elegí un profesional y pedile presupuesto. La solicitud va a aparecer acá.</Text>
           <TouchableOpacity style={styles.secondaryButton} onPress={() => setTab("Inicio")}><Text style={styles.secondaryText}>Buscar profesionales</Text></TouchableOpacity>
-        </View> : requests.map((request) => <View key={request.id} style={styles.workCard}>
-          <View style={styles.workCardTop}><Text style={styles.workStatus}>● Solicitud enviada</Text><Text style={styles.workDate}>{new Date(request.createdAt).toLocaleDateString("es-AR")}</Text></View>
-          <Text style={styles.workProvider}>{request.provider}</Text>
-          <Text style={styles.trade}>{request.trade}</Text>
-          <Text style={styles.workDescription}>{request.description}</Text>
-          {!!request.zone && <Text style={styles.workMeta}>Zona: {request.zone}</Text>}
-          {!!request.desiredAt && <Text style={styles.workMeta}>Cuándo: {request.desiredAt}</Text>}
-          <View style={styles.nextStep}><Text style={styles.nextStepText}>Próximo paso: el profesional responde con un presupuesto.</Text></View>
-        </View>)}
+        </View> : requests.map((request) => {
+          const presentation = statusPresentation[request.status];
+          const primary = primaryActionFor(request.status);
+          return <View key={request.id} style={styles.workCard}>
+            <View style={styles.workCardTop}><Text style={[styles.workStatus, presentation.tone === "green" && styles.statusGreen, presentation.tone === "blue" && styles.statusBlue, presentation.tone === "red" && styles.statusRed]}>● {presentation.label}</Text><Text style={styles.workDate}>{new Date(request.createdAt).toLocaleDateString("es-AR")}</Text></View>
+            <Text style={styles.workProvider}>{request.provider}</Text>
+            <Text style={styles.trade}>{request.trade}</Text>
+            <Text style={styles.workDescription}>{request.description}</Text>
+            {!!request.zone && <Text style={styles.workMeta}>Zona: {request.zone}</Text>}
+            {!!request.desiredAt && <Text style={styles.workMeta}>Cuándo: {request.desiredAt}</Text>}
+            {request.quote && <View style={styles.quoteBox}>
+              <View style={styles.workCardTop}><Text style={styles.quoteLabel}>PRESUPUESTO · VERSIÓN {request.quote.version}</Text><Text style={styles.quoteAmount}>${request.quote.amount.toLocaleString("es-AR")}</Text></View>
+              <Text style={styles.quoteScope}>{request.quote.scope}</Text><Text style={styles.quoteEta}>{request.quote.eta}</Text>
+            </View>}
+            {request.payment?.protected && <View style={styles.paymentBox}><Text style={styles.paymentTitle}>🛡 Pago protegido (simulado)</Text><Text style={styles.paymentText}>Total ${request.payment.total.toLocaleString("es-AR")} · comisión ${request.payment.fee.toLocaleString("es-AR")} · recibe el profesional ${request.payment.providerNet.toLocaleString("es-AR")}</Text></View>}
+            {!!request.messages?.length && <Text style={styles.lastMessage}>Último mensaje: “{request.messages[request.messages.length - 1].body}”</Text>}
+            <View style={styles.nextStep}><Text style={styles.nextStepText}>Próximo paso: {presentation.next}</Text></View>
+            {request.status === "quote_sent" && <View style={styles.actionRow}>
+              <TouchableOpacity accessibilityRole="button" style={styles.outlineAction} onPress={() => runDemoAction(request.id, "request_revision")}><Text style={styles.outlineActionText}>Pedir cambios</Text></TouchableOpacity>
+              <TouchableOpacity accessibilityRole="button" style={styles.primaryAction} onPress={() => runDemoAction(request.id, "accept_quote")}><Text style={styles.primaryActionText}>Aceptar presupuesto</Text></TouchableOpacity>
+            </View>}
+            {primary && <TouchableOpacity accessibilityRole="button" style={styles.primaryActionFull} onPress={() => runDemoAction(request.id, primary.action)}><Text style={styles.primaryActionText}>{primary.label}</Text></TouchableOpacity>}
+            {request.status === "funds_released" && !request.review && <TouchableOpacity accessibilityRole="button" style={styles.primaryActionFull} onPress={() => { setReviewRequestId(request.id); setReviewError(""); }}><Text style={styles.primaryActionText}>Dejar reseña verificada</Text></TouchableOpacity>}
+            {request.review && <View style={styles.reviewPublished}><Text style={styles.reviewStars}>{"★".repeat(request.review.rating)}{"☆".repeat(5 - request.review.rating)}</Text><Text style={styles.reviewPublishedText}>“{request.review.comment}”</Text><Text style={styles.verifiedReview}>✓ Reseña de un trabajo pagado en LaburApp</Text></View>}
+            <View style={styles.cardLinks}>
+              <TouchableOpacity accessibilityRole="button" onPress={() => { setChatRequestId(request.id); setChatError(""); }}><Text style={styles.cardLink}>Abrir conversación ({request.messages?.filter((message) => message.sender !== "system").length ?? 0})</Text></TouchableOpacity>
+              {request.status === "request_sent" && <TouchableOpacity accessibilityRole="button" onPress={() => runDemoAction(request.id, "cancel")}><Text style={styles.cancelLink}>Cancelar solicitud</Text></TouchableOpacity>}
+            </View>
+          </View>;
+        })}
       </View> : <View style={styles.sectionPage}>
         <Text style={styles.pageTitle}>Mi perfil</Text>
         {!session ? <View style={styles.emptyPanel}>
@@ -241,27 +332,28 @@ export default function Home() {
       </View>}
     </ScrollView>
     {requested && <View style={styles.toast}><Text style={styles.toastText}>{requested}</Text><TouchableOpacity onPress={() => setRequested(null)}><Text style={styles.toastClose}>Cerrar</Text></TouchableOpacity></View>}
-    <Modal visible={authMode !== null} transparent animationType="slide" onRequestClose={() => setAuthMode(null)}>
+    <AppModal visible={authMode !== null} onRequestClose={() => setAuthMode(null)}>
       <View style={styles.modalBackdrop}><View style={styles.modalCard}>
-        <TouchableOpacity style={styles.modalClose} onPress={() => setAuthMode(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
-        <Text style={styles.modalTitle}>{authMode === "login" ? "Ingresá a LaburApp" : "Creá tu cuenta"}</Text>
-        <Text style={styles.modalCopy}>{authMode === "login" ? "Continuá con tu cuenta demo para probar el flujo." : "Una cuenta sirve para contratar y ofrecer servicios."}</Text>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar" style={styles.modalClose} onPress={() => setAuthMode(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+        <Text style={styles.modalTitle}>{authMode === "login" ? "Ingresá a LaburApp" : authMode === "recovery" ? "Recuperá tu cuenta" : "Creá tu cuenta"}</Text>
+        <Text style={styles.modalCopy}>{authMode === "login" ? "Continuá con tu cuenta demo para probar el flujo." : authMode === "recovery" ? "Ingresá tu correo y te enviaremos instrucciones. En el modo demo no se envía ningún correo real." : "Una cuenta sirve para contratar y ofrecer servicios."}</Text>
         {authMode === "register" && <TextInput value={authName} onChangeText={setAuthName} placeholder="Nombre y apellido" placeholderTextColor="#71818B" style={styles.modalInput} />}
         <TextInput value={authEmail} onChangeText={setAuthEmail} autoCapitalize="none" keyboardType="email-address" placeholder="Correo electrónico" placeholderTextColor="#71818B" style={styles.modalInput} />
-        <TextInput value={authPassword} onChangeText={setAuthPassword} secureTextEntry placeholder="Contraseña (6 caracteres mínimo)" placeholderTextColor="#71818B" style={styles.modalInput} />
+        {authMode !== "recovery" && <TextInput value={authPassword} onChangeText={setAuthPassword} secureTextEntry placeholder="Contraseña (6 caracteres mínimo)" placeholderTextColor="#71818B" style={styles.modalInput} />}
         {authMode === "register" && <>
           <Text style={styles.modalLabel}>¿Cómo vas a usar LaburApp?</Text>
           <View style={styles.roleRow}>{[["client", "Quiero contratar"], ["provider", "Quiero ofrecer"]].map(([value, label]) => <TouchableOpacity key={value} onPress={() => setAuthRole(value as "client" | "provider")} style={[styles.roleChoice, authRole === value && styles.roleChoiceActive]}><Text style={[styles.roleChoiceText, authRole === value && styles.roleChoiceTextActive]}>{label}</Text></TouchableOpacity>)}</View>
           <TouchableOpacity accessibilityRole="checkbox" accessibilityState={{ checked: acceptedTerms }} onPress={() => setAcceptedTerms(!acceptedTerms)} style={styles.termsRow}><Text style={styles.checkbox}>{acceptedTerms ? "☑" : "☐"}</Text><Text style={styles.termsText}>Acepto los términos y la política de privacidad.</Text></TouchableOpacity>
         </>}
         {!!authError && <Text style={styles.modalError}>{authError}</Text>}
-        <TouchableOpacity style={styles.modalPrimary} onPress={submitAuth}><Text style={styles.modalPrimaryText}>{authMode === "login" ? "Ingresar" : "Crear cuenta demo"}</Text></TouchableOpacity>
-        <TouchableOpacity onPress={() => { setAuthError(""); setAuthMode(authMode === "login" ? "register" : "login"); }}><Text style={styles.modalSwitch}>{authMode === "login" ? "¿No tenés cuenta? Registrate" : "¿Ya tenés cuenta? Ingresá"}</Text></TouchableOpacity>
+        <TouchableOpacity accessibilityRole="button" style={styles.modalPrimary} onPress={submitAuth}><Text style={styles.modalPrimaryText}>{authMode === "login" ? "Ingresar" : authMode === "recovery" ? "Enviar instrucciones" : "Crear cuenta demo"}</Text></TouchableOpacity>
+        {authMode === "login" && <TouchableOpacity accessibilityRole="button" onPress={() => { setAuthError(""); setAuthMode("recovery"); }}><Text style={styles.recoveryLink}>Olvidé mi contraseña</Text></TouchableOpacity>}
+        <TouchableOpacity accessibilityRole="button" onPress={() => { setAuthError(""); setAuthMode(authMode === "login" ? "register" : "login"); }}><Text style={styles.modalSwitch}>{authMode === "login" ? "¿No tenés cuenta? Registrate" : authMode === "recovery" ? "Volver a ingresar" : "¿Ya tenés cuenta? Ingresá"}</Text></TouchableOpacity>
       </View></View>
-    </Modal>
-    <Modal visible={profileModal} transparent animationType="slide" onRequestClose={() => setProfileModal(false)}>
+    </AppModal>
+    <AppModal visible={profileModal} onRequestClose={() => setProfileModal(false)}>
       <View style={styles.modalBackdrop}><View style={styles.modalCard}>
-        <TouchableOpacity style={styles.modalClose} onPress={() => setProfileModal(false)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar" style={styles.modalClose} onPress={() => setProfileModal(false)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
         <Text style={styles.stepLabel}>PASO {profileStep} DE 3</Text>
         <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${profileStep * 33.333}%` }]} /></View>
         <Text style={styles.modalTitle}>{profileStep === 1 ? "Tu información básica" : profileStep === 2 ? "Tu experiencia" : "Dónde y cuándo trabajás"}</Text>
@@ -281,22 +373,51 @@ export default function Home() {
           <View style={styles.reviewBox}><Text style={styles.reviewTitle}>Antes de publicar</Text><Text style={styles.reviewText}>No incluyas teléfono, correo ni domicilio. Más adelante vas a poder sumar fotos y documentación para verificar tu perfil.</Text></View>
         </>}
         {!!profileError && <Text style={styles.modalError}>{profileError}</Text>}
-        <View style={styles.wizardActions}>{profileStep > 1 && <TouchableOpacity style={styles.wizardBack} onPress={() => { setProfileError(""); setProfileStep((step) => step - 1); }}><Text style={styles.wizardBackText}>Atrás</Text></TouchableOpacity>}<TouchableOpacity style={[styles.modalPrimary, styles.wizardPrimary]} onPress={advanceProfile}><Text style={styles.modalPrimaryText}>{profileStep === 3 ? "Publicar perfil" : "Continuar"}</Text></TouchableOpacity></View>
+        <View style={styles.wizardActions}>{profileStep > 1 && <TouchableOpacity accessibilityRole="button" style={styles.wizardBack} onPress={() => { setProfileError(""); setProfileStep((step) => step - 1); }}><Text style={styles.wizardBackText}>Atrás</Text></TouchableOpacity>}<TouchableOpacity accessibilityRole="button" style={[styles.modalPrimary, styles.wizardPrimary]} onPress={advanceProfile}><Text style={styles.modalPrimaryText}>{profileStep === 3 ? "Publicar perfil" : "Continuar"}</Text></TouchableOpacity></View>
       </View></View>
-    </Modal>
-    <Modal visible={quoteProvider !== null} transparent animationType="slide" onRequestClose={() => setQuoteProvider(null)}>
+    </AppModal>
+    <AppModal visible={quoteProvider !== null} onRequestClose={() => setQuoteProvider(null)}>
       <View style={styles.modalBackdrop}><View style={styles.modalCard}>
-        <TouchableOpacity style={styles.modalClose} onPress={() => setQuoteProvider(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar" style={styles.modalClose} onPress={() => setQuoteProvider(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
         <Text style={styles.modalTitle}>Solicitar presupuesto</Text>
         <Text style={styles.modalCopy}>{quoteProvider ? `${quoteProvider.name} · ${quoteProvider.trade}` : ""}</Text>
         <TextInput multiline value={quoteDescription} onChangeText={setQuoteDescription} placeholder="¿Qué necesitás resolver?" placeholderTextColor="#71818B" style={[styles.modalInput, styles.multiline]} />
         <TextInput value={quoteZone} onChangeText={setQuoteZone} placeholder="Zona aproximada (sin dirección exacta)" placeholderTextColor="#71818B" style={styles.modalInput} />
         <TextInput value={quoteDate} onChangeText={setQuoteDate} placeholder="Fecha o franja horaria (opcional)" placeholderTextColor="#71818B" style={styles.modalInput} />
         <Text style={styles.privacyHint}>No compartas teléfono, correo ni dirección exacta antes de contratar.</Text>
-        <TouchableOpacity style={styles.modalPrimary} onPress={submitQuote}><Text style={styles.modalPrimaryText}>Enviar solicitud</Text></TouchableOpacity>
+        <TouchableOpacity accessibilityRole="button" style={styles.modalPrimary} onPress={submitQuote}><Text style={styles.modalPrimaryText}>Enviar solicitud</Text></TouchableOpacity>
       </View></View>
-    </Modal>
-    <View style={styles.nav}>{["Inicio", "Trabajos", "Perfil"].map((item) => <TouchableOpacity key={item} onPress={() => setTab(item)} style={styles.navItem}><Text style={[styles.navText, tab === item && styles.navActive]}>{item}</Text></TouchableOpacity>)}</View>
+    </AppModal>
+    <AppModal visible={chatRequest !== null} onRequestClose={() => setChatRequestId(null)}>
+      <View style={styles.modalBackdrop}><View style={styles.modalCard}>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar" style={styles.modalClose} onPress={() => setChatRequestId(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+        <Text style={styles.modalTitle}>Conversación</Text>
+        <Text style={styles.modalCopy}>{chatRequest ? `${chatRequest.provider} · ${chatRequest.trade}` : ""}</Text>
+        <ScrollView style={styles.messagesList} contentContainerStyle={styles.messagesContent}>
+          {!chatRequest?.messages?.length && <View style={styles.chatEmpty}><Text style={styles.chatEmptyTitle}>Todavía no hay mensajes</Text><Text style={styles.reviewText}>Usá este espacio para aclarar el trabajo sin compartir datos de contacto.</Text></View>}
+          {chatRequest?.messages?.map((message) => <View key={message.id} style={[styles.messageBubble, message.sender === "client" ? styles.messageClient : message.sender === "provider" ? styles.messageProvider : styles.messageSystem]}>
+            <Text style={styles.messageSender}>{message.sender === "client" ? "Vos" : message.sender === "provider" ? chatRequest.provider : "LaburApp"}</Text><Text style={styles.messageBody}>{message.body}</Text>
+          </View>)}
+        </ScrollView>
+        <TextInput multiline value={chatMessage} onChangeText={setChatMessage} placeholder="Escribí un mensaje" placeholderTextColor="#71818B" style={[styles.modalInput, styles.chatInput]} />
+        <Text style={styles.privacyHint}>LaburApp bloquea teléfonos, correos, redes y enlaces para proteger la contratación.</Text>
+        {!!chatError && <Text style={styles.modalError}>{chatError}</Text>}
+        <TouchableOpacity accessibilityRole="button" style={styles.modalPrimary} onPress={sendChatMessage}><Text style={styles.modalPrimaryText}>Enviar mensaje</Text></TouchableOpacity>
+      </View></View>
+    </AppModal>
+    <AppModal visible={reviewRequest !== null} onRequestClose={() => setReviewRequestId(null)}>
+      <View style={styles.modalBackdrop}><View style={styles.modalCard}>
+        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar" style={styles.modalClose} onPress={() => setReviewRequestId(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+        <Text style={styles.modalTitle}>Calificá el trabajo</Text>
+        <Text style={styles.modalCopy}>{reviewRequest ? `Tu experiencia con ${reviewRequest.provider}` : ""}</Text>
+        <View style={styles.starsRow}>{[1, 2, 3, 4, 5].map((rating) => <TouchableOpacity key={rating} accessibilityRole="button" accessibilityLabel={`${rating} estrellas`} onPress={() => setReviewRating(rating)}><Text style={[styles.starChoice, rating <= reviewRating && styles.starChoiceActive]}>★</Text></TouchableOpacity>)}</View>
+        <TextInput multiline value={reviewComment} onChangeText={setReviewComment} placeholder="¿Cómo fue el trabajo?" placeholderTextColor="#71818B" style={[styles.modalInput, styles.multiline]} />
+        <View style={styles.reviewBox}><Text style={styles.reviewTitle}>Reseña verificada</Text><Text style={styles.reviewText}>Solo se publica porque el trabajo fue pagado y finalizado dentro de la simulación de LaburApp.</Text></View>
+        {!!reviewError && <Text style={styles.modalError}>{reviewError}</Text>}
+        <TouchableOpacity accessibilityRole="button" style={styles.modalPrimary} onPress={submitReview}><Text style={styles.modalPrimaryText}>Publicar reseña</Text></TouchableOpacity>
+      </View></View>
+    </AppModal>
+    <View style={styles.nav}>{["Inicio", "Trabajos", "Perfil"].map((item) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={item} key={item} onPress={() => setTab(item)} style={styles.navItem}><Text style={[styles.navText, tab === item && styles.navActive]}>{item}</Text></TouchableOpacity>)}</View>
   </SafeAreaView>;
 }
 
@@ -307,10 +428,11 @@ const styles = StyleSheet.create({
   content: { padding: 18, paddingBottom: 110 }, hero: { backgroundColor: colors.navy, borderRadius: 24, padding: 22, marginBottom: 24 }, heroTitle: { color: "white", fontSize: 30, lineHeight: 34, fontWeight: "900" }, heroCopy: { color: "#D6E6EE", fontSize: 15, lineHeight: 21, marginTop: 8 }, search: { backgroundColor: "white", color: colors.navy, borderRadius: 14, minHeight: 52, marginTop: 18, paddingHorizontal: 16, fontSize: 16 }, quickSearches: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 12 }, quickSearch: { minHeight: 26, justifyContent: "center", paddingHorizontal: 9, paddingVertical: 4, borderRadius: 13, borderWidth: 1, borderColor: "rgba(255,255,255,0.28)", backgroundColor: "rgba(255,255,255,0.08)" }, quickSearchActive: { backgroundColor: colors.orange, borderColor: colors.orange }, quickSearchText: { color: "#D8EEFA", fontSize: 11, lineHeight: 14, fontWeight: "700" }, quickSearchTextActive: { color: "white" },
   sectionTitle: { fontSize: 20, fontWeight: "800", color: colors.navy, marginBottom: 12 }, card: { backgroundColor: "white", borderRadius: 18, borderWidth: 1, borderColor: colors.line, padding: 15, marginBottom: 12, flexDirection: "row" }, avatar: { width: 52, height: 52, borderRadius: 16, backgroundColor: "#DDF0F7", alignItems: "center", justifyContent: "center", marginRight: 13 }, avatarText: { color: colors.navy, fontWeight: "900" }, cardBody: { flex: 1 }, row: { flexDirection: "row", justifyContent: "space-between", gap: 8 }, name: { color: colors.navy, fontSize: 17, fontWeight: "800", flex: 1 }, rating: { color: colors.navy, fontWeight: "700" }, trade: { color: colors.blue, fontWeight: "700", marginTop: 2 }, skills: { color: colors.stone, marginTop: 6 }, badge: { color: colors.green, fontSize: 12, fontWeight: "700", marginTop: 7 }, button: { backgroundColor: colors.orange, borderRadius: 12, paddingVertical: 11, alignItems: "center", marginTop: 12 }, buttonText: { color: "white", fontWeight: "800" },
   empty: { minHeight: 360, justifyContent: "center", alignItems: "center", padding: 28 }, emptyTitle: { color: colors.navy, fontSize: 22, fontWeight: "900", textAlign: "center" }, catLarge: { fontSize: 58, marginBottom: 14 }, secondaryButton: { marginTop: 20, borderWidth: 1, borderColor: colors.blue, borderRadius: 12, paddingVertical: 12, paddingHorizontal: 18 }, secondaryText: { color: colors.blue, fontWeight: "800" },
-  sectionPage: { width: "100%", maxWidth: 760, alignSelf: "center" }, pageTitle: { color: colors.navy, fontSize: 28, fontWeight: "900" }, pageCopy: { color: colors.stone, fontSize: 15, lineHeight: 21, marginTop: 5, marginBottom: 18 }, emptyPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 20, padding: 26, alignItems: "center", marginTop: 8 }, emptyIcon: { fontSize: 48, marginBottom: 12 }, centerCopy: { color: colors.stone, textAlign: "center", lineHeight: 21, marginTop: 8, maxWidth: 430 },
-  workCard: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 17, marginTop: 12 }, workCardTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }, workStatus: { color: colors.orange, fontSize: 12, fontWeight: "900" }, workDate: { color: colors.stone, fontSize: 12 }, workProvider: { color: colors.navy, fontSize: 19, fontWeight: "900", marginTop: 12 }, workDescription: { color: colors.stone, lineHeight: 20, marginTop: 10 }, workMeta: { color: colors.navy, fontSize: 13, marginTop: 7 }, nextStep: { backgroundColor: "#FFF3E8", borderRadius: 10, padding: 11, marginTop: 13 }, nextStepText: { color: "#9A4700", fontSize: 12, fontWeight: "700" },
+  sectionPage: { width: "100%", maxWidth: 760, alignSelf: "center" }, pageTitle: { color: colors.navy, fontSize: 28, fontWeight: "900" }, pageCopy: { color: colors.stone, fontSize: 15, lineHeight: 21, marginTop: 5, marginBottom: 18 }, simulatorBanner: { backgroundColor: colors.navy, borderRadius: 17, padding: 15, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 }, simulatorCopy: { flex: 1 }, simulatorTitle: { color: "white", fontSize: 15, fontWeight: "900" }, simulatorText: { color: "#CFE5F0", fontSize: 11, lineHeight: 16, marginTop: 3 }, simulatorButton: { minHeight: 40, borderRadius: 10, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", paddingHorizontal: 12 }, simulatorButtonText: { color: "white", fontSize: 11, fontWeight: "900" }, emptyPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 20, padding: 26, alignItems: "center", marginTop: 8 }, emptyIcon: { fontSize: 48, marginBottom: 12 }, centerCopy: { color: colors.stone, textAlign: "center", lineHeight: 21, marginTop: 8, maxWidth: 430 },
+  workCard: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 17, marginTop: 12 }, workCardTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }, workStatus: { color: colors.orange, fontSize: 12, fontWeight: "900" }, statusGreen: { color: colors.green }, statusBlue: { color: colors.blue }, statusRed: { color: "#B7452B" }, workDate: { color: colors.stone, fontSize: 12 }, workProvider: { color: colors.navy, fontSize: 19, fontWeight: "900", marginTop: 12 }, workDescription: { color: colors.stone, lineHeight: 20, marginTop: 10 }, workMeta: { color: colors.navy, fontSize: 13, marginTop: 7 }, nextStep: { backgroundColor: "#FFF3E8", borderRadius: 10, padding: 11, marginTop: 13 }, nextStepText: { color: "#9A4700", fontSize: 12, fontWeight: "700" }, quoteBox: { borderWidth: 1, borderColor: "#B9DDEC", backgroundColor: "#F3FBFE", borderRadius: 13, padding: 13, marginTop: 13 }, quoteLabel: { color: colors.blue, fontSize: 11, fontWeight: "900" }, quoteAmount: { color: colors.navy, fontSize: 20, fontWeight: "900" }, quoteScope: { color: colors.navy, fontSize: 13, lineHeight: 18, marginTop: 8 }, quoteEta: { color: colors.stone, fontSize: 12, marginTop: 5 }, paymentBox: { backgroundColor: "#E7F7F0", borderRadius: 12, padding: 12, marginTop: 11 }, paymentTitle: { color: colors.green, fontWeight: "900", fontSize: 13 }, paymentText: { color: "#315F51", fontSize: 12, lineHeight: 17, marginTop: 4 }, lastMessage: { color: colors.stone, fontSize: 12, fontStyle: "italic", marginTop: 11 }, actionRow: { flexDirection: "row", gap: 8, marginTop: 12 }, outlineAction: { flex: 1, minHeight: 46, borderWidth: 1, borderColor: colors.blue, borderRadius: 11, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 }, outlineActionText: { color: colors.blue, fontSize: 12, fontWeight: "900", textAlign: "center" }, primaryAction: { flex: 1.25, minHeight: 46, borderRadius: 11, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 }, primaryActionFull: { minHeight: 46, borderRadius: 11, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", paddingHorizontal: 10, marginTop: 12 }, primaryActionText: { color: "white", fontSize: 12, fontWeight: "900", textAlign: "center" }, cardLinks: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", gap: 12, marginTop: 14 }, cardLink: { color: colors.blue, fontSize: 12, fontWeight: "800" }, cancelLink: { color: "#B7452B", fontSize: 12, fontWeight: "800" }, reviewPublished: { backgroundColor: "#F7FAFB", borderRadius: 12, padding: 12, marginTop: 12 }, reviewStars: { color: colors.orange, fontSize: 18, letterSpacing: 2 }, reviewPublishedText: { color: colors.navy, lineHeight: 19, marginTop: 5 }, verifiedReview: { color: colors.green, fontSize: 11, fontWeight: "800", marginTop: 7 },
   accountCard: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 16, flexDirection: "row", alignItems: "center", marginTop: 8 }, profileAvatar: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.navy, alignItems: "center", justifyContent: "center", marginRight: 13 }, profileAvatarText: { color: "white", fontSize: 23, fontWeight: "900" }, accountBody: { flex: 1 }, accountName: { color: colors.navy, fontSize: 18, fontWeight: "900" }, accountEmail: { color: colors.stone, marginTop: 2 }, localBadge: { color: colors.green, fontSize: 11, fontWeight: "800", marginTop: 7 }, providerPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 17, marginTop: 14 }, panelEyebrow: { color: colors.stone, fontSize: 11, fontWeight: "900" }, publishedBadge: { color: colors.green, backgroundColor: "#E7F7F0", borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4, fontSize: 11, fontWeight: "900" }, providerTrade: { color: colors.navy, fontSize: 21, fontWeight: "900", marginTop: 13 }, skillsLine: { color: colors.blue, fontSize: 13, fontWeight: "700", marginTop: 10 }, providerInvite: { backgroundColor: colors.navy, borderRadius: 20, padding: 20, marginTop: 14 }, providerInviteTitle: { color: "white", fontSize: 20, fontWeight: "900" }, logoutButton: { alignSelf: "center", padding: 14, marginTop: 13 }, logoutText: { color: "#B7452B", fontWeight: "800" },
   toast: { position: "absolute", bottom: 72, left: 18, right: 18, backgroundColor: colors.green, borderRadius: 14, padding: 14, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, toastText: { color: "white", fontWeight: "700", flex: 1 }, toastClose: { color: "white", textDecorationLine: "underline", marginLeft: 12 }, nav: { position: "absolute", bottom: 0, left: 0, right: 0, height: 66, backgroundColor: "white", borderTopWidth: 1, borderTopColor: colors.line, flexDirection: "row" }, navItem: { flex: 1, alignItems: "center", justifyContent: "center" }, navText: { color: colors.stone, fontWeight: "700" }, navActive: { color: colors.orange },
-  modalBackdrop: { flex: 1, backgroundColor: "rgba(0,19,40,0.62)", justifyContent: "flex-end" }, modalCard: { backgroundColor: "white", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 22, paddingBottom: 30, maxHeight: "92%" }, modalClose: { position: "absolute", right: 18, top: 12, zIndex: 2, width: 36, height: 36, borderRadius: 18, backgroundColor: "#EEF5F8", alignItems: "center", justifyContent: "center" }, modalCloseText: { color: colors.navy, fontSize: 27, lineHeight: 29 }, modalTitle: { color: colors.navy, fontSize: 24, fontWeight: "900", marginTop: 4, paddingRight: 36 }, modalCopy: { color: colors.stone, fontSize: 14, lineHeight: 20, marginTop: 6, marginBottom: 14 }, modalInput: { minHeight: 48, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 14, color: colors.navy, fontSize: 15, marginBottom: 10, backgroundColor: "#FBFDFE" }, multiline: { minHeight: 88, paddingTop: 13, textAlignVertical: "top" }, modalLabel: { color: colors.navy, fontSize: 13, fontWeight: "800", marginTop: 2, marginBottom: 8 }, roleRow: { flexDirection: "row", gap: 8, marginBottom: 12 }, roleChoice: { flex: 1, minHeight: 42, borderWidth: 1, borderColor: colors.line, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 }, roleChoiceActive: { borderColor: colors.blue, backgroundColor: "#E8F6FD" }, roleChoiceText: { color: colors.stone, fontSize: 12, fontWeight: "800" }, roleChoiceTextActive: { color: colors.navy }, termsRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 }, checkbox: { color: colors.orange, fontSize: 22, marginRight: 7 }, termsText: { color: colors.stone, fontSize: 12, flex: 1 }, modalError: { color: "#BF4525", fontSize: 13, fontWeight: "700", marginBottom: 10 }, modalPrimary: { minHeight: 50, borderRadius: 12, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", marginTop: 4 }, modalPrimaryText: { color: "white", fontSize: 15, fontWeight: "900" }, modalSwitch: { color: colors.blue, fontWeight: "800", textAlign: "center", marginTop: 15 }, privacyHint: { color: colors.stone, fontSize: 12, lineHeight: 17, marginBottom: 10 },
+  modalBackdrop: { position: Platform.OS === "web" ? ("fixed" as "absolute") : "absolute", top: 0, right: 0, bottom: 0, left: 0, zIndex: 1000, elevation: 20, backgroundColor: "rgba(0,19,40,0.62)", justifyContent: "flex-end" }, modalCard: { backgroundColor: "white", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 22, paddingBottom: 30, maxHeight: "92%" }, modalClose: { position: "absolute", right: 18, top: 12, zIndex: 2, width: 36, height: 36, borderRadius: 18, backgroundColor: "#EEF5F8", alignItems: "center", justifyContent: "center" }, modalCloseText: { color: colors.navy, fontSize: 27, lineHeight: 29 }, modalTitle: { color: colors.navy, fontSize: 24, fontWeight: "900", marginTop: 4, paddingRight: 36 }, modalCopy: { color: colors.stone, fontSize: 14, lineHeight: 20, marginTop: 6, marginBottom: 14 }, modalInput: { minHeight: 48, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 14, color: colors.navy, fontSize: 15, marginBottom: 10, backgroundColor: "#FBFDFE" }, multiline: { minHeight: 88, paddingTop: 13, textAlignVertical: "top" }, modalLabel: { color: colors.navy, fontSize: 13, fontWeight: "800", marginTop: 2, marginBottom: 8 }, roleRow: { flexDirection: "row", gap: 8, marginBottom: 12 }, roleChoice: { flex: 1, minHeight: 42, borderWidth: 1, borderColor: colors.line, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 }, roleChoiceActive: { borderColor: colors.blue, backgroundColor: "#E8F6FD" }, roleChoiceText: { color: colors.stone, fontSize: 12, fontWeight: "800" }, roleChoiceTextActive: { color: colors.navy }, termsRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 }, checkbox: { color: colors.orange, fontSize: 22, marginRight: 7 }, termsText: { color: colors.stone, fontSize: 12, flex: 1 }, modalError: { color: "#BF4525", fontSize: 13, fontWeight: "700", marginBottom: 10 }, modalPrimary: { minHeight: 50, borderRadius: 12, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", marginTop: 4 }, modalPrimaryText: { color: "white", fontSize: 15, fontWeight: "900" }, recoveryLink: { color: colors.navy, fontWeight: "800", textAlign: "center", marginTop: 14 }, modalSwitch: { color: colors.blue, fontWeight: "800", textAlign: "center", marginTop: 15 }, privacyHint: { color: colors.stone, fontSize: 12, lineHeight: 17, marginBottom: 10 },
   stepLabel: { color: colors.orange, fontSize: 11, fontWeight: "900", letterSpacing: 0.7, marginTop: 2 }, progressTrack: { height: 5, borderRadius: 3, backgroundColor: "#E4EDF2", marginTop: 9, marginBottom: 15, overflow: "hidden" }, progressFill: { height: 5, borderRadius: 3, backgroundColor: colors.orange }, reviewBox: { backgroundColor: "#EEF7FB", borderRadius: 12, padding: 13, marginBottom: 10 }, reviewTitle: { color: colors.navy, fontWeight: "900", marginBottom: 4 }, reviewText: { color: colors.stone, fontSize: 12, lineHeight: 17 }, wizardActions: { flexDirection: "row", gap: 9, alignItems: "center" }, wizardBack: { minHeight: 50, minWidth: 86, borderRadius: 12, borderWidth: 1, borderColor: colors.blue, alignItems: "center", justifyContent: "center", marginTop: 4 }, wizardBackText: { color: colors.blue, fontWeight: "900" }, wizardPrimary: { flex: 1 },
+  messagesList: { maxHeight: 310, minHeight: 150, marginBottom: 11 }, messagesContent: { paddingVertical: 5, gap: 8 }, chatEmpty: { minHeight: 130, alignItems: "center", justifyContent: "center", paddingHorizontal: 20 }, chatEmptyTitle: { color: colors.navy, fontWeight: "900", marginBottom: 6 }, messageBubble: { maxWidth: "88%", borderRadius: 13, padding: 11 }, messageClient: { alignSelf: "flex-end", backgroundColor: "#DDF2FC" }, messageProvider: { alignSelf: "flex-start", backgroundColor: "#F1F4F6" }, messageSystem: { alignSelf: "center", maxWidth: "100%", backgroundColor: "#FFF3E8" }, messageSender: { color: colors.blue, fontSize: 10, fontWeight: "900", marginBottom: 3 }, messageBody: { color: colors.navy, fontSize: 13, lineHeight: 18 }, chatInput: { minHeight: 68, paddingTop: 12, textAlignVertical: "top" }, starsRow: { flexDirection: "row", justifyContent: "center", gap: 7, marginBottom: 17 }, starChoice: { color: "#CAD6DC", fontSize: 38 }, starChoiceActive: { color: colors.orange },
 });

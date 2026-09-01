@@ -4,6 +4,8 @@ Foundation local de una plataforma argentina para encontrar, contratar y pagar d
 
 > Estado: foundation ejecutable en modo demo. Los perfiles visibles son ficticios; pagos, publicidad y verificaciones externas no mueven dinero ni consultan servicios reales.
 
+El modo demo permite recorrer registro, recuperación de cuenta, perfil de prestador, solicitud y revisión de presupuesto, pago protegido ficticio, coordinación, trabajo en curso, conversación con bloqueo de contacto, finalización y reseña verificada. En “Trabajos” se pueden cargar tres escenarios ficticios para probar el circuito.
+
 ## Inicio rápido en Windows
 
 Requisitos: Node.js 22 o posterior, Git y, solo para Supabase local, Docker Desktop abierto.

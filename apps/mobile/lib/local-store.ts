@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import type { JobStatus } from "@laburapp/shared";
 
 export type SavedSession = {
   name: string;
@@ -14,7 +15,32 @@ export type SavedRequest = {
   zone: string;
   desiredAt: string;
   createdAt: string;
-  status: "request_sent";
+  status: JobStatus;
+  quote?: {
+    amount: number;
+    scope: string;
+    eta: string;
+    version: number;
+  };
+  payment?: {
+    total: number;
+    fee: number;
+    providerNet: number;
+    protected: boolean;
+  };
+  messages?: SavedMessage[];
+  review?: {
+    rating: number;
+    comment: string;
+    createdAt: string;
+  };
+};
+
+export type SavedMessage = {
+  id: string;
+  sender: "client" | "provider" | "system";
+  body: string;
+  createdAt: string;
 };
 
 export type SavedProviderProfile = {
