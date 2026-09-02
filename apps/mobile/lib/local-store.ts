@@ -16,12 +16,7 @@ export type SavedRequest = {
   desiredAt: string;
   createdAt: string;
   status: JobStatus;
-  quote?: {
-    amount: number;
-    scope: string;
-    eta: string;
-    version: number;
-  };
+  quote?: SavedQuote;
   payment?: {
     total: number;
     fee: number;
@@ -34,6 +29,27 @@ export type SavedRequest = {
     comment: string;
     createdAt: string;
   };
+};
+
+export type QuotePricingMode = "itemized" | "fixed" | "starting_at";
+
+export type SavedQuoteItem = {
+  id: string;
+  label: string;
+  quantity: number;
+  unit: string;
+  unitPrice: number;
+};
+
+export type SavedQuote = {
+  amount: number;
+  scope: string;
+  eta: string;
+  version: number;
+  pricingMode?: QuotePricingMode;
+  items?: SavedQuoteItem[];
+  notes?: string;
+  validDays?: number;
 };
 
 export type SavedMessage = {

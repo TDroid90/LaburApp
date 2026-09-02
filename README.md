@@ -6,6 +6,8 @@ Foundation local de una plataforma argentina para encontrar, contratar y pagar d
 
 El modo demo permite recorrer registro, recuperación de cuenta, perfil de prestador, solicitud y revisión de presupuesto, pago protegido ficticio, coordinación, trabajo en curso, conversación con bloqueo de contacto, finalización y reseña verificada. En “Trabajos” se pueden cargar tres escenarios ficticios para probar el circuito.
 
+Los prestadores pueden armar presupuestos modulares por ítems, precio fijo u honorarios “desde”, usando plantillas editables por oficio. La integración preparada con Google Sheets refleja usuarios, contactos y presupuestos sin copiar contraseñas, documentos ni conversaciones privadas.
+
 ## Inicio rápido en Windows
 
 Requisitos: Node.js 22 o posterior, Git y, solo para Supabase local, Docker Desktop abierto.
@@ -71,4 +73,4 @@ EAS entrega un enlace a un APK interno. No se publica automáticamente en Google
 - documentos privados: bucket no público con acceso sujeto a RLS.
 - administración: la pantalla local es demostrativa; las mutaciones reales deben pasar por un usuario `admin` asignado de forma privilegiada.
 
-La arquitectura y límites actuales están documentados en [docs/architecture.md](docs/architecture.md), [docs/security.md](docs/security.md) y [docs/known-limitations.md](docs/known-limitations.md).
+La arquitectura y límites actuales están documentados en [docs/architecture.md](docs/architecture.md), [docs/security.md](docs/security.md), [docs/google-sheets-mirror.md](docs/google-sheets-mirror.md) y [docs/known-limitations.md](docs/known-limitations.md).

@@ -1,5 +1,5 @@
 import { calculateFee, canTransition, type JobStatus } from "@laburapp/shared";
-import type { SavedRequest } from "./local-store";
+import type { SavedQuote, SavedRequest } from "./local-store";
 
 export type DemoAction =
   | "provider_quote"
@@ -86,6 +86,27 @@ export function applyDemoAction(request: SavedRequest, action: DemoAction): Save
   if (action === "release") messages.push({ id: `${Date.now()}-release`, sender: "system", body: "Trabajo confirmado. Fondos liberados al profesional.", createdAt: now });
 
   return { ...request, status, quote, payment, messages };
+}
+
+export function submitCustomQuote(request: SavedRequest, draft: Omit<SavedQuote, "version">): SavedRequest {
+  const path: readonly JobStatus[] = request.status === "request_sent"
+    ? ["request_sent", "provider_reviewing", "quote_sent"]
+    : ["quote_revision_requested", "quote_sent"];
+  if (request.status !== path[0]) throw new Error(`No se puede presupuestar desde ${request.status}`);
+  assertPath(path);
+  const now = new Date().toISOString();
+  const quote: SavedQuote = { ...draft, version: (request.quote?.version ?? 0) + 1 };
+  return {
+    ...request,
+    status: "quote_sent",
+    quote,
+    messages: [...(request.messages ?? []), {
+      id: `${Date.now()}-provider`,
+      sender: "provider",
+      body: `Te envié el presupuesto ${quote.version > 1 ? `actualizado (versión ${quote.version})` : "detallado"} por $${quote.amount.toLocaleString("es-AR")}.`,
+      createdAt: now,
+    }],
+  };
 }
 
 export function primaryActionFor(status: JobStatus): { action: DemoAction; label: string } | null {

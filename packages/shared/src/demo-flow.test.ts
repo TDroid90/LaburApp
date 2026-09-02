@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { applyDemoAction, createDemoScenarios } from "../../../apps/mobile/lib/demo-flow";
+import { applyDemoAction, createDemoScenarios, submitCustomQuote } from "../../../apps/mobile/lib/demo-flow";
+import { quoteDraftTotal, quoteTemplateFor } from "../../../apps/mobile/lib/quote-templates";
 import { reviewIsEligible } from "./index";
 
 describe("simulador del flujo de trabajo", () => {
@@ -26,5 +27,19 @@ describe("simulador del flujo de trabajo", () => {
 
   it("rechaza acciones fuera de orden", () => {
     expect(() => applyDemoAction(createDemoScenarios()[0], "pay")).toThrow(/no corresponde/);
+  });
+
+  it("genera una plantilla editable y calcula sus ítems", () => {
+    const request = createDemoScenarios()[1];
+    const template = quoteTemplateFor({ ...request, status: "request_sent", quote: undefined });
+    expect(template.pricingMode).toBe("itemized");
+    expect(quoteDraftTotal(template)).toBe(60000);
+  });
+
+  it("envía y versiona un presupuesto modular", () => {
+    const request = createDemoScenarios()[0];
+    const quote = submitCustomQuote(request, { amount: 35000, pricingMode: "starting_at", items: [{ id: "fees", label: "Revisión", quantity: 1, unit: "visita", unitPrice: 35000 }], scope: "Revisión inicial", eta: "48 horas", notes: "Desde", validDays: 7 });
+    expect(quote.status).toBe("quote_sent");
+    expect(quote.quote).toMatchObject({ amount: 35000, pricingMode: "starting_at", version: 1 });
   });
 });
