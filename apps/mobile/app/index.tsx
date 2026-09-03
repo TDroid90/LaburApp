@@ -127,6 +127,7 @@ export default function Home() {
   const compactHeader = width < 720;
   const authButtonLabel = signedInName ? `Hola, ${signedInName.split(" ")[0]}` : "Ingresar";
   const navigationItems = session?.role === "admin" ? ["Inicio", "Panel", "Perfil"] : ["Inicio", "Trabajos", "Perfil"];
+  const isDemoSession = session?.email.endsWith("@laburapp.demo") ?? false;
 
   useEffect(() => {
     void flushMirrorEvents();
@@ -448,7 +449,7 @@ export default function Home() {
         <Text style={styles.pageCopy}>Vista operativa reservada para cuentas con rol administrador.</Text>
         <View style={styles.adminMetrics}>{[["Usuarios", "1.284"], ["Profesionales", "326"], ["Trabajos activos", "87"], ["Casos a revisar", "6"]].map(([label, value]) => <View key={label} style={styles.adminMetric}><Text style={styles.panelEyebrow}>{label}</Text><Text style={styles.adminMetricValue}>{value}</Text></View>)}</View>
         <View style={styles.providerPanel}><Text style={styles.panelEyebrow}>ACCESOS RÁPIDOS</Text>{["Usuarios y roles", "Verificación de profesionales", "Trabajos y presupuestos", "Pagos y disputas", "Auditoría y actividad"].map((item) => <TouchableOpacity key={item} style={styles.adminLink}><Text style={styles.adminLinkText}>{item}</Text><Text style={styles.adminLinkArrow}>›</Text></TouchableOpacity>)}</View>
-        <View style={styles.reviewBox}><Text style={styles.reviewTitle}>Seguridad</Text><Text style={styles.reviewText}>Cuando Supabase quede conectado, este panel validará el rol admin en el servidor y mostrará datos reales. La interfaz no concede permisos por sí sola.</Text></View>
+        <View style={styles.reviewBox}><Text style={styles.reviewTitle}>{isDemoSession ? "Vista de demostración" : "Seguridad"}</Text><Text style={styles.reviewText}>{isDemoSession ? "Estos indicadores son simulados para recorrer el panel. La cuenta administradora real se valida mediante Supabase antes de permitir operaciones." : "El rol administrador se valida mediante Supabase. La interfaz no concede permisos por sí sola."}</Text></View>
       </View> : <View style={styles.sectionPage}>
         <Text style={styles.pageTitle}>Mi perfil</Text>
         {!session ? <View style={styles.emptyPanel}>
@@ -459,7 +460,7 @@ export default function Home() {
         </View> : <>
           <View style={styles.accountCard}>
             <View style={styles.profileAvatar}><Text style={styles.profileAvatarText}>{session.name.slice(0, 1).toUpperCase()}</Text></View>
-            <View style={styles.accountBody}><Text style={styles.accountName}>{session.name}</Text><Text style={styles.accountEmail}>{session.email}</Text><Text style={styles.localBadge}>{backendMode === "supabase" ? "Conectado a Supabase" : "Guardado en este dispositivo"}</Text></View>
+            <View style={styles.accountBody}><Text style={styles.accountName}>{session.name}</Text><Text style={styles.accountEmail}>{session.email}</Text><Text style={styles.localBadge}>{isDemoSession ? "Cuenta de demostración" : backendMode === "supabase" ? "Conectado a Supabase" : "Guardado en este dispositivo"}</Text></View>
           </View>
           {session.role === "provider" && providerProfile?.published ? <View style={styles.providerPanel}>
             <View style={styles.workCardTop}><Text style={styles.panelEyebrow}>PERFIL DE PRESTADOR</Text><Text style={styles.publishedBadge}>Publicado</Text></View>
