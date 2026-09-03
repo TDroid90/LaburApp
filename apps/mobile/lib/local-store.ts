@@ -4,7 +4,7 @@ import type { JobStatus } from "@laburapp/shared";
 export type SavedSession = {
   name: string;
   email: string;
-  role: "client" | "provider";
+  role: "client" | "provider" | "admin";
 };
 
 export type SavedRequest = {
@@ -63,11 +63,22 @@ export type SavedProviderProfile = {
   displayName: string;
   city: string;
   trade: string;
+  secondaryTrade?: string;
   bio: string;
   skills: string;
   zones: string;
   availability: string;
+  tariffItems?: SavedTariffItem[];
   published: boolean;
+};
+
+export type SavedTariffItem = {
+  id: string;
+  trade: string;
+  label: string;
+  unit: string;
+  unitPrice: number;
+  enabled: boolean;
 };
 
 export type LocalAppState = {

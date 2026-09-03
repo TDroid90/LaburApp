@@ -137,7 +137,7 @@ export function createDemoScenarios(): SavedRequest[] {
     messages: [],
   });
 
-  const waiting = makeRequest("waiting", "Ana Pereyra", "Cuidadora de adultos mayores", "Necesito acompañamiento para una persona mayor durante tres tardes.");
+  const waiting = makeRequest("waiting", "Profesional Demo", "Gasista", "Necesito revisar una pérdida de gas y el funcionamiento del calefón.");
   const quoted = applyDemoAction(makeRequest("quote", "Martín Gómez", "Gasista", "Revisión de una pérdida de gas debajo de la mesada."), "provider_quote");
   let active = applyDemoAction(makeRequest("active", "Laura Torres", "Electricidad", "Revisión del tablero eléctrico y cambio de dos térmicas."), "provider_quote");
   active = applyDemoAction(active, "accept_quote");

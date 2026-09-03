@@ -3,9 +3,11 @@ import type { ReactNode } from "react";
 import { Image, Modal, Platform, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from "react-native";
 import { containsContactAttempt, reviewIsEligible } from "@laburapp/shared";
 import { QuoteBuilderForm } from "../components/QuoteBuilderForm";
+import { TariffEditorForm } from "../components/TariffEditorForm";
 import { applyDemoAction, createDemoScenarios, DemoAction, primaryActionFor, statusPresentation, submitCustomQuote } from "../lib/demo-flow";
-import { loadLocalState, saveLocalState, SavedMessage, SavedProviderProfile, SavedQuote, SavedRequest, SavedSession } from "../lib/local-store";
+import { loadLocalState, saveLocalState, SavedMessage, SavedProviderProfile, SavedQuote, SavedRequest, SavedSession, SavedTariffItem } from "../lib/local-store";
 import { enqueueMirrorEvent, flushMirrorEvents } from "../lib/mirror-events";
+import { dictionaryForTrades } from "../lib/service-dictionary";
 import { backendMode, supabase } from "../lib/supabase";
 
 const providers = [
@@ -66,8 +68,15 @@ const quickSearches = ["Gasista", "Plomería", "Electricidad", "Limpieza", "Adul
 type Provider = typeof providers[number];
 type ProviderSort = "recent" | "jobs" | "rating";
 
+const demoAccounts: Array<SavedSession & { label: string }> = [
+  { label: "Entrar como cliente", name: "Cliente Demo", email: "cliente@laburapp.demo", role: "client" },
+  { label: "Entrar como profesional", name: "Profesional Demo", email: "profesional@laburapp.demo", role: "provider" },
+  { label: "Entrar como administrador", name: "Administrador", email: "admin@laburapp.demo", role: "admin" },
+];
+
 const colors = { navy: "#063C78", blue: "#078EE9", cyan: "#39BCEB", snow: "#F4FAFD", stone: "#5E7183", orange: "#FF7800", green: "#16825B", line: "#D6E8F2" };
 const officialWordmark = require("../assets/brand/laburapp-wordmark-clean.png");
+const demoAccessEnabled = process.env.EXPO_PUBLIC_DEMO_ACCESS !== "false";
 
 function AppModal({ visible, onRequestClose, children }: { visible: boolean; onRequestClose: () => void; children: ReactNode }) {
   if (!visible) return null;
@@ -106,6 +115,7 @@ export default function Home() {
   const [profileDraft, setProfileDraft] = useState<SavedProviderProfile>({ displayName: "", city: "", trade: "", bio: "", skills: "", zones: "", availability: "", published: false });
   const [profileError, setProfileError] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
+  const [tariffModal, setTariffModal] = useState(false);
   const [chatRequestId, setChatRequestId] = useState<string | null>(null);
   const [chatMessage, setChatMessage] = useState("");
   const [chatError, setChatError] = useState("");
@@ -116,6 +126,7 @@ export default function Home() {
   const [quoteBuilderRequestId, setQuoteBuilderRequestId] = useState<string | null>(null);
   const compactHeader = width < 720;
   const authButtonLabel = signedInName ? `Hola, ${signedInName.split(" ")[0]}` : "Ingresar";
+  const navigationItems = session?.role === "admin" ? ["Inicio", "Panel", "Perfil"] : ["Inicio", "Trabajos", "Perfil"];
 
   useEffect(() => {
     void flushMirrorEvents();
@@ -150,6 +161,7 @@ export default function Home() {
     if (authMode === "register" && !acceptedTerms) return setAuthError("Aceptá los términos y la política de privacidad para continuar.");
     setAuthBusy(true);
     let name = authMode === "register" ? authName.trim() : authEmail.split("@")[0];
+    let resolvedRole: SavedSession["role"] = authMode === "register" ? authRole : "client";
     if (supabase) {
       const result = authMode === "register"
         ? await supabase.auth.signUp({ email: authEmail.trim().toLowerCase(), password: authPassword, options: { data: { full_name: name, role: authRole, city: authCity } } })
@@ -159,8 +171,15 @@ export default function Home() {
         setAuthBusy(false); setAuthMode(null); setAuthPassword(""); setRequested("Cuenta creada. Revisá tu correo para confirmarla y después ingresá."); return;
       }
       name = String(result.data.user?.user_metadata?.full_name || name);
+      if (authMode === "login" && result.data.user) {
+        const { data: roles } = await supabase.from("user_roles").select("role").eq("user_id", result.data.user.id);
+        resolvedRole = roles?.some((item) => item.role === "admin") ? "admin" : roles?.some((item) => item.role === "provider") ? "provider" : "client";
+      }
+    } else if (authMode === "login") {
+      const demo = demoAccounts.find((account) => account.email === authEmail.trim().toLowerCase());
+      if (demo) { name = demo.name; resolvedRole = demo.role; }
     }
-    const nextSession: SavedSession = { name, email: authEmail.trim().toLowerCase(), role: authMode === "register" ? authRole : "client" };
+    const nextSession: SavedSession = { name, email: authEmail.trim().toLowerCase(), role: resolvedRole };
     setSession(nextSession); setSignedInName(name);
     if (authMode === "register") void enqueueMirrorEvent("Usuarios", { user_name: name, email: nextSession.email, role: nextSession.role, city: authCity, source: supabase ? "supabase" : "mobile_demo" });
     setAuthBusy(false);
@@ -168,6 +187,15 @@ export default function Home() {
     if (authMode === "register" && authRole === "provider") {
       setProfileDraft((current) => ({ ...current, displayName: name, city: authCity }));
       setProfileStep(1); setProfileModal(true);
+    }
+  }
+
+  function loginDemoAccount(account: SavedSession) {
+    setSession(account); setSignedInName(account.name); setAuthMode(null); setAuthError(""); setAuthPassword("");
+    if (account.role === "admin") setTab("Panel");
+    if (account.role === "provider" && !providerProfile) {
+      const baseProfile: SavedProviderProfile = { displayName: account.name, city: "Río Grande", trade: "Gasista", secondaryTrade: "Plomería", bio: "Profesional multioficio con experiencia en mantenimiento y reparaciones domiciliarias.", skills: "Diagnóstico, instalaciones, reparaciones", zones: "Río Grande", availability: "Lunes a viernes de 9 a 18", published: true };
+      setProviderProfile({ ...baseProfile, tariffItems: dictionaryForTrades([baseProfile.trade, baseProfile.secondaryTrade ?? ""]).map((item) => ({ ...item, enabled: true })) });
     }
   }
 
@@ -218,9 +246,15 @@ export default function Home() {
       const profileResult = await supabase.from("profiles").upsert({ id: user.id, full_name: profileDraft.displayName.trim(), city: profileDraft.city.trim() });
       const providerResult = await supabase.from("provider_profiles").upsert({ user_id: user.id, trade_title: profileDraft.trade.trim(), bio: profileDraft.bio.trim(), skills_text: profileDraft.skills.trim(), zones: profileDraft.zones.split(",").map((zone) => zone.trim()).filter(Boolean), availability: profileDraft.availability.trim(), published: true });
       if (profileResult.error || providerResult.error) { setProfileBusy(false); return setProfileError(profileResult.error?.message ?? providerResult.error?.message ?? "No pudimos publicar el perfil."); }
+      await supabase.from("user_roles").upsert({ user_id: user.id, role: "provider" });
+      await supabase.from("provider_services").delete().eq("provider_id", user.id);
+      const trades = [profileDraft.trade.trim(), profileDraft.secondaryTrade?.trim()].filter(Boolean).map((trade, index) => ({ provider_id: user.id, trade_name: trade, position: index + 1 }));
+      const { error: tradesError } = await supabase.from("provider_services").insert(trades);
+      if (tradesError) { setProfileBusy(false); return setProfileError(tradesError.message); }
     }
     const publishedProfile = { ...profileDraft, published: true };
     setProviderProfile(publishedProfile);
+    setSession((current) => current ? { ...current, role: "provider" } : current);
     void enqueueMirrorEvent("Profesionales", { user_name: publishedProfile.displayName, trade: publishedProfile.trade, city: publishedProfile.city, availability: publishedProfile.availability, bio: publishedProfile.bio, source: supabase ? "supabase" : "mobile_demo" });
     setProfileBusy(false);
     setProfileModal(false); setRequested("Perfil de prestador guardado y publicado.");
@@ -229,6 +263,20 @@ export default function Home() {
   function signOut() {
     if (supabase) void supabase.auth.signOut();
     setSession(null); setSignedInName(null); setTab("Inicio"); setRequested("Cerraste sesión en este dispositivo.");
+  }
+
+  async function saveTariff(items: SavedTariffItem[]) {
+    if (!providerProfile) return;
+    if (supabase) {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { setRequested("Volvé a ingresar para guardar el tarifario."); return; }
+      await supabase.from("provider_rate_items").delete().eq("provider_id", user.id);
+      const { error } = await supabase.from("provider_rate_items").insert(items.map((item) => ({ provider_id: user.id, trade_name: item.trade, label: item.label, unit: item.unit, unit_price: item.unitPrice, active: item.enabled })));
+      if (error) { setRequested(error.message); return; }
+    }
+    setProviderProfile({ ...providerProfile, tariffItems: items });
+    items.forEach((item) => void enqueueMirrorEvent("Tarifario", { id: item.id, provider_name: providerProfile.displayName, trade_name: item.trade, label: item.label, unit: item.unit, unit_price: item.unitPrice, pricing_mode: "itemized", active: item.enabled }));
+    setTariffModal(false); setRequested("Tarifario guardado. Ya está disponible al responder presupuestos.");
   }
 
   function updateRequest(id: string, updater: (request: SavedRequest) => SavedRequest) {
@@ -352,6 +400,11 @@ export default function Home() {
       </> : tab === "Trabajos" ? <View style={styles.sectionPage}>
         <Text style={styles.pageTitle}>Mis trabajos</Text>
         <Text style={styles.pageCopy}>Seguí en un solo lugar tus solicitudes, presupuestos y trabajos activos.</Text>
+        {session?.role === "provider" && <View style={styles.notificationsPanel}>
+          <View style={styles.notificationHeading}><View><Text style={styles.panelEyebrow}>NOTIFICACIONES</Text><Text style={styles.notificationTitle}>Solicitudes para responder</Text></View><Text style={styles.notificationCount}>{requests.filter((request) => request.status === "request_sent" || request.status === "quote_revision_requested").length}</Text></View>
+          {requests.filter((request) => request.status === "request_sent" || request.status === "quote_revision_requested").slice(0, 3).map((request) => <View key={`notification-${request.id}`} style={styles.notificationRow}><View style={styles.notificationCopy}><Text style={styles.notificationName}>{request.trade}</Text><Text style={styles.notificationText}>{request.description}</Text></View><TouchableOpacity accessibilityRole="button" style={styles.notificationAction} onPress={() => setQuoteBuilderRequestId(request.id)}><Text style={styles.notificationActionText}>Responder presupuesto</Text></TouchableOpacity></View>)}
+          {!requests.some((request) => request.status === "request_sent" || request.status === "quote_revision_requested") && <Text style={styles.notificationEmpty}>No tenés presupuestos pendientes.</Text>}
+        </View>}
         <View style={styles.simulatorBanner}><View style={styles.simulatorCopy}><Text style={styles.simulatorTitle}>Simulador del PMV</Text><Text style={styles.simulatorText}>Cargá casos ficticios para recorrer el circuito sin pagos ni operaciones reales.</Text></View><TouchableOpacity accessibilityRole="button" style={styles.simulatorButton} onPress={loadSimulations}><Text style={styles.simulatorButtonText}>Cargar 3 casos</Text></TouchableOpacity></View>
         {requests.length === 0 ? <View style={styles.emptyPanel}>
           <Text style={styles.emptyIcon}>🧰</Text><Text style={styles.emptyTitle}>Todavía no hay solicitudes</Text>
@@ -390,6 +443,12 @@ export default function Home() {
             </View>
           </View>;
         })}
+      </View> : tab === "Panel" ? <View style={styles.sectionPage}>
+        <Text style={styles.pageTitle}>Panel de administración</Text>
+        <Text style={styles.pageCopy}>Vista operativa reservada para cuentas con rol administrador.</Text>
+        <View style={styles.adminMetrics}>{[["Usuarios", "1.284"], ["Profesionales", "326"], ["Trabajos activos", "87"], ["Casos a revisar", "6"]].map(([label, value]) => <View key={label} style={styles.adminMetric}><Text style={styles.panelEyebrow}>{label}</Text><Text style={styles.adminMetricValue}>{value}</Text></View>)}</View>
+        <View style={styles.providerPanel}><Text style={styles.panelEyebrow}>ACCESOS RÁPIDOS</Text>{["Usuarios y roles", "Verificación de profesionales", "Trabajos y presupuestos", "Pagos y disputas", "Auditoría y actividad"].map((item) => <TouchableOpacity key={item} style={styles.adminLink}><Text style={styles.adminLinkText}>{item}</Text><Text style={styles.adminLinkArrow}>›</Text></TouchableOpacity>)}</View>
+        <View style={styles.reviewBox}><Text style={styles.reviewTitle}>Seguridad</Text><Text style={styles.reviewText}>Cuando Supabase quede conectado, este panel validará el rol admin en el servidor y mostrará datos reales. La interfaz no concede permisos por sí sola.</Text></View>
       </View> : <View style={styles.sectionPage}>
         <Text style={styles.pageTitle}>Mi perfil</Text>
         {!session ? <View style={styles.emptyPanel}>
@@ -402,19 +461,21 @@ export default function Home() {
             <View style={styles.profileAvatar}><Text style={styles.profileAvatarText}>{session.name.slice(0, 1).toUpperCase()}</Text></View>
             <View style={styles.accountBody}><Text style={styles.accountName}>{session.name}</Text><Text style={styles.accountEmail}>{session.email}</Text><Text style={styles.localBadge}>{backendMode === "supabase" ? "Conectado a Supabase" : "Guardado en este dispositivo"}</Text></View>
           </View>
-          {providerProfile?.published ? <View style={styles.providerPanel}>
+          {session.role === "provider" && providerProfile?.published ? <View style={styles.providerPanel}>
             <View style={styles.workCardTop}><Text style={styles.panelEyebrow}>PERFIL DE PRESTADOR</Text><Text style={styles.publishedBadge}>Publicado</Text></View>
-            <Text style={styles.providerTrade}>{providerProfile.trade}</Text>
+            <Text style={styles.providerTrade}>{providerProfile.trade}{providerProfile.secondaryTrade ? ` · ${providerProfile.secondaryTrade}` : ""}</Text>
             <Text style={styles.workDescription}>{providerProfile.bio}</Text>
             <Text style={styles.workMeta}>📍 {providerProfile.city} · {providerProfile.zones}</Text>
             <Text style={styles.workMeta}>🕐 {providerProfile.availability}</Text>
             <Text style={styles.skillsLine}>{providerProfile.skills}</Text>
             <TouchableOpacity style={styles.secondaryButton} onPress={openProviderProfile}><Text style={styles.secondaryText}>Editar perfil profesional</Text></TouchableOpacity>
-          </View> : <View style={styles.providerInvite}>
+            <View style={styles.tariffSummary}><View><Text style={styles.panelEyebrow}>MI TARIFARIO</Text><Text style={styles.tariffSummaryTitle}>{providerProfile.tariffItems?.filter((item) => item.enabled).length ?? 0} servicios guardados</Text></View><TouchableOpacity style={styles.tariffButton} onPress={() => setTariffModal(true)}><Text style={styles.tariffButtonText}>Editar tarifario</Text></TouchableOpacity></View>
+            <Text style={styles.membershipHint}>Incluye hasta 2 oficios. El plan multioficio pago se aplicará recién desde el tercero.</Text>
+          </View> : session.role === "client" || session.role === "provider" ? <View style={styles.providerInvite}>
             <Text style={styles.providerInviteTitle}>¿Querés ofrecer tus servicios?</Text>
             <Text style={styles.pageCopy}>Creá tu perfil profesional paso a paso y empezá a recibir solicitudes.</Text>
             <TouchableOpacity style={styles.modalPrimary} onPress={openProviderProfile}><Text style={styles.modalPrimaryText}>Crear perfil de prestador</Text></TouchableOpacity>
-          </View>}
+          </View> : <View style={styles.reviewBox}><Text style={styles.reviewTitle}>Cuenta administradora</Text><Text style={styles.reviewText}>Usá la pestaña Panel para moderar usuarios, profesionales, trabajos, pagos y auditoría.</Text></View>}
           <TouchableOpacity style={styles.logoutButton} onPress={signOut}><Text style={styles.logoutText}>Cerrar sesión</Text></TouchableOpacity>
         </>}
       </View>}
@@ -425,6 +486,7 @@ export default function Home() {
         <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar" style={styles.modalClose} onPress={() => setAuthMode(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
         <Text style={styles.modalTitle}>{authMode === "login" ? "Ingresá a LaburApp" : authMode === "recovery" ? "Recuperá tu cuenta" : "Creá tu cuenta"}</Text>
         <Text style={styles.modalCopy}>{authMode === "login" ? (supabase ? "Ingresá con tu cuenta de LaburApp." : "Continuá con una cuenta demo para probar el flujo.") : authMode === "recovery" ? (supabase ? "Ingresá tu correo y te enviaremos instrucciones." : "En el modo demo no se envía ningún correo real.") : "Una cuenta sirve para contratar y ofrecer servicios."}</Text>
+        {authMode === "login" && demoAccessEnabled && <View style={styles.demoAccounts}><Text style={styles.modalLabel}>Accesos de prueba</Text>{demoAccounts.map((account) => <TouchableOpacity key={account.email} style={styles.demoAccountButton} onPress={() => loginDemoAccount(account)}><View><Text style={styles.demoAccountTitle}>{account.label}</Text><Text style={styles.demoAccountEmail}>{account.email}</Text></View><Text style={styles.demoAccountArrow}>›</Text></TouchableOpacity>)}<View style={styles.loginDivider}><View style={styles.loginDividerLine} /><Text style={styles.loginDividerText}>o ingresá manualmente</Text><View style={styles.loginDividerLine} /></View></View>}
         {authMode === "register" && <TextInput value={authName} onChangeText={setAuthName} placeholder="Nombre y apellido" placeholderTextColor="#71818B" style={styles.modalInput} />}
         <TextInput value={authEmail} onChangeText={setAuthEmail} autoCapitalize="none" keyboardType="email-address" placeholder="Correo electrónico" placeholderTextColor="#71818B" style={styles.modalInput} />
         {authMode !== "recovery" && <TextInput value={authPassword} onChangeText={setAuthPassword} secureTextEntry placeholder="Contraseña (6 caracteres mínimo)" placeholderTextColor="#71818B" style={styles.modalInput} />}
@@ -454,6 +516,8 @@ export default function Home() {
         </>}
         {profileStep === 2 && <>
           <TextInput value={profileDraft.trade} onChangeText={(trade) => setProfileDraft({ ...profileDraft, trade })} placeholder="Oficio o profesión principal" placeholderTextColor="#71818B" style={styles.modalInput} />
+          <TextInput value={profileDraft.secondaryTrade ?? ""} onChangeText={(secondaryTrade) => setProfileDraft({ ...profileDraft, secondaryTrade })} placeholder="Segundo oficio (opcional)" placeholderTextColor="#71818B" style={styles.modalInput} />
+          <Text style={styles.twoTradesHint}>Podés publicar hasta 2 oficios sin costo. Más adelante, el tercero será parte de la membresía multioficio.</Text>
           <TextInput multiline value={profileDraft.bio} onChangeText={(bio) => setProfileDraft({ ...profileDraft, bio })} placeholder="Contá tu experiencia, cómo trabajás y qué ofrecés" placeholderTextColor="#71818B" style={[styles.modalInput, styles.multiline]} />
           <TextInput value={profileDraft.skills} onChangeText={(skills) => setProfileDraft({ ...profileDraft, skills })} placeholder="Especialidades separadas por comas" placeholderTextColor="#71818B" style={styles.modalInput} />
         </>}
@@ -508,9 +572,12 @@ export default function Home() {
       </View></View>
     </AppModal>
     <AppModal visible={quoteBuilderRequest !== null} onRequestClose={() => setQuoteBuilderRequestId(null)}>
-      <View style={styles.modalBackdrop}>{quoteBuilderRequest && <QuoteBuilderForm request={quoteBuilderRequest} onCancel={() => setQuoteBuilderRequestId(null)} onSubmit={sendModularQuote} />}</View>
+      <View style={styles.modalBackdrop}>{quoteBuilderRequest && <QuoteBuilderForm request={quoteBuilderRequest} tariffItems={providerProfile?.tariffItems} onCancel={() => setQuoteBuilderRequestId(null)} onSubmit={sendModularQuote} />}</View>
     </AppModal>
-    <View style={styles.nav}>{["Inicio", "Trabajos", "Perfil"].map((item) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={item} key={item} onPress={() => setTab(item)} style={styles.navItem}><Text style={[styles.navText, tab === item && styles.navActive]}>{item}</Text></TouchableOpacity>)}</View>
+    <AppModal visible={tariffModal && providerProfile !== null} onRequestClose={() => setTariffModal(false)}>
+      <View style={styles.modalBackdrop}>{providerProfile && <TariffEditorForm profile={providerProfile} onCancel={() => setTariffModal(false)} onSave={(items) => void saveTariff(items)} />}</View>
+    </AppModal>
+    <View style={styles.nav}>{navigationItems.map((item) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={item} key={item} onPress={() => setTab(item)} style={styles.navItem}><Text style={[styles.navText, tab === item && styles.navActive]}>{item}</Text></TouchableOpacity>)}</View>
   </SafeAreaView>;
 }
 
@@ -522,11 +589,11 @@ const styles = StyleSheet.create({
   sectionHeader: { minHeight: 42, marginBottom: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, zIndex: 20 }, sectionTitle: { flex: 1, fontSize: 20, fontWeight: "800", color: colors.navy }, compactFilters: { flexDirection: "row", alignItems: "center", gap: 7, zIndex: 30 }, dropdownWrap: { position: "relative", zIndex: 31 }, dropdownButton: { height: 36, paddingHorizontal: 11, borderRadius: 10, borderWidth: 1, borderColor: colors.line, backgroundColor: "white", flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5 }, dropdownButtonText: { color: colors.navy, fontSize: 12, fontWeight: "800" }, dropdownChevron: { color: colors.blue, fontSize: 15, fontWeight: "900", marginTop: -3 }, dropdownMenu: { position: "absolute", top: 41, minWidth: 175, overflow: "hidden", borderRadius: 12, borderWidth: 1, borderColor: colors.line, backgroundColor: "white", shadowColor: "#001F3F", shadowOffset: { width: 0, height: 5 }, shadowOpacity: 0.16, shadowRadius: 12, elevation: 12 }, sortMenu: { right: 0 }, cityMenu: { right: 0 }, dropdownOption: { minHeight: 40, justifyContent: "center", paddingHorizontal: 13, borderBottomWidth: 1, borderBottomColor: "#EDF4F7" }, dropdownOptionActive: { backgroundColor: "#E8F6FD" }, dropdownOptionText: { color: colors.stone, fontSize: 12, fontWeight: "700" }, dropdownOptionTextActive: { color: colors.navy, fontWeight: "900" },
   card: { backgroundColor: "white", borderRadius: 18, borderWidth: 1, borderColor: colors.line, padding: 15, marginBottom: 12, flexDirection: "row" }, avatar: { width: 52, height: 52, borderRadius: 16, backgroundColor: "#DDF0F7", alignItems: "center", justifyContent: "center", marginRight: 13 }, avatarText: { color: colors.navy, fontWeight: "900" }, cardBody: { flex: 1 }, row: { flexDirection: "row", justifyContent: "space-between", gap: 8 }, name: { color: colors.navy, fontSize: 17, fontWeight: "800", flex: 1 }, rating: { color: colors.navy, fontWeight: "700" }, trade: { color: colors.blue, fontWeight: "700", marginTop: 2 }, skills: { color: colors.stone, marginTop: 6 }, badge: { color: colors.green, fontSize: 12, fontWeight: "700", marginTop: 7 }, button: { backgroundColor: colors.orange, borderRadius: 12, paddingVertical: 11, alignItems: "center", marginTop: 12 }, buttonText: { color: "white", fontWeight: "800" },
   empty: { minHeight: 360, justifyContent: "center", alignItems: "center", padding: 28 }, emptyTitle: { color: colors.navy, fontSize: 22, fontWeight: "900", textAlign: "center" }, catLarge: { fontSize: 58, marginBottom: 14 }, secondaryButton: { marginTop: 20, borderWidth: 1, borderColor: colors.blue, borderRadius: 12, paddingVertical: 12, paddingHorizontal: 18 }, secondaryText: { color: colors.blue, fontWeight: "800" },
-  sectionPage: { width: "100%", maxWidth: 760, alignSelf: "center" }, pageTitle: { color: colors.navy, fontSize: 28, fontWeight: "900" }, pageCopy: { color: colors.stone, fontSize: 15, lineHeight: 21, marginTop: 5, marginBottom: 18 }, simulatorBanner: { backgroundColor: colors.navy, borderRadius: 17, padding: 15, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 }, simulatorCopy: { flex: 1 }, simulatorTitle: { color: "white", fontSize: 15, fontWeight: "900" }, simulatorText: { color: "#CFE5F0", fontSize: 11, lineHeight: 16, marginTop: 3 }, simulatorButton: { minHeight: 40, borderRadius: 10, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", paddingHorizontal: 12 }, simulatorButtonText: { color: "white", fontSize: 11, fontWeight: "900" }, emptyPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 20, padding: 26, alignItems: "center", marginTop: 8 }, emptyIcon: { fontSize: 48, marginBottom: 12 }, centerCopy: { color: colors.stone, textAlign: "center", lineHeight: 21, marginTop: 8, maxWidth: 430 },
+  sectionPage: { width: "100%", maxWidth: 760, alignSelf: "center" }, pageTitle: { color: colors.navy, fontSize: 28, fontWeight: "900" }, pageCopy: { color: colors.stone, fontSize: 15, lineHeight: 21, marginTop: 5, marginBottom: 18 }, notificationsPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 17, padding: 15, marginBottom: 12 }, notificationHeading: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }, notificationTitle: { color: colors.navy, fontSize: 17, fontWeight: "900", marginTop: 2 }, notificationCount: { minWidth: 30, height: 30, borderRadius: 15, color: "white", backgroundColor: colors.orange, textAlign: "center", lineHeight: 30, fontWeight: "900" }, notificationRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 11, borderTopWidth: 1, borderTopColor: "#EDF4F7" }, notificationCopy: { flex: 1 }, notificationName: { color: colors.navy, fontSize: 13, fontWeight: "900" }, notificationText: { color: colors.stone, fontSize: 11, marginTop: 3 }, notificationAction: { minHeight: 38, borderRadius: 9, backgroundColor: colors.orange, justifyContent: "center", paddingHorizontal: 10 }, notificationActionText: { color: "white", fontSize: 10, fontWeight: "900" }, notificationEmpty: { color: colors.stone, fontSize: 12, paddingVertical: 8 }, simulatorBanner: { backgroundColor: colors.navy, borderRadius: 17, padding: 15, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 }, simulatorCopy: { flex: 1 }, simulatorTitle: { color: "white", fontSize: 15, fontWeight: "900" }, simulatorText: { color: "#CFE5F0", fontSize: 11, lineHeight: 16, marginTop: 3 }, simulatorButton: { minHeight: 40, borderRadius: 10, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", paddingHorizontal: 12 }, simulatorButtonText: { color: "white", fontSize: 11, fontWeight: "900" }, emptyPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 20, padding: 26, alignItems: "center", marginTop: 8 }, emptyIcon: { fontSize: 48, marginBottom: 12 }, centerCopy: { color: colors.stone, textAlign: "center", lineHeight: 21, marginTop: 8, maxWidth: 430 },
   workCard: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 17, marginTop: 12 }, workCardTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }, workStatus: { color: colors.orange, fontSize: 12, fontWeight: "900" }, statusGreen: { color: colors.green }, statusBlue: { color: colors.blue }, statusRed: { color: "#B7452B" }, workDate: { color: colors.stone, fontSize: 12 }, workProvider: { color: colors.navy, fontSize: 19, fontWeight: "900", marginTop: 12 }, workDescription: { color: colors.stone, lineHeight: 20, marginTop: 10 }, workMeta: { color: colors.navy, fontSize: 13, marginTop: 7 }, nextStep: { backgroundColor: "#FFF3E8", borderRadius: 10, padding: 11, marginTop: 13 }, nextStepText: { color: "#9A4700", fontSize: 12, fontWeight: "700" }, quoteBox: { borderWidth: 1, borderColor: "#B9DDEC", backgroundColor: "#F3FBFE", borderRadius: 13, padding: 13, marginTop: 13 }, quoteLabel: { color: colors.blue, fontSize: 11, fontWeight: "900" }, quoteAmount: { color: colors.navy, fontSize: 20, fontWeight: "900" }, quoteScope: { color: colors.navy, fontSize: 13, lineHeight: 18, marginTop: 8 }, quoteEta: { color: colors.stone, fontSize: 12, marginTop: 5 }, quoteBreakdown: { borderTopWidth: 1, borderTopColor: "#CFE5EF", marginTop: 10, paddingTop: 7 }, quoteLine: { flexDirection: "row", justifyContent: "space-between", gap: 8, paddingVertical: 4 }, quoteLineName: { color: colors.stone, fontSize: 11, flex: 1 }, quoteLinePrice: { color: colors.navy, fontSize: 11, fontWeight: "800" }, quoteNotes: { color: colors.stone, fontSize: 11, lineHeight: 16, marginTop: 7, fontStyle: "italic" }, quoteValidity: { color: colors.blue, fontSize: 10, fontWeight: "800", marginTop: 7 }, paymentBox: { backgroundColor: "#E7F7F0", borderRadius: 12, padding: 12, marginTop: 11 }, paymentTitle: { color: colors.green, fontWeight: "900", fontSize: 13 }, paymentText: { color: "#315F51", fontSize: 12, lineHeight: 17, marginTop: 4 }, lastMessage: { color: colors.stone, fontSize: 12, fontStyle: "italic", marginTop: 11 }, actionRow: { flexDirection: "row", gap: 8, marginTop: 12 }, outlineAction: { flex: 1, minHeight: 46, borderWidth: 1, borderColor: colors.blue, borderRadius: 11, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 }, outlineActionText: { color: colors.blue, fontSize: 12, fontWeight: "900", textAlign: "center" }, primaryAction: { flex: 1.25, minHeight: 46, borderRadius: 11, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 }, primaryActionFull: { minHeight: 46, borderRadius: 11, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", paddingHorizontal: 10, marginTop: 12 }, primaryActionText: { color: "white", fontSize: 12, fontWeight: "900", textAlign: "center" }, cardLinks: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", gap: 12, marginTop: 14 }, cardLink: { color: colors.blue, fontSize: 12, fontWeight: "800" }, cancelLink: { color: "#B7452B", fontSize: 12, fontWeight: "800" }, reviewPublished: { backgroundColor: "#F7FAFB", borderRadius: 12, padding: 12, marginTop: 12 }, reviewStars: { color: colors.orange, fontSize: 18, letterSpacing: 2 }, reviewPublishedText: { color: colors.navy, lineHeight: 19, marginTop: 5 }, verifiedReview: { color: colors.green, fontSize: 11, fontWeight: "800", marginTop: 7 },
-  accountCard: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 16, flexDirection: "row", alignItems: "center", marginTop: 8 }, profileAvatar: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.navy, alignItems: "center", justifyContent: "center", marginRight: 13 }, profileAvatarText: { color: "white", fontSize: 23, fontWeight: "900" }, accountBody: { flex: 1 }, accountName: { color: colors.navy, fontSize: 18, fontWeight: "900" }, accountEmail: { color: colors.stone, marginTop: 2 }, localBadge: { color: colors.green, fontSize: 11, fontWeight: "800", marginTop: 7 }, providerPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 17, marginTop: 14 }, panelEyebrow: { color: colors.stone, fontSize: 11, fontWeight: "900" }, publishedBadge: { color: colors.green, backgroundColor: "#E7F7F0", borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4, fontSize: 11, fontWeight: "900" }, providerTrade: { color: colors.navy, fontSize: 21, fontWeight: "900", marginTop: 13 }, skillsLine: { color: colors.blue, fontSize: 13, fontWeight: "700", marginTop: 10 }, providerInvite: { backgroundColor: colors.navy, borderRadius: 20, padding: 20, marginTop: 14 }, providerInviteTitle: { color: "white", fontSize: 20, fontWeight: "900" }, logoutButton: { alignSelf: "center", padding: 14, marginTop: 13 }, logoutText: { color: "#B7452B", fontWeight: "800" },
+  accountCard: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 16, flexDirection: "row", alignItems: "center", marginTop: 8 }, profileAvatar: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.navy, alignItems: "center", justifyContent: "center", marginRight: 13 }, profileAvatarText: { color: "white", fontSize: 23, fontWeight: "900" }, accountBody: { flex: 1 }, accountName: { color: colors.navy, fontSize: 18, fontWeight: "900" }, accountEmail: { color: colors.stone, marginTop: 2 }, localBadge: { color: colors.green, fontSize: 11, fontWeight: "800", marginTop: 7 }, providerPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 17, marginTop: 14 }, panelEyebrow: { color: colors.stone, fontSize: 11, fontWeight: "900" }, publishedBadge: { color: colors.green, backgroundColor: "#E7F7F0", borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4, fontSize: 11, fontWeight: "900" }, providerTrade: { color: colors.navy, fontSize: 21, fontWeight: "900", marginTop: 13 }, skillsLine: { color: colors.blue, fontSize: 13, fontWeight: "700", marginTop: 10 }, tariffSummary: { marginTop: 16, paddingTop: 14, borderTopWidth: 1, borderTopColor: "#E4EDF2", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }, tariffSummaryTitle: { color: colors.navy, fontSize: 15, fontWeight: "900", marginTop: 3 }, tariffButton: { minHeight: 40, justifyContent: "center", borderRadius: 10, backgroundColor: colors.blue, paddingHorizontal: 12 }, tariffButtonText: { color: "white", fontSize: 11, fontWeight: "900" }, membershipHint: { color: colors.stone, backgroundColor: "#F3F7F9", borderRadius: 9, padding: 10, fontSize: 10, lineHeight: 15, marginTop: 10 }, providerInvite: { backgroundColor: colors.navy, borderRadius: 20, padding: 20, marginTop: 14 }, providerInviteTitle: { color: "white", fontSize: 20, fontWeight: "900" }, logoutButton: { alignSelf: "center", padding: 14, marginTop: 13 }, logoutText: { color: "#B7452B", fontWeight: "800" }, adminMetrics: { flexDirection: "row", flexWrap: "wrap", gap: 10 }, adminMetric: { flexGrow: 1, flexBasis: 150, backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 14, padding: 16 }, adminMetricValue: { color: colors.navy, fontSize: 27, fontWeight: "900", marginTop: 6 }, adminLink: { minHeight: 48, borderTopWidth: 1, borderTopColor: "#EDF4F7", flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, adminLinkText: { color: colors.navy, fontWeight: "800" }, adminLinkArrow: { color: colors.blue, fontSize: 25 },
   toast: { position: "absolute", bottom: 72, left: 18, right: 18, backgroundColor: colors.green, borderRadius: 14, padding: 14, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, toastText: { color: "white", fontWeight: "700", flex: 1 }, toastClose: { color: "white", textDecorationLine: "underline", marginLeft: 12 }, nav: { position: "absolute", bottom: 0, left: 0, right: 0, height: 66, backgroundColor: "white", borderTopWidth: 1, borderTopColor: colors.line, flexDirection: "row" }, navItem: { flex: 1, alignItems: "center", justifyContent: "center" }, navText: { color: colors.stone, fontWeight: "700" }, navActive: { color: colors.orange },
-  modalBackdrop: { position: Platform.OS === "web" ? ("fixed" as "absolute") : "absolute", top: 0, right: 0, bottom: 0, left: 0, zIndex: 1000, elevation: 20, backgroundColor: "rgba(0,19,40,0.62)", justifyContent: "flex-end" }, modalCard: { backgroundColor: "white", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 22, paddingBottom: 30, maxHeight: "92%" }, modalClose: { position: "absolute", right: 18, top: 12, zIndex: 2, width: 36, height: 36, borderRadius: 18, backgroundColor: "#EEF5F8", alignItems: "center", justifyContent: "center" }, modalCloseText: { color: colors.navy, fontSize: 27, lineHeight: 29 }, modalTitle: { color: colors.navy, fontSize: 24, fontWeight: "900", marginTop: 4, paddingRight: 36 }, modalCopy: { color: colors.stone, fontSize: 14, lineHeight: 20, marginTop: 6, marginBottom: 14 }, modalInput: { minHeight: 48, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 14, color: colors.navy, fontSize: 15, marginBottom: 10, backgroundColor: "#FBFDFE" }, multiline: { minHeight: 88, paddingTop: 13, textAlignVertical: "top" }, modalLabel: { color: colors.navy, fontSize: 13, fontWeight: "800", marginTop: 2, marginBottom: 8 }, roleRow: { flexDirection: "row", gap: 8, marginBottom: 12 }, roleChoice: { flex: 1, minHeight: 42, borderWidth: 1, borderColor: colors.line, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 }, roleChoiceActive: { borderColor: colors.blue, backgroundColor: "#E8F6FD" }, roleChoiceText: { color: colors.stone, fontSize: 12, fontWeight: "800" }, roleChoiceTextActive: { color: colors.navy }, termsRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 }, checkbox: { color: colors.orange, fontSize: 22, marginRight: 7 }, termsText: { color: colors.stone, fontSize: 12, flex: 1 }, modalError: { color: "#BF4525", fontSize: 13, fontWeight: "700", marginBottom: 10 }, modalPrimary: { minHeight: 50, borderRadius: 12, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", marginTop: 4 }, modalPrimaryText: { color: "white", fontSize: 15, fontWeight: "900" }, recoveryLink: { color: colors.navy, fontWeight: "800", textAlign: "center", marginTop: 14 }, modalSwitch: { color: colors.blue, fontWeight: "800", textAlign: "center", marginTop: 15 }, privacyHint: { color: colors.stone, fontSize: 12, lineHeight: 17, marginBottom: 10 },
+  modalBackdrop: { position: Platform.OS === "web" ? ("fixed" as "absolute") : "absolute", top: 0, right: 0, bottom: 0, left: 0, zIndex: 1000, elevation: 20, backgroundColor: "rgba(0,19,40,0.62)", justifyContent: "flex-end" }, modalCard: { backgroundColor: "white", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 22, paddingBottom: 30, maxHeight: "92%" }, modalClose: { position: "absolute", right: 18, top: 12, zIndex: 2, width: 36, height: 36, borderRadius: 18, backgroundColor: "#EEF5F8", alignItems: "center", justifyContent: "center" }, modalCloseText: { color: colors.navy, fontSize: 27, lineHeight: 29 }, modalTitle: { color: colors.navy, fontSize: 24, fontWeight: "900", marginTop: 4, paddingRight: 36 }, modalCopy: { color: colors.stone, fontSize: 14, lineHeight: 20, marginTop: 6, marginBottom: 14 }, modalInput: { minHeight: 48, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 14, color: colors.navy, fontSize: 15, marginBottom: 10, backgroundColor: "#FBFDFE" }, multiline: { minHeight: 88, paddingTop: 13, textAlignVertical: "top" }, modalLabel: { color: colors.navy, fontSize: 13, fontWeight: "800", marginTop: 2, marginBottom: 8 }, demoAccounts: { marginBottom: 10 }, demoAccountButton: { minHeight: 50, borderWidth: 1, borderColor: colors.line, borderRadius: 11, paddingHorizontal: 12, marginBottom: 7, flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: "#FAFDFE" }, demoAccountTitle: { color: colors.navy, fontSize: 12, fontWeight: "900" }, demoAccountEmail: { color: colors.stone, fontSize: 10, marginTop: 2 }, demoAccountArrow: { color: colors.blue, fontSize: 24 }, loginDivider: { flexDirection: "row", alignItems: "center", gap: 8, marginVertical: 8 }, loginDividerLine: { height: 1, flex: 1, backgroundColor: colors.line }, loginDividerText: { color: colors.stone, fontSize: 10 }, twoTradesHint: { color: "#6D5B45", backgroundColor: "#FFF7E9", borderRadius: 9, padding: 9, fontSize: 10, lineHeight: 15, marginTop: -2, marginBottom: 9 }, roleRow: { flexDirection: "row", gap: 8, marginBottom: 12 }, roleChoice: { flex: 1, minHeight: 42, borderWidth: 1, borderColor: colors.line, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 }, roleChoiceActive: { borderColor: colors.blue, backgroundColor: "#E8F6FD" }, roleChoiceText: { color: colors.stone, fontSize: 12, fontWeight: "800" }, roleChoiceTextActive: { color: colors.navy }, termsRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 }, checkbox: { color: colors.orange, fontSize: 22, marginRight: 7 }, termsText: { color: colors.stone, fontSize: 12, flex: 1 }, modalError: { color: "#BF4525", fontSize: 13, fontWeight: "700", marginBottom: 10 }, modalPrimary: { minHeight: 50, borderRadius: 12, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", marginTop: 4 }, modalPrimaryText: { color: "white", fontSize: 15, fontWeight: "900" }, recoveryLink: { color: colors.navy, fontWeight: "800", textAlign: "center", marginTop: 14 }, modalSwitch: { color: colors.blue, fontWeight: "800", textAlign: "center", marginTop: 15 }, privacyHint: { color: colors.stone, fontSize: 12, lineHeight: 17, marginBottom: 10 },
   buttonDisabled: { opacity: 0.55 },
   stepLabel: { color: colors.orange, fontSize: 11, fontWeight: "900", letterSpacing: 0.7, marginTop: 2 }, progressTrack: { height: 5, borderRadius: 3, backgroundColor: "#E4EDF2", marginTop: 9, marginBottom: 15, overflow: "hidden" }, progressFill: { height: 5, borderRadius: 3, backgroundColor: colors.orange }, reviewBox: { backgroundColor: "#EEF7FB", borderRadius: 12, padding: 13, marginBottom: 10 }, reviewTitle: { color: colors.navy, fontWeight: "900", marginBottom: 4 }, reviewText: { color: colors.stone, fontSize: 12, lineHeight: 17 }, wizardActions: { flexDirection: "row", gap: 9, alignItems: "center" }, wizardBack: { minHeight: 50, minWidth: 86, borderRadius: 12, borderWidth: 1, borderColor: colors.blue, alignItems: "center", justifyContent: "center", marginTop: 4 }, wizardBackText: { color: colors.blue, fontWeight: "900" }, wizardPrimary: { flex: 1 },
   messagesList: { maxHeight: 310, minHeight: 150, marginBottom: 11 }, messagesContent: { paddingVertical: 5, gap: 8 }, chatEmpty: { minHeight: 130, alignItems: "center", justifyContent: "center", paddingHorizontal: 20 }, chatEmptyTitle: { color: colors.navy, fontWeight: "900", marginBottom: 6 }, messageBubble: { maxWidth: "88%", borderRadius: 13, padding: 11 }, messageClient: { alignSelf: "flex-end", backgroundColor: "#DDF2FC" }, messageProvider: { alignSelf: "flex-start", backgroundColor: "#F1F4F6" }, messageSystem: { alignSelf: "center", maxWidth: "100%", backgroundColor: "#FFF3E8" }, messageSender: { color: colors.blue, fontSize: 10, fontWeight: "900", marginBottom: 3 }, messageBody: { color: colors.navy, fontSize: 13, lineHeight: 18 }, chatInput: { minHeight: 68, paddingTop: 12, textAlignVertical: "top" }, starsRow: { flexDirection: "row", justifyContent: "center", gap: 7, marginBottom: 17 }, starChoice: { color: "#CAD6DC", fontSize: 38 }, starChoiceActive: { color: colors.orange },
