@@ -5,7 +5,7 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-const allowedTabs = new Set(["Usuarios", "Contactos", "Presupuestos"]);
+const allowedTabs = new Set(["Usuarios", "Profesionales", "Contactos", "Presupuestos", "Trabajos", "Reseñas", "Pagos", "Agenda", "Auditoría"]);
 
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });

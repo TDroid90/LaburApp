@@ -11,12 +11,13 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspace @laburapp/shared",
     "test:e2e": "npm run test:e2e --workspace @laburapp/shared",
-    "build": "npm run build --workspace admin"
+    "build": "npm run build --workspace admin",
+    "build:web": "npm run export:web --workspace mobile"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"
   },
   "engines": {
-    "node": ">=22"
+    "node": "24.x"
   }
 }

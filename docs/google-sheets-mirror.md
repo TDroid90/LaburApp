@@ -5,8 +5,10 @@ La hoja es un espejo operativo para seguimiento comercial; Supabase sigue siendo
 ## Pestañas
 
 - `Usuarios`: fecha, identificador, nombre, correo, rol, ciudad, estado y origen.
+- `Profesionales`: oficio, ciudad, reputación, trabajos, verificación y disponibilidad.
 - `Contactos`: solicitud, cliente, profesional, oficio, canal, estado y descripción del pedido. Los mensajes privados no se copian.
 - `Presupuestos`: versión, modalidad, total, alcance, plazo, vigencia, observaciones y detalle de ítems.
+- `Trabajos`, `Reseñas`, `Pagos`, `Agenda` y `Auditoría`: estructura preparada para los módulos productivos y sus controles operativos.
 
 Nunca se reflejan contraseñas, tokens, documentos privados, direcciones exactas, medios de pago ni el texto completo del chat.
 

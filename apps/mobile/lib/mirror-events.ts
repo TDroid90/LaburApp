@@ -1,7 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { supabase } from "./supabase";
 
-export type MirrorTab = "Usuarios" | "Contactos" | "Presupuestos";
+export type MirrorTab = "Usuarios" | "Profesionales" | "Contactos" | "Presupuestos" | "Trabajos" | "Reseñas" | "Pagos" | "Agenda" | "Auditoría";
 
 export type MirrorEvent = {
   id: string;

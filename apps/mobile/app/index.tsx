@@ -6,7 +6,7 @@ import { QuoteBuilderForm } from "../components/QuoteBuilderForm";
 import { applyDemoAction, createDemoScenarios, DemoAction, primaryActionFor, statusPresentation, submitCustomQuote } from "../lib/demo-flow";
 import { loadLocalState, saveLocalState, SavedMessage, SavedProviderProfile, SavedQuote, SavedRequest, SavedSession } from "../lib/local-store";
 import { enqueueMirrorEvent, flushMirrorEvents } from "../lib/mirror-events";
-import { backendMode } from "../lib/supabase";
+import { backendMode, supabase } from "../lib/supabase";
 
 const providers = [
   { name: "Martín Gómez", trade: "Gasista", city: "Río Grande", rating: "4,9", jobs: 52, badge: "Matrícula verificada", skills: "Calefones · Pérdidas" },
@@ -64,6 +64,7 @@ const providers = [
 
 const quickSearches = ["Gasista", "Plomería", "Electricidad", "Limpieza", "Adultos mayores", "Aduana", "Carga y descarga", "Repartidor", "Ayudante de obra", "Pintura", "Fletes", "Jardinería", "Mecánica", "Costura", "Informática"];
 type Provider = typeof providers[number];
+type ProviderSort = "recent" | "jobs" | "rating";
 
 const colors = { navy: "#063C78", blue: "#078EE9", cyan: "#39BCEB", snow: "#F4FAFD", stone: "#5E7183", orange: "#FF7800", green: "#16825B", line: "#D6E8F2" };
 const officialWordmark = require("../assets/brand/laburapp-wordmark-clean.png");
@@ -77,6 +78,8 @@ function AppModal({ visible, onRequestClose, children }: { visible: boolean; onR
 export default function Home() {
   const { width } = useWindowDimensions();
   const [query, setQuery] = useState("");
+  const [providerSort, setProviderSort] = useState<ProviderSort>("recent");
+  const [cityFilter, setCityFilter] = useState("Todas");
   const [tab, setTab] = useState("Inicio");
   const [requested, setRequested] = useState<string | null>(null);
   const [authMode, setAuthMode] = useState<"login" | "register" | "recovery" | null>(null);
@@ -89,6 +92,8 @@ export default function Home() {
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authRole, setAuthRole] = useState<"client" | "provider">("client");
+  const [authCity, setAuthCity] = useState("Río Grande");
+  const [authBusy, setAuthBusy] = useState(false);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [authError, setAuthError] = useState("");
   const [quoteProvider, setQuoteProvider] = useState<Provider | null>(null);
@@ -99,6 +104,7 @@ export default function Home() {
   const [profileStep, setProfileStep] = useState(1);
   const [profileDraft, setProfileDraft] = useState<SavedProviderProfile>({ displayName: "", city: "", trade: "", bio: "", skills: "", zones: "", availability: "", published: false });
   const [profileError, setProfileError] = useState("");
+  const [profileBusy, setProfileBusy] = useState(false);
   const [chatRequestId, setChatRequestId] = useState<string | null>(null);
   const [chatMessage, setChatMessage] = useState("");
   const [chatError, setChatError] = useState("");
@@ -127,23 +133,39 @@ export default function Home() {
     saveLocalState({ session, requests, providerProfile }).catch(() => setRequested("No pudimos guardar los cambios en este dispositivo."));
   }, [hydrated, session, requests, providerProfile]);
 
-  function submitAuth() {
+  async function submitAuth() {
     setAuthError("");
     if (!authEmail.includes("@")) return setAuthError("Ingresá un correo válido.");
     if (authMode === "recovery") {
-      setAuthMode(null); setRequested("Si el correo está registrado, vas a recibir las instrucciones para recuperar tu cuenta.");
+      setAuthBusy(true);
+      const { error } = supabase ? await supabase.auth.resetPasswordForEmail(authEmail.trim().toLowerCase(), { redirectTo: process.env.EXPO_PUBLIC_APP_URL ?? "https://laburapp-iota.vercel.app" }) : { error: null };
+      setAuthBusy(false);
+      if (error) return setAuthError(error.message);
+      setAuthMode(null); setRequested(supabase ? "Revisá tu correo para recuperar la cuenta." : "Modo demostración: no se envió un correo real.");
       return;
     }
     if (authPassword.length < 6) return setAuthError("La contraseña debe tener al menos 6 caracteres.");
     if (authMode === "register" && authName.trim().length < 2) return setAuthError("Ingresá tu nombre y apellido.");
     if (authMode === "register" && !acceptedTerms) return setAuthError("Aceptá los términos y la política de privacidad para continuar.");
-    const name = authMode === "register" ? authName.trim() : authEmail.split("@")[0];
+    setAuthBusy(true);
+    let name = authMode === "register" ? authName.trim() : authEmail.split("@")[0];
+    if (supabase) {
+      const result = authMode === "register"
+        ? await supabase.auth.signUp({ email: authEmail.trim().toLowerCase(), password: authPassword, options: { data: { full_name: name, role: authRole, city: authCity } } })
+        : await supabase.auth.signInWithPassword({ email: authEmail.trim().toLowerCase(), password: authPassword });
+      if (result.error) { setAuthBusy(false); return setAuthError(result.error.message); }
+      if (authMode === "register" && !result.data.session) {
+        setAuthBusy(false); setAuthMode(null); setAuthPassword(""); setRequested("Cuenta creada. Revisá tu correo para confirmarla y después ingresá."); return;
+      }
+      name = String(result.data.user?.user_metadata?.full_name || name);
+    }
     const nextSession: SavedSession = { name, email: authEmail.trim().toLowerCase(), role: authMode === "register" ? authRole : "client" };
     setSession(nextSession); setSignedInName(name);
-    if (authMode === "register") void enqueueMirrorEvent("Usuarios", { user_name: name, email: nextSession.email, role: nextSession.role, source: "mobile_demo" });
+    if (authMode === "register") void enqueueMirrorEvent("Usuarios", { user_name: name, email: nextSession.email, role: nextSession.role, city: authCity, source: supabase ? "supabase" : "mobile_demo" });
+    setAuthBusy(false);
     setAuthMode(null); setAuthPassword("");
     if (authMode === "register" && authRole === "provider") {
-      setProfileDraft((current) => ({ ...current, displayName: name }));
+      setProfileDraft((current) => ({ ...current, displayName: name, city: authCity }));
       setProfileStep(1); setProfileModal(true);
     }
   }
@@ -182,17 +204,29 @@ export default function Home() {
     setProfileStep(1); setProfileError(""); setProfileModal(true);
   }
 
-  function advanceProfile() {
+  async function advanceProfile() {
     setProfileError("");
     if (profileStep === 1 && (!profileDraft.displayName.trim() || !profileDraft.city.trim())) return setProfileError("Completá tu nombre visible y ciudad.");
     if (profileStep === 2 && (!profileDraft.trade.trim() || profileDraft.bio.trim().length < 20)) return setProfileError("Indicá tu oficio y contanos al menos 20 caracteres sobre tu experiencia.");
     if (profileStep < 3) return setProfileStep((step) => step + 1);
     if (!profileDraft.zones.trim() || !profileDraft.availability.trim()) return setProfileError("Indicá las zonas donde trabajás y tu disponibilidad.");
-    setProviderProfile({ ...profileDraft, published: true });
+    setProfileBusy(true);
+    if (supabase) {
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) { setProfileBusy(false); return setProfileError("Volvé a ingresar para publicar el perfil."); }
+      const profileResult = await supabase.from("profiles").upsert({ id: user.id, full_name: profileDraft.displayName.trim(), city: profileDraft.city.trim() });
+      const providerResult = await supabase.from("provider_profiles").upsert({ user_id: user.id, trade_title: profileDraft.trade.trim(), bio: profileDraft.bio.trim(), skills_text: profileDraft.skills.trim(), zones: profileDraft.zones.split(",").map((zone) => zone.trim()).filter(Boolean), availability: profileDraft.availability.trim(), published: true });
+      if (profileResult.error || providerResult.error) { setProfileBusy(false); return setProfileError(profileResult.error?.message ?? providerResult.error?.message ?? "No pudimos publicar el perfil."); }
+    }
+    const publishedProfile = { ...profileDraft, published: true };
+    setProviderProfile(publishedProfile);
+    void enqueueMirrorEvent("Profesionales", { user_name: publishedProfile.displayName, trade: publishedProfile.trade, city: publishedProfile.city, availability: publishedProfile.availability, bio: publishedProfile.bio, source: supabase ? "supabase" : "mobile_demo" });
+    setProfileBusy(false);
     setProfileModal(false); setRequested("Perfil de prestador guardado y publicado.");
   }
 
   function signOut() {
+    if (supabase) void supabase.auth.signOut();
     setSession(null); setSignedInName(null); setTab("Inicio"); setRequested("Cerraste sesión en este dispositivo.");
   }
 
@@ -251,7 +285,15 @@ export default function Home() {
   const chatRequest = requests.find((request) => request.id === chatRequestId) ?? null;
   const reviewRequest = requests.find((request) => request.id === reviewRequestId) ?? null;
   const quoteBuilderRequest = requests.find((request) => request.id === quoteBuilderRequestId) ?? null;
-  const filtered = useMemo(() => providers.filter((p) => `${p.name} ${p.trade} ${p.city} ${p.skills}`.toLowerCase().includes(query.toLowerCase())), [query]);
+  const filtered = useMemo(() => providers
+    .map((provider, registrationOrder) => ({ provider, registrationOrder }))
+    .filter(({ provider }) => (cityFilter === "Todas" || provider.city === cityFilter) && `${provider.name} ${provider.trade} ${provider.city} ${provider.skills}`.toLowerCase().includes(query.toLowerCase()))
+    .sort((a, b) => providerSort === "jobs"
+      ? b.provider.jobs - a.provider.jobs
+      : providerSort === "rating"
+        ? (b.provider.rating === "Nuevo" ? 0 : Number(b.provider.rating.replace(",", "."))) - (a.provider.rating === "Nuevo" ? 0 : Number(a.provider.rating.replace(",", ".")))
+        : b.registrationOrder - a.registrationOrder)
+    .map(({ provider }) => provider), [query, cityFilter, providerSort]);
 
   return <SafeAreaView style={styles.safe}>
     <View style={[styles.header, compactHeader && styles.headerCompact]}>
@@ -274,7 +316,15 @@ export default function Home() {
             </TouchableOpacity>)}
           </View>
         </View>
-        <Text style={styles.sectionTitle}>{query ? `Resultados · ${filtered.length}` : `Profesionales cerca tuyo · ${providers.length}`}</Text>
+        <View style={styles.filtersPanel} accessibilityLabel="Filtros de profesionales">
+          <View style={styles.filterGroup}><Text style={styles.filterLabel}>Ordenar por</Text><View style={styles.filterOptions}>
+            {([['recent', 'Recién registrados'], ['jobs', 'Más trabajos'], ['rating', 'Estrellas']] as const).map(([value, label]) => <TouchableOpacity accessibilityRole="button" key={value} onPress={() => setProviderSort(value)} style={[styles.filterChip, providerSort === value && styles.filterChipActive]}><Text style={[styles.filterChipText, providerSort === value && styles.filterChipTextActive]}>{label}</Text></TouchableOpacity>)}
+          </View></View>
+          <View style={styles.filterGroup}><Text style={styles.filterLabel}>Ciudad</Text><View style={styles.filterOptions}>
+            {["Todas", "Río Grande", "Ushuaia", "Tolhuin"].map((city) => <TouchableOpacity accessibilityRole="button" key={city} onPress={() => setCityFilter(city)} style={[styles.filterChip, cityFilter === city && styles.filterChipActive]}><Text style={[styles.filterChipText, cityFilter === city && styles.filterChipTextActive]}>{city}</Text></TouchableOpacity>)}
+          </View></View>
+        </View>
+        <Text style={styles.sectionTitle}>{query || cityFilter !== "Todas" ? `Resultados · ${filtered.length}` : `Profesionales cerca tuyo · ${filtered.length}`}</Text>
         {filtered.map((provider) => <View key={provider.name} style={styles.card}>
           <View style={styles.avatar}><Text style={styles.avatarText}>{provider.name.split(" ").map((part) => part[0]).join("")}</Text></View>
           <View style={styles.cardBody}>
@@ -361,17 +411,19 @@ export default function Home() {
       <View style={styles.modalBackdrop}><View style={styles.modalCard}>
         <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar" style={styles.modalClose} onPress={() => setAuthMode(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
         <Text style={styles.modalTitle}>{authMode === "login" ? "Ingresá a LaburApp" : authMode === "recovery" ? "Recuperá tu cuenta" : "Creá tu cuenta"}</Text>
-        <Text style={styles.modalCopy}>{authMode === "login" ? "Continuá con tu cuenta demo para probar el flujo." : authMode === "recovery" ? "Ingresá tu correo y te enviaremos instrucciones. En el modo demo no se envía ningún correo real." : "Una cuenta sirve para contratar y ofrecer servicios."}</Text>
+        <Text style={styles.modalCopy}>{authMode === "login" ? (supabase ? "Ingresá con tu cuenta de LaburApp." : "Continuá con una cuenta demo para probar el flujo.") : authMode === "recovery" ? (supabase ? "Ingresá tu correo y te enviaremos instrucciones." : "En el modo demo no se envía ningún correo real.") : "Una cuenta sirve para contratar y ofrecer servicios."}</Text>
         {authMode === "register" && <TextInput value={authName} onChangeText={setAuthName} placeholder="Nombre y apellido" placeholderTextColor="#71818B" style={styles.modalInput} />}
         <TextInput value={authEmail} onChangeText={setAuthEmail} autoCapitalize="none" keyboardType="email-address" placeholder="Correo electrónico" placeholderTextColor="#71818B" style={styles.modalInput} />
         {authMode !== "recovery" && <TextInput value={authPassword} onChangeText={setAuthPassword} secureTextEntry placeholder="Contraseña (6 caracteres mínimo)" placeholderTextColor="#71818B" style={styles.modalInput} />}
         {authMode === "register" && <>
           <Text style={styles.modalLabel}>¿Cómo vas a usar LaburApp?</Text>
           <View style={styles.roleRow}>{[["client", "Quiero contratar"], ["provider", "Quiero ofrecer"]].map(([value, label]) => <TouchableOpacity key={value} onPress={() => setAuthRole(value as "client" | "provider")} style={[styles.roleChoice, authRole === value && styles.roleChoiceActive]}><Text style={[styles.roleChoiceText, authRole === value && styles.roleChoiceTextActive]}>{label}</Text></TouchableOpacity>)}</View>
+          <Text style={styles.modalLabel}>Tu ciudad</Text>
+          <View style={styles.roleRow}>{["Río Grande", "Ushuaia", "Tolhuin"].map((city) => <TouchableOpacity key={city} onPress={() => setAuthCity(city)} style={[styles.roleChoice, authCity === city && styles.roleChoiceActive]}><Text style={[styles.roleChoiceText, authCity === city && styles.roleChoiceTextActive]}>{city}</Text></TouchableOpacity>)}</View>
           <TouchableOpacity accessibilityRole="checkbox" accessibilityState={{ checked: acceptedTerms }} onPress={() => setAcceptedTerms(!acceptedTerms)} style={styles.termsRow}><Text style={styles.checkbox}>{acceptedTerms ? "☑" : "☐"}</Text><Text style={styles.termsText}>Acepto los términos y la política de privacidad.</Text></TouchableOpacity>
         </>}
         {!!authError && <Text style={styles.modalError}>{authError}</Text>}
-        <TouchableOpacity accessibilityRole="button" style={styles.modalPrimary} onPress={submitAuth}><Text style={styles.modalPrimaryText}>{authMode === "login" ? "Ingresar" : authMode === "recovery" ? "Enviar instrucciones" : "Crear cuenta demo"}</Text></TouchableOpacity>
+        <TouchableOpacity accessibilityRole="button" disabled={authBusy} style={[styles.modalPrimary, authBusy && styles.buttonDisabled]} onPress={submitAuth}><Text style={styles.modalPrimaryText}>{authBusy ? "Procesando…" : authMode === "login" ? "Ingresar" : authMode === "recovery" ? "Enviar instrucciones" : supabase ? "Crear cuenta" : "Crear cuenta demo"}</Text></TouchableOpacity>
         {authMode === "login" && <TouchableOpacity accessibilityRole="button" onPress={() => { setAuthError(""); setAuthMode("recovery"); }}><Text style={styles.recoveryLink}>Olvidé mi contraseña</Text></TouchableOpacity>}
         <TouchableOpacity accessibilityRole="button" onPress={() => { setAuthError(""); setAuthMode(authMode === "login" ? "register" : "login"); }}><Text style={styles.modalSwitch}>{authMode === "login" ? "¿No tenés cuenta? Registrate" : authMode === "recovery" ? "Volver a ingresar" : "¿Ya tenés cuenta? Ingresá"}</Text></TouchableOpacity>
       </View></View>
@@ -398,7 +450,7 @@ export default function Home() {
           <View style={styles.reviewBox}><Text style={styles.reviewTitle}>Antes de publicar</Text><Text style={styles.reviewText}>No incluyas teléfono, correo ni domicilio. Más adelante vas a poder sumar fotos y documentación para verificar tu perfil.</Text></View>
         </>}
         {!!profileError && <Text style={styles.modalError}>{profileError}</Text>}
-        <View style={styles.wizardActions}>{profileStep > 1 && <TouchableOpacity accessibilityRole="button" style={styles.wizardBack} onPress={() => { setProfileError(""); setProfileStep((step) => step - 1); }}><Text style={styles.wizardBackText}>Atrás</Text></TouchableOpacity>}<TouchableOpacity accessibilityRole="button" style={[styles.modalPrimary, styles.wizardPrimary]} onPress={advanceProfile}><Text style={styles.modalPrimaryText}>{profileStep === 3 ? "Publicar perfil" : "Continuar"}</Text></TouchableOpacity></View>
+        <View style={styles.wizardActions}>{profileStep > 1 && <TouchableOpacity accessibilityRole="button" style={styles.wizardBack} onPress={() => { setProfileError(""); setProfileStep((step) => step - 1); }}><Text style={styles.wizardBackText}>Atrás</Text></TouchableOpacity>}<TouchableOpacity accessibilityRole="button" disabled={profileBusy} style={[styles.modalPrimary, styles.wizardPrimary, profileBusy && styles.buttonDisabled]} onPress={advanceProfile}><Text style={styles.modalPrimaryText}>{profileBusy ? "Guardando…" : profileStep === 3 ? "Publicar perfil" : "Continuar"}</Text></TouchableOpacity></View>
       </View></View>
     </AppModal>
     <AppModal visible={quoteProvider !== null} onRequestClose={() => setQuoteProvider(null)}>
@@ -454,6 +506,7 @@ const styles = StyleSheet.create({
   brandRow: { flexDirection: "row", alignItems: "center" }, wordmarkLogo: { width: 176, height: 48 }, wordmarkLogoWide: { width: 210, height: 60 },
   loginButton: { minHeight: 40, justifyContent: "center", paddingHorizontal: 15, borderRadius: 12, borderWidth: 1, borderColor: colors.cyan, backgroundColor: "#063C78" }, loginButtonText: { color: "white", fontWeight: "800", fontSize: 14 },
   content: { padding: 18, paddingBottom: 110 }, hero: { backgroundColor: colors.navy, borderRadius: 24, padding: 22, marginBottom: 24 }, heroTitle: { color: "white", fontSize: 30, lineHeight: 34, fontWeight: "900" }, heroCopy: { color: "#D6E6EE", fontSize: 15, lineHeight: 21, marginTop: 8 }, search: { backgroundColor: "white", color: colors.navy, borderRadius: 14, minHeight: 52, marginTop: 18, paddingHorizontal: 16, fontSize: 16 }, quickSearches: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 12 }, quickSearch: { minHeight: 26, justifyContent: "center", paddingHorizontal: 9, paddingVertical: 4, borderRadius: 13, borderWidth: 1, borderColor: "rgba(255,255,255,0.28)", backgroundColor: "rgba(255,255,255,0.08)" }, quickSearchActive: { backgroundColor: colors.orange, borderColor: colors.orange }, quickSearchText: { color: "#D8EEFA", fontSize: 11, lineHeight: 14, fontWeight: "700" }, quickSearchTextActive: { color: "white" },
+  filtersPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 16, padding: 13, marginTop: -10, marginBottom: 18, gap: 11 }, filterGroup: { gap: 7 }, filterLabel: { color: colors.navy, fontSize: 11, fontWeight: "900", textTransform: "uppercase", letterSpacing: 0.5 }, filterOptions: { flexDirection: "row", flexWrap: "wrap", gap: 7 }, filterChip: { minHeight: 34, justifyContent: "center", paddingHorizontal: 11, borderRadius: 17, borderWidth: 1, borderColor: colors.line, backgroundColor: "#F8FBFC" }, filterChipActive: { borderColor: colors.blue, backgroundColor: "#E8F6FD" }, filterChipText: { color: colors.stone, fontSize: 11, fontWeight: "800" }, filterChipTextActive: { color: colors.navy },
   sectionTitle: { fontSize: 20, fontWeight: "800", color: colors.navy, marginBottom: 12 }, card: { backgroundColor: "white", borderRadius: 18, borderWidth: 1, borderColor: colors.line, padding: 15, marginBottom: 12, flexDirection: "row" }, avatar: { width: 52, height: 52, borderRadius: 16, backgroundColor: "#DDF0F7", alignItems: "center", justifyContent: "center", marginRight: 13 }, avatarText: { color: colors.navy, fontWeight: "900" }, cardBody: { flex: 1 }, row: { flexDirection: "row", justifyContent: "space-between", gap: 8 }, name: { color: colors.navy, fontSize: 17, fontWeight: "800", flex: 1 }, rating: { color: colors.navy, fontWeight: "700" }, trade: { color: colors.blue, fontWeight: "700", marginTop: 2 }, skills: { color: colors.stone, marginTop: 6 }, badge: { color: colors.green, fontSize: 12, fontWeight: "700", marginTop: 7 }, button: { backgroundColor: colors.orange, borderRadius: 12, paddingVertical: 11, alignItems: "center", marginTop: 12 }, buttonText: { color: "white", fontWeight: "800" },
   empty: { minHeight: 360, justifyContent: "center", alignItems: "center", padding: 28 }, emptyTitle: { color: colors.navy, fontSize: 22, fontWeight: "900", textAlign: "center" }, catLarge: { fontSize: 58, marginBottom: 14 }, secondaryButton: { marginTop: 20, borderWidth: 1, borderColor: colors.blue, borderRadius: 12, paddingVertical: 12, paddingHorizontal: 18 }, secondaryText: { color: colors.blue, fontWeight: "800" },
   sectionPage: { width: "100%", maxWidth: 760, alignSelf: "center" }, pageTitle: { color: colors.navy, fontSize: 28, fontWeight: "900" }, pageCopy: { color: colors.stone, fontSize: 15, lineHeight: 21, marginTop: 5, marginBottom: 18 }, simulatorBanner: { backgroundColor: colors.navy, borderRadius: 17, padding: 15, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 }, simulatorCopy: { flex: 1 }, simulatorTitle: { color: "white", fontSize: 15, fontWeight: "900" }, simulatorText: { color: "#CFE5F0", fontSize: 11, lineHeight: 16, marginTop: 3 }, simulatorButton: { minHeight: 40, borderRadius: 10, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", paddingHorizontal: 12 }, simulatorButtonText: { color: "white", fontSize: 11, fontWeight: "900" }, emptyPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 20, padding: 26, alignItems: "center", marginTop: 8 }, emptyIcon: { fontSize: 48, marginBottom: 12 }, centerCopy: { color: colors.stone, textAlign: "center", lineHeight: 21, marginTop: 8, maxWidth: 430 },
@@ -461,6 +514,7 @@ const styles = StyleSheet.create({
   accountCard: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 16, flexDirection: "row", alignItems: "center", marginTop: 8 }, profileAvatar: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.navy, alignItems: "center", justifyContent: "center", marginRight: 13 }, profileAvatarText: { color: "white", fontSize: 23, fontWeight: "900" }, accountBody: { flex: 1 }, accountName: { color: colors.navy, fontSize: 18, fontWeight: "900" }, accountEmail: { color: colors.stone, marginTop: 2 }, localBadge: { color: colors.green, fontSize: 11, fontWeight: "800", marginTop: 7 }, providerPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 17, marginTop: 14 }, panelEyebrow: { color: colors.stone, fontSize: 11, fontWeight: "900" }, publishedBadge: { color: colors.green, backgroundColor: "#E7F7F0", borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4, fontSize: 11, fontWeight: "900" }, providerTrade: { color: colors.navy, fontSize: 21, fontWeight: "900", marginTop: 13 }, skillsLine: { color: colors.blue, fontSize: 13, fontWeight: "700", marginTop: 10 }, providerInvite: { backgroundColor: colors.navy, borderRadius: 20, padding: 20, marginTop: 14 }, providerInviteTitle: { color: "white", fontSize: 20, fontWeight: "900" }, logoutButton: { alignSelf: "center", padding: 14, marginTop: 13 }, logoutText: { color: "#B7452B", fontWeight: "800" },
   toast: { position: "absolute", bottom: 72, left: 18, right: 18, backgroundColor: colors.green, borderRadius: 14, padding: 14, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, toastText: { color: "white", fontWeight: "700", flex: 1 }, toastClose: { color: "white", textDecorationLine: "underline", marginLeft: 12 }, nav: { position: "absolute", bottom: 0, left: 0, right: 0, height: 66, backgroundColor: "white", borderTopWidth: 1, borderTopColor: colors.line, flexDirection: "row" }, navItem: { flex: 1, alignItems: "center", justifyContent: "center" }, navText: { color: colors.stone, fontWeight: "700" }, navActive: { color: colors.orange },
   modalBackdrop: { position: Platform.OS === "web" ? ("fixed" as "absolute") : "absolute", top: 0, right: 0, bottom: 0, left: 0, zIndex: 1000, elevation: 20, backgroundColor: "rgba(0,19,40,0.62)", justifyContent: "flex-end" }, modalCard: { backgroundColor: "white", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 22, paddingBottom: 30, maxHeight: "92%" }, modalClose: { position: "absolute", right: 18, top: 12, zIndex: 2, width: 36, height: 36, borderRadius: 18, backgroundColor: "#EEF5F8", alignItems: "center", justifyContent: "center" }, modalCloseText: { color: colors.navy, fontSize: 27, lineHeight: 29 }, modalTitle: { color: colors.navy, fontSize: 24, fontWeight: "900", marginTop: 4, paddingRight: 36 }, modalCopy: { color: colors.stone, fontSize: 14, lineHeight: 20, marginTop: 6, marginBottom: 14 }, modalInput: { minHeight: 48, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 14, color: colors.navy, fontSize: 15, marginBottom: 10, backgroundColor: "#FBFDFE" }, multiline: { minHeight: 88, paddingTop: 13, textAlignVertical: "top" }, modalLabel: { color: colors.navy, fontSize: 13, fontWeight: "800", marginTop: 2, marginBottom: 8 }, roleRow: { flexDirection: "row", gap: 8, marginBottom: 12 }, roleChoice: { flex: 1, minHeight: 42, borderWidth: 1, borderColor: colors.line, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 }, roleChoiceActive: { borderColor: colors.blue, backgroundColor: "#E8F6FD" }, roleChoiceText: { color: colors.stone, fontSize: 12, fontWeight: "800" }, roleChoiceTextActive: { color: colors.navy }, termsRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 }, checkbox: { color: colors.orange, fontSize: 22, marginRight: 7 }, termsText: { color: colors.stone, fontSize: 12, flex: 1 }, modalError: { color: "#BF4525", fontSize: 13, fontWeight: "700", marginBottom: 10 }, modalPrimary: { minHeight: 50, borderRadius: 12, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", marginTop: 4 }, modalPrimaryText: { color: "white", fontSize: 15, fontWeight: "900" }, recoveryLink: { color: colors.navy, fontWeight: "800", textAlign: "center", marginTop: 14 }, modalSwitch: { color: colors.blue, fontWeight: "800", textAlign: "center", marginTop: 15 }, privacyHint: { color: colors.stone, fontSize: 12, lineHeight: 17, marginBottom: 10 },
+  buttonDisabled: { opacity: 0.55 },
   stepLabel: { color: colors.orange, fontSize: 11, fontWeight: "900", letterSpacing: 0.7, marginTop: 2 }, progressTrack: { height: 5, borderRadius: 3, backgroundColor: "#E4EDF2", marginTop: 9, marginBottom: 15, overflow: "hidden" }, progressFill: { height: 5, borderRadius: 3, backgroundColor: colors.orange }, reviewBox: { backgroundColor: "#EEF7FB", borderRadius: 12, padding: 13, marginBottom: 10 }, reviewTitle: { color: colors.navy, fontWeight: "900", marginBottom: 4 }, reviewText: { color: colors.stone, fontSize: 12, lineHeight: 17 }, wizardActions: { flexDirection: "row", gap: 9, alignItems: "center" }, wizardBack: { minHeight: 50, minWidth: 86, borderRadius: 12, borderWidth: 1, borderColor: colors.blue, alignItems: "center", justifyContent: "center", marginTop: 4 }, wizardBackText: { color: colors.blue, fontWeight: "900" }, wizardPrimary: { flex: 1 },
   messagesList: { maxHeight: 310, minHeight: 150, marginBottom: 11 }, messagesContent: { paddingVertical: 5, gap: 8 }, chatEmpty: { minHeight: 130, alignItems: "center", justifyContent: "center", paddingHorizontal: 20 }, chatEmptyTitle: { color: colors.navy, fontWeight: "900", marginBottom: 6 }, messageBubble: { maxWidth: "88%", borderRadius: 13, padding: 11 }, messageClient: { alignSelf: "flex-end", backgroundColor: "#DDF2FC" }, messageProvider: { alignSelf: "flex-start", backgroundColor: "#F1F4F6" }, messageSystem: { alignSelf: "center", maxWidth: "100%", backgroundColor: "#FFF3E8" }, messageSender: { color: colors.blue, fontSize: 10, fontWeight: "900", marginBottom: 3 }, messageBody: { color: colors.navy, fontSize: 13, lineHeight: 18 }, chatInput: { minHeight: 68, paddingTop: 12, textAlignVertical: "top" }, starsRow: { flexDirection: "row", justifyContent: "center", gap: 7, marginBottom: 17 }, starChoice: { color: "#CAD6DC", fontSize: 38 }, starChoiceActive: { color: colors.orange },
 });

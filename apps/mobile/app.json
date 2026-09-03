@@ -10,10 +10,19 @@
     "plugins": ["expo-router"],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.alsema.laburapp"
+      "bundleIdentifier": "com.alsema.laburapp",
+      "associatedDomains": ["applinks:laburapp.work", "webcredentials:laburapp.work"]
     },
     "android": {
       "package": "com.alsema.laburapp",
+      "intentFilters": [
+        {
+          "action": "VIEW",
+          "autoVerify": true,
+          "data": [{ "scheme": "https", "host": "laburapp.work", "pathPrefix": "/" }],
+          "category": ["BROWSABLE", "DEFAULT"]
+        }
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
