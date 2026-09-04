@@ -8,7 +8,7 @@ const TAB_HEADERS = {
   Pagos: ["payment_id", "fecha", "job_id", "proveedor_pago", "estado", "moneda", "total", "comision", "neto_profesional", "referencia_externa"],
   Agenda: ["agenda_id", "profesional_id", "fecha", "desde", "hasta", "estado", "request_id", "zona", "notas"],
   Auditoría: ["audit_id", "fecha", "actor_id", "accion", "entidad", "entidad_id", "motivo", "antes_json", "despues_json"],
-  Tarifario: ["item_id", "profesional_id", "profesional", "oficio", "servicio", "unidad", "precio_ars", "modalidad", "activo", "actualizado"],
+  Tarifario: ["item_id", "profesional_id", "profesional", "oficio", "servicio", "unidad", "precio_ars", "modalidad", "horario_desde", "horario_hasta", "activo", "actualizado"],
   Plantillas: ["template_id", "profesional_id", "profesional", "oficio", "nombre", "modalidad", "items_json", "plazo", "notas", "vigencia_dias", "activa", "actualizado"],
   Membresías: ["profesional_id", "profesional", "plan", "estado", "oficios_incluidos", "precio_mensual_ars", "periodo_hasta", "referencia_pago", "actualizado"],
 };
@@ -50,7 +50,7 @@ function doPost(e) {
       Pagos: [payload.id || event.id, payload.created_at || event.occurredAt, payload.job_id || "", payload.provider || "", payload.status || "", payload.currency || "ARS", payload.total || 0, payload.fee_amount || "", payload.provider_net || "", payload.provider_event_id || ""],
       Agenda: [payload.id || event.id, payload.provider_id || "", payload.created_at || event.occurredAt, payload.starts_at || "", payload.ends_at || "", payload.status || "", payload.request_id || "", payload.approximate_zone || "", payload.notes || ""],
       Auditoría: [payload.id || event.id, payload.created_at || event.occurredAt, payload.actor_id || "", payload.action || "", payload.target_type || "", payload.target_id || "", payload.reason || "", JSON.stringify(payload.before_data || {}), JSON.stringify(payload.after_data || {})],
-      Tarifario: [payload.id || event.id, payload.provider_id || event.actorUserId || "", payload.provider_name || "", payload.trade_name || "", payload.label || "", payload.unit || "servicio", payload.unit_price || 0, payload.pricing_mode || "itemized", payload.active === false ? "No" : "Sí", payload.updated_at || event.occurredAt],
+      Tarifario: [payload.id || event.id, payload.provider_id || event.actorUserId || "", payload.provider_name || "", payload.trade_name || "", payload.label || "", payload.unit || "servicio", payload.unit_price || 0, payload.pricing_mode || "itemized", payload.availability_start || "", payload.availability_end || "", payload.active === false ? "No" : "Sí", payload.updated_at || event.occurredAt],
       Plantillas: [payload.id || event.id, payload.provider_id || event.actorUserId || "", payload.provider_name || "", payload.trade_name || "", payload.name || "", payload.pricing_mode || "itemized", JSON.stringify(payload.items || []), payload.eta || "", payload.notes || "", payload.valid_days || 7, payload.active === false ? "No" : "Sí", payload.updated_at || event.occurredAt],
       Membresías: [payload.provider_id || event.actorUserId || event.id, payload.provider_name || "", payload.plan_code || "free", payload.status || "active", payload.max_trades || 2, payload.monthly_price || 0, payload.current_period_ends_at || "", payload.provider_reference || "", payload.updated_at || event.occurredAt],
     };

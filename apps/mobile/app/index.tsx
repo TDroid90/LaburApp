@@ -2,12 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { Image, Modal, Platform, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from "react-native";
 import { containsContactAttempt, reviewIsEligible } from "@laburapp/shared";
+import { ProviderProfileForm } from "../components/ProviderProfileForm";
 import { QuoteBuilderForm } from "../components/QuoteBuilderForm";
-import { TariffEditorForm } from "../components/TariffEditorForm";
 import { applyDemoAction, createDemoScenarios, DemoAction, primaryActionFor, statusPresentation, submitCustomQuote } from "../lib/demo-flow";
-import { loadLocalState, saveLocalState, SavedMessage, SavedProviderProfile, SavedQuote, SavedRequest, SavedSession, SavedTariffItem } from "../lib/local-store";
+import { loadLocalState, saveLocalState, SavedMessage, SavedProviderProfile, SavedQuote, SavedRequest, SavedSession } from "../lib/local-store";
 import { enqueueMirrorEvent, flushMirrorEvents } from "../lib/mirror-events";
-import { dictionaryForTrades } from "../lib/service-dictionary";
 import { backendMode, supabase } from "../lib/supabase";
 
 const providers = [
@@ -111,11 +110,10 @@ export default function Home() {
   const [quoteZone, setQuoteZone] = useState("");
   const [quoteDate, setQuoteDate] = useState("");
   const [profileModal, setProfileModal] = useState(false);
-  const [profileStep, setProfileStep] = useState(1);
   const [profileDraft, setProfileDraft] = useState<SavedProviderProfile>({ displayName: "", city: "", trade: "", bio: "", skills: "", zones: "", availability: "", published: false });
   const [profileError, setProfileError] = useState("");
   const [profileBusy, setProfileBusy] = useState(false);
-  const [tariffModal, setTariffModal] = useState(false);
+  const [followersVisible, setFollowersVisible] = useState(false);
   const [chatRequestId, setChatRequestId] = useState<string | null>(null);
   const [chatMessage, setChatMessage] = useState("");
   const [chatError, setChatError] = useState("");
@@ -187,7 +185,7 @@ export default function Home() {
     setAuthMode(null); setAuthPassword("");
     if (authMode === "register" && authRole === "provider") {
       setProfileDraft((current) => ({ ...current, displayName: name, city: authCity }));
-      setProfileStep(1); setProfileModal(true);
+      setProfileModal(true);
     }
   }
 
@@ -195,8 +193,28 @@ export default function Home() {
     setSession(account); setSignedInName(account.name); setAuthMode(null); setAuthError(""); setAuthPassword("");
     if (account.role === "admin") setTab("Panel");
     if (account.role === "provider" && !providerProfile) {
-      const baseProfile: SavedProviderProfile = { displayName: account.name, city: "Río Grande", trade: "Gasista", secondaryTrade: "Plomería", bio: "Profesional multioficio con experiencia en mantenimiento y reparaciones domiciliarias.", skills: "Diagnóstico, instalaciones, reparaciones", zones: "Río Grande", availability: "Lunes a viernes de 9 a 18", published: true };
-      setProviderProfile({ ...baseProfile, tariffItems: dictionaryForTrades([baseProfile.trade, baseProfile.secondaryTrade ?? ""]).map((item) => ({ ...item, enabled: true })) });
+      const services = [{ id: "demo-diagnostico", service: "Diagnóstico / visita técnica", price: 35000, startTime: "09:00", endTime: "18:00" }];
+      const baseProfile: SavedProviderProfile = {
+        displayName: account.name,
+        city: "Río Grande",
+        trade: "Gasista matriculado",
+        bio: "Mantenimiento, diagnóstico y reparaciones domiciliarias con atención clara y ordenada.",
+        training: "Formación técnica en instalaciones domiciliarias. Más de seis años de experiencia en mantenimiento y detección de pérdidas.",
+        certifications: ["Matrícula vigente", "Instalaciones domiciliarias"],
+        verified: true,
+        followersCount: 128,
+        profileReviews: [
+          { id: "review-demo-1", authorName: "María Fernández", rating: 5, comment: "Llegó en horario, explicó el problema y dejó todo funcionando.", createdAt: "2026-08-28" },
+          { id: "review-demo-2", authorName: "Jorge Acosta", rating: 5, comment: "Muy prolijo y el presupuesto coincidió con el trabajo realizado.", createdAt: "2026-08-17" },
+        ],
+        services,
+        skills: services.map((item) => item.service).join(", "),
+        zones: "Río Grande y alrededores",
+        availability: "Diagnóstico / visita técnica: 09:00 a 18:00",
+        tariffItems: services.map((item) => ({ id: item.id, trade: "Gasista matriculado", label: item.service, unit: "servicio", unitPrice: item.price, enabled: true })),
+        published: true,
+      };
+      setProviderProfile(baseProfile);
     }
   }
 
@@ -231,32 +249,43 @@ export default function Home() {
   function openProviderProfile() {
     if (!session) { setAuthMode("register"); setAuthRole("provider"); return; }
     setProfileDraft(providerProfile ?? { displayName: session.name, city: "", trade: "", bio: "", skills: "", zones: "", availability: "", published: false });
-    setProfileStep(1); setProfileError(""); setProfileModal(true);
+    setProfileError(""); setProfileModal(true);
   }
 
-  async function advanceProfile() {
+  async function saveProviderProfile(nextDraft: SavedProviderProfile) {
+    setProfileDraft(nextDraft);
     setProfileError("");
-    if (profileStep === 1 && (!profileDraft.displayName.trim() || !profileDraft.city.trim())) return setProfileError("Completá tu nombre visible y ciudad.");
-    if (profileStep === 2 && (!profileDraft.trade.trim() || profileDraft.bio.trim().length < 20)) return setProfileError("Indicá tu oficio y contanos al menos 20 caracteres sobre tu experiencia.");
-    if (profileStep < 3) return setProfileStep((step) => step + 1);
-    if (!profileDraft.zones.trim() || !profileDraft.availability.trim()) return setProfileError("Indicá las zonas donde trabajás y tu disponibilidad.");
     setProfileBusy(true);
+    const services = (nextDraft.services ?? []).slice(0, 2);
+    const tariffItems = services.map((item) => ({ id: item.id, trade: nextDraft.trade.trim(), label: item.service, unit: "servicio", unitPrice: item.price, enabled: true }));
+    let photoUri = nextDraft.photoUri;
     if (supabase) {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) { setProfileBusy(false); return setProfileError("Volvé a ingresar para publicar el perfil."); }
-      const profileResult = await supabase.from("profiles").upsert({ id: user.id, full_name: profileDraft.displayName.trim(), city: profileDraft.city.trim() });
-      const providerResult = await supabase.from("provider_profiles").upsert({ user_id: user.id, trade_title: profileDraft.trade.trim(), bio: profileDraft.bio.trim(), skills_text: profileDraft.skills.trim(), zones: profileDraft.zones.split(",").map((zone) => zone.trim()).filter(Boolean), availability: profileDraft.availability.trim(), published: true });
+      if (photoUri?.startsWith("data:")) {
+        const photoResponse = await fetch(photoUri);
+        const photoBlob = await photoResponse.blob();
+        const photoPath = `${user.id}/avatar-${Date.now()}.jpg`;
+        const { error: uploadError } = await supabase.storage.from("profile-photos").upload(photoPath, photoBlob, { contentType: photoBlob.type || "image/jpeg", upsert: true });
+        if (uploadError) { setProfileBusy(false); return setProfileError(uploadError.message); }
+        photoUri = supabase.storage.from("profile-photos").getPublicUrl(photoPath).data.publicUrl;
+      }
+      const profileResult = await supabase.from("profiles").upsert({ id: user.id, full_name: nextDraft.displayName.trim(), city: nextDraft.city.trim(), avatar_path: photoUri ?? null });
+      const providerResult = await supabase.from("provider_profiles").upsert({ user_id: user.id, trade_title: nextDraft.trade.trim(), bio: nextDraft.bio.trim(), skills_text: nextDraft.skills.trim(), training: nextDraft.training?.trim() || null, certifications: nextDraft.certifications ?? [], zones: nextDraft.zones.split(",").map((zone) => zone.trim()).filter(Boolean), availability: nextDraft.availability.trim(), published: true });
       if (profileResult.error || providerResult.error) { setProfileBusy(false); return setProfileError(profileResult.error?.message ?? providerResult.error?.message ?? "No pudimos publicar el perfil."); }
       await supabase.from("user_roles").upsert({ user_id: user.id, role: "provider" });
       await supabase.from("provider_services").delete().eq("provider_id", user.id);
-      const trades = [profileDraft.trade.trim(), profileDraft.secondaryTrade?.trim()].filter(Boolean).map((trade, index) => ({ provider_id: user.id, trade_name: trade, position: index + 1 }));
-      const { error: tradesError } = await supabase.from("provider_services").insert(trades);
+      const { error: tradesError } = await supabase.from("provider_services").insert({ provider_id: user.id, trade_name: nextDraft.trade.trim(), position: 1 });
       if (tradesError) { setProfileBusy(false); return setProfileError(tradesError.message); }
+      await supabase.from("provider_rate_items").delete().eq("provider_id", user.id);
+      const { error: ratesError } = await supabase.from("provider_rate_items").insert(services.map((item, index) => ({ provider_id: user.id, trade_name: nextDraft.trade.trim(), label: item.service, unit: "servicio", unit_price: item.price, availability_start: item.startTime, availability_end: item.endTime, slot_position: index + 1, active: true })));
+      if (ratesError) { setProfileBusy(false); return setProfileError(ratesError.message); }
     }
-    const publishedProfile = { ...profileDraft, published: true };
+    const publishedProfile = { ...nextDraft, photoUri, tariffItems, services, published: true };
     setProviderProfile(publishedProfile);
     setSession((current) => current ? { ...current, role: "provider" } : current);
     void enqueueMirrorEvent("Profesionales", { user_name: publishedProfile.displayName, trade: publishedProfile.trade, city: publishedProfile.city, availability: publishedProfile.availability, bio: publishedProfile.bio, source: supabase ? "supabase" : "mobile_demo" });
+    services.forEach((item) => void enqueueMirrorEvent("Tarifario", { id: item.id, provider_name: publishedProfile.displayName, trade_name: publishedProfile.trade, label: item.service, unit: "servicio", unit_price: item.price, availability_start: item.startTime, availability_end: item.endTime, pricing_mode: "itemized", active: true }));
     setProfileBusy(false);
     setProfileModal(false); setRequested("Perfil de prestador guardado y publicado.");
   }
@@ -264,20 +293,6 @@ export default function Home() {
   function signOut() {
     if (supabase) void supabase.auth.signOut();
     setSession(null); setSignedInName(null); setTab("Inicio"); setRequested("Cerraste sesión en este dispositivo.");
-  }
-
-  async function saveTariff(items: SavedTariffItem[]) {
-    if (!providerProfile) return;
-    if (supabase) {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) { setRequested("Volvé a ingresar para guardar el tarifario."); return; }
-      await supabase.from("provider_rate_items").delete().eq("provider_id", user.id);
-      const { error } = await supabase.from("provider_rate_items").insert(items.map((item) => ({ provider_id: user.id, trade_name: item.trade, label: item.label, unit: item.unit, unit_price: item.unitPrice, active: item.enabled })));
-      if (error) { setRequested(error.message); return; }
-    }
-    setProviderProfile({ ...providerProfile, tariffItems: items });
-    items.forEach((item) => void enqueueMirrorEvent("Tarifario", { id: item.id, provider_name: providerProfile.displayName, trade_name: item.trade, label: item.label, unit: item.unit, unit_price: item.unitPrice, pricing_mode: "itemized", active: item.enabled }));
-    setTariffModal(false); setRequested("Tarifario guardado. Ya está disponible al responder presupuestos.");
   }
 
   function updateRequest(id: string, updater: (request: SavedRequest) => SavedRequest) {
@@ -459,22 +474,24 @@ export default function Home() {
           <TouchableOpacity style={styles.secondaryButton} onPress={() => setAuthMode("register")}><Text style={styles.secondaryText}>Crear cuenta</Text></TouchableOpacity>
         </View> : <>
           <View style={styles.accountCard}>
-            <View style={styles.profileAvatar}><Text style={styles.profileAvatarText}>{session.name.slice(0, 1).toUpperCase()}</Text></View>
-            <View style={styles.accountBody}><Text style={styles.accountName}>{session.name}</Text><Text style={styles.accountEmail}>{session.email}</Text><Text style={styles.localBadge}>{isDemoSession ? "Cuenta de demostración" : backendMode === "supabase" ? "Conectado a Supabase" : "Guardado en este dispositivo"}</Text></View>
+            {providerProfile?.photoUri ? <Image source={{ uri: providerProfile.photoUri }} style={styles.profilePhoto} /> : <View style={styles.profileAvatar}><Text style={styles.profileAvatarText}>{session.name.slice(0, 1).toUpperCase()}</Text></View>}
+            <View style={styles.accountBody}><View style={styles.verifiedNameRow}><Text style={styles.accountName}>{session.name}</Text>{providerProfile?.verified && <Text accessibilityLabel="Perfil verificado" style={styles.verifiedIcon}>✓</Text>}</View><Text style={styles.accountEmail}>{session.email}</Text><Text style={styles.localBadge}>{isDemoSession ? "Cuenta de demostración" : backendMode === "supabase" ? "Conectado a Supabase" : "Guardado en este dispositivo"}</Text></View>
+            {providerProfile?.published && <TouchableOpacity accessibilityRole="button" style={styles.followersButton} onPress={() => setFollowersVisible((current) => !current)}><Text style={styles.followersCount}>{providerProfile.followersCount ?? 0}</Text><Text style={styles.followersLabel}>seguidores</Text></TouchableOpacity>}
           </View>
+          {followersVisible && providerProfile?.published && <View style={styles.followersPanel}><View style={styles.workCardTop}><Text style={styles.panelEyebrow}>SEGUIDORES</Text><TouchableOpacity onPress={() => setFollowersVisible(false)}><Text style={styles.cardLink}>Ocultar</Text></TouchableOpacity></View>{["María Fernández", "Jorge Acosta", "Lucía Pereyra", "Carlos Díaz"].map((name) => <View key={name} style={styles.followerRow}><View style={styles.followerAvatar}><Text style={styles.followerInitial}>{name.slice(0, 1)}</Text></View><Text style={styles.followerName}>{name}</Text><Text style={styles.followingBadge}>Siguiendo</Text></View>)}</View>}
           {session.role === "provider" && providerProfile?.published ? <View style={styles.providerPanel}>
             <View style={styles.workCardTop}><Text style={styles.panelEyebrow}>PERFIL DE PRESTADOR</Text><Text style={styles.publishedBadge}>Publicado</Text></View>
-            <Text style={styles.providerTrade}>{providerProfile.trade}{providerProfile.secondaryTrade ? ` · ${providerProfile.secondaryTrade}` : ""}</Text>
+            <Text style={styles.providerTrade}>{providerProfile.trade}</Text>
             <Text style={styles.workDescription}>{providerProfile.bio}</Text>
             <Text style={styles.workMeta}>📍 {providerProfile.city} · {providerProfile.zones}</Text>
-            <Text style={styles.workMeta}>🕐 {providerProfile.availability}</Text>
-            <Text style={styles.skillsLine}>{providerProfile.skills}</Text>
-            <TouchableOpacity style={styles.secondaryButton} onPress={openProviderProfile}><Text style={styles.secondaryText}>Editar perfil profesional</Text></TouchableOpacity>
-            <View style={styles.tariffSummary}><View><Text style={styles.panelEyebrow}>MI TARIFARIO</Text><Text style={styles.tariffSummaryTitle}>{providerProfile.tariffItems?.filter((item) => item.enabled).length ?? 0} servicios guardados</Text></View><TouchableOpacity style={styles.tariffButton} onPress={() => setTariffModal(true)}><Text style={styles.tariffButtonText}>Editar tarifario</Text></TouchableOpacity></View>
-            <Text style={styles.membershipHint}>Incluye hasta 2 oficios. El plan multioficio pago se aplicará recién desde el tercero.</Text>
+            {!!providerProfile.training && <View style={styles.profileSection}><Text style={styles.panelEyebrow}>FORMACIÓN Y EXPERIENCIA</Text><Text style={styles.profileSectionText}>{providerProfile.training}</Text></View>}
+            {!!providerProfile.certifications?.length && <View style={styles.profileSection}><Text style={styles.panelEyebrow}>CERTIFICACIONES</Text><View style={styles.certificationList}>{providerProfile.certifications.map((certification) => <View key={certification} style={styles.certificationBadge}><Text style={styles.certificationIcon}>✓</Text><Text style={styles.certificationText}>{certification}</Text></View>)}</View></View>}
+            <View style={styles.profileSection}><View style={styles.workCardTop}><Text style={styles.panelEyebrow}>SERVICIOS</Text><Text style={styles.servicePlanBadge}>PLAN GRATIS</Text></View>{(providerProfile.services ?? []).map((service) => <View key={service.id} style={styles.profileServiceCard}><View style={styles.profileServiceCopy}><Text style={styles.profileServiceName}>{service.service}</Text><Text style={styles.profileServiceTime}>Disponible de {service.startTime} a {service.endTime}</Text></View><View><Text style={styles.profileServicePrice}>${service.price.toLocaleString("es-AR")}</Text><Text style={styles.profileServiceCurrency}>ARS</Text></View></View>)}<View style={styles.lockedProfileService}><Text style={styles.lockedProfileServiceText}>🔒 Tercer servicio con membresía</Text></View></View>
+            <TouchableOpacity style={styles.secondaryButton} onPress={openProviderProfile}><Text style={styles.secondaryText}>Editar perfil y servicios</Text></TouchableOpacity>
+            {!!providerProfile.profileReviews?.length && <View style={styles.profileSection}><View style={styles.workCardTop}><Text style={styles.panelEyebrow}>RESEÑAS</Text><Text style={styles.reviewAverage}>★ 5,0</Text></View>{providerProfile.profileReviews.map((review) => <View key={review.id} style={styles.profileReview}><View style={styles.reviewAuthorRow}><View style={styles.reviewAvatar}><Text style={styles.reviewAvatarText}>{review.authorName.slice(0, 1)}</Text></View><View style={styles.reviewAuthorCopy}><Text style={styles.reviewAuthor}>{review.authorName}</Text><Text style={styles.reviewDate}>{review.createdAt}</Text></View><Text style={styles.reviewStarsSmall}>{"★".repeat(review.rating)}</Text></View><Text style={styles.reviewComment}>“{review.comment}”</Text><Text style={styles.verifiedReview}>✓ Trabajo verificado en LaburApp</Text></View>)}</View>}
           </View> : session.role === "client" || session.role === "provider" ? <View style={styles.providerInvite}>
             <Text style={styles.providerInviteTitle}>¿Querés ofrecer tus servicios?</Text>
-            <Text style={styles.pageCopy}>Creá tu perfil profesional paso a paso y empezá a recibir solicitudes.</Text>
+            <Text style={styles.pageCopy}>Completá todo en una sola pantalla y empezá a recibir solicitudes.</Text>
             <TouchableOpacity style={styles.modalPrimary} onPress={openProviderProfile}><Text style={styles.modalPrimaryText}>Crear perfil de prestador</Text></TouchableOpacity>
           </View> : <View style={styles.reviewBox}><Text style={styles.reviewTitle}>Cuenta administradora</Text><Text style={styles.reviewText}>Usá la pestaña Panel para moderar usuarios, profesionales, trabajos, pagos y auditoría.</Text></View>}
           <TouchableOpacity style={styles.logoutButton} onPress={signOut}><Text style={styles.logoutText}>Cerrar sesión</Text></TouchableOpacity>
@@ -505,31 +522,7 @@ export default function Home() {
       </View></View>
     </AppModal>
     <AppModal visible={profileModal} onRequestClose={() => setProfileModal(false)}>
-      <View style={styles.modalBackdrop}><View style={styles.modalCard}>
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar" style={styles.modalClose} onPress={() => setProfileModal(false)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
-        <Text style={styles.stepLabel}>PASO {profileStep} DE 3</Text>
-        <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${profileStep * 33.333}%` }]} /></View>
-        <Text style={styles.modalTitle}>{profileStep === 1 ? "Tu información básica" : profileStep === 2 ? "Tu experiencia" : "Dónde y cuándo trabajás"}</Text>
-        <Text style={styles.modalCopy}>{profileStep === 1 ? "Estos datos van a identificarte ante posibles clientes." : profileStep === 2 ? "Explicá con claridad qué hacés y en qué te destacás." : "Definí tu zona de cobertura y disponibilidad habitual."}</Text>
-        {profileStep === 1 && <>
-          <TextInput value={profileDraft.displayName} onChangeText={(displayName) => setProfileDraft({ ...profileDraft, displayName })} placeholder="Nombre visible" placeholderTextColor="#71818B" style={styles.modalInput} />
-          <TextInput value={profileDraft.city} onChangeText={(city) => setProfileDraft({ ...profileDraft, city })} placeholder="Ciudad" placeholderTextColor="#71818B" style={styles.modalInput} />
-        </>}
-        {profileStep === 2 && <>
-          <TextInput value={profileDraft.trade} onChangeText={(trade) => setProfileDraft({ ...profileDraft, trade })} placeholder="Oficio o profesión principal" placeholderTextColor="#71818B" style={styles.modalInput} />
-          <TextInput value={profileDraft.secondaryTrade ?? ""} onChangeText={(secondaryTrade) => setProfileDraft({ ...profileDraft, secondaryTrade })} placeholder="Segundo oficio (opcional)" placeholderTextColor="#71818B" style={styles.modalInput} />
-          <Text style={styles.twoTradesHint}>Podés publicar hasta 2 oficios sin costo. Más adelante, el tercero será parte de la membresía multioficio.</Text>
-          <TextInput multiline value={profileDraft.bio} onChangeText={(bio) => setProfileDraft({ ...profileDraft, bio })} placeholder="Contá tu experiencia, cómo trabajás y qué ofrecés" placeholderTextColor="#71818B" style={[styles.modalInput, styles.multiline]} />
-          <TextInput value={profileDraft.skills} onChangeText={(skills) => setProfileDraft({ ...profileDraft, skills })} placeholder="Especialidades separadas por comas" placeholderTextColor="#71818B" style={styles.modalInput} />
-        </>}
-        {profileStep === 3 && <>
-          <TextInput value={profileDraft.zones} onChangeText={(zones) => setProfileDraft({ ...profileDraft, zones })} placeholder="Zonas donde trabajás" placeholderTextColor="#71818B" style={styles.modalInput} />
-          <TextInput value={profileDraft.availability} onChangeText={(availability) => setProfileDraft({ ...profileDraft, availability })} placeholder="Disponibilidad (ej. lunes a viernes, 9 a 18)" placeholderTextColor="#71818B" style={styles.modalInput} />
-          <View style={styles.reviewBox}><Text style={styles.reviewTitle}>Antes de publicar</Text><Text style={styles.reviewText}>No incluyas teléfono, correo ni domicilio. Más adelante vas a poder sumar fotos y documentación para verificar tu perfil.</Text></View>
-        </>}
-        {!!profileError && <Text style={styles.modalError}>{profileError}</Text>}
-        <View style={styles.wizardActions}>{profileStep > 1 && <TouchableOpacity accessibilityRole="button" style={styles.wizardBack} onPress={() => { setProfileError(""); setProfileStep((step) => step - 1); }}><Text style={styles.wizardBackText}>Atrás</Text></TouchableOpacity>}<TouchableOpacity accessibilityRole="button" disabled={profileBusy} style={[styles.modalPrimary, styles.wizardPrimary, profileBusy && styles.buttonDisabled]} onPress={advanceProfile}><Text style={styles.modalPrimaryText}>{profileBusy ? "Guardando…" : profileStep === 3 ? "Publicar perfil" : "Continuar"}</Text></TouchableOpacity></View>
-      </View></View>
+      <View style={styles.modalBackdrop}><ProviderProfileForm key={`${profileDraft.displayName}-${profileModal}`} initialProfile={profileDraft} email={session?.email ?? ""} busy={profileBusy} remoteError={profileError} onCancel={() => setProfileModal(false)} onSubmit={(profile) => void saveProviderProfile(profile)} /></View>
     </AppModal>
     <AppModal visible={quoteProvider !== null} onRequestClose={() => setQuoteProvider(null)}>
       <View style={styles.modalBackdrop}><View style={styles.modalCard}>
@@ -575,9 +568,6 @@ export default function Home() {
     <AppModal visible={quoteBuilderRequest !== null} onRequestClose={() => setQuoteBuilderRequestId(null)}>
       <View style={styles.modalBackdrop}>{quoteBuilderRequest && <QuoteBuilderForm request={quoteBuilderRequest} tariffItems={providerProfile?.tariffItems} onCancel={() => setQuoteBuilderRequestId(null)} onSubmit={sendModularQuote} />}</View>
     </AppModal>
-    <AppModal visible={tariffModal && providerProfile !== null} onRequestClose={() => setTariffModal(false)}>
-      <View style={styles.modalBackdrop}>{providerProfile && <TariffEditorForm profile={providerProfile} onCancel={() => setTariffModal(false)} onSave={(items) => void saveTariff(items)} />}</View>
-    </AppModal>
     <View style={styles.nav}>{navigationItems.map((item) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={item} key={item} onPress={() => setTab(item)} style={styles.navItem}><Text style={[styles.navText, tab === item && styles.navActive]}>{item}</Text></TouchableOpacity>)}</View>
   </SafeAreaView>;
 }
@@ -592,7 +582,7 @@ const styles = StyleSheet.create({
   empty: { minHeight: 360, justifyContent: "center", alignItems: "center", padding: 28 }, emptyTitle: { color: colors.navy, fontSize: 22, fontWeight: "900", textAlign: "center" }, catLarge: { fontSize: 58, marginBottom: 14 }, secondaryButton: { marginTop: 20, borderWidth: 1, borderColor: colors.blue, borderRadius: 12, paddingVertical: 12, paddingHorizontal: 18 }, secondaryText: { color: colors.blue, fontWeight: "800" },
   sectionPage: { width: "100%", maxWidth: 760, alignSelf: "center" }, pageTitle: { color: colors.navy, fontSize: 28, fontWeight: "900" }, pageCopy: { color: colors.stone, fontSize: 15, lineHeight: 21, marginTop: 5, marginBottom: 18 }, notificationsPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 17, padding: 15, marginBottom: 12 }, notificationHeading: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }, notificationTitle: { color: colors.navy, fontSize: 17, fontWeight: "900", marginTop: 2 }, notificationCount: { minWidth: 30, height: 30, borderRadius: 15, color: "white", backgroundColor: colors.orange, textAlign: "center", lineHeight: 30, fontWeight: "900" }, notificationRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 11, borderTopWidth: 1, borderTopColor: "#EDF4F7" }, notificationCopy: { flex: 1 }, notificationName: { color: colors.navy, fontSize: 13, fontWeight: "900" }, notificationText: { color: colors.stone, fontSize: 11, marginTop: 3 }, notificationAction: { minHeight: 38, borderRadius: 9, backgroundColor: colors.orange, justifyContent: "center", paddingHorizontal: 10 }, notificationActionText: { color: "white", fontSize: 10, fontWeight: "900" }, notificationEmpty: { color: colors.stone, fontSize: 12, paddingVertical: 8 }, simulatorBanner: { backgroundColor: colors.navy, borderRadius: 17, padding: 15, flexDirection: "row", alignItems: "center", gap: 12, marginBottom: 8 }, simulatorCopy: { flex: 1 }, simulatorTitle: { color: "white", fontSize: 15, fontWeight: "900" }, simulatorText: { color: "#CFE5F0", fontSize: 11, lineHeight: 16, marginTop: 3 }, simulatorButton: { minHeight: 40, borderRadius: 10, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", paddingHorizontal: 12 }, simulatorButtonText: { color: "white", fontSize: 11, fontWeight: "900" }, emptyPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 20, padding: 26, alignItems: "center", marginTop: 8 }, emptyIcon: { fontSize: 48, marginBottom: 12 }, centerCopy: { color: colors.stone, textAlign: "center", lineHeight: 21, marginTop: 8, maxWidth: 430 },
   workCard: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 17, marginTop: 12 }, workCardTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }, workStatus: { color: colors.orange, fontSize: 12, fontWeight: "900" }, statusGreen: { color: colors.green }, statusBlue: { color: colors.blue }, statusRed: { color: "#B7452B" }, workDate: { color: colors.stone, fontSize: 12 }, workProvider: { color: colors.navy, fontSize: 19, fontWeight: "900", marginTop: 12 }, workDescription: { color: colors.stone, lineHeight: 20, marginTop: 10 }, workMeta: { color: colors.navy, fontSize: 13, marginTop: 7 }, nextStep: { backgroundColor: "#FFF3E8", borderRadius: 10, padding: 11, marginTop: 13 }, nextStepText: { color: "#9A4700", fontSize: 12, fontWeight: "700" }, quoteBox: { borderWidth: 1, borderColor: "#B9DDEC", backgroundColor: "#F3FBFE", borderRadius: 13, padding: 13, marginTop: 13 }, quoteLabel: { color: colors.blue, fontSize: 11, fontWeight: "900" }, quoteAmount: { color: colors.navy, fontSize: 20, fontWeight: "900" }, quoteScope: { color: colors.navy, fontSize: 13, lineHeight: 18, marginTop: 8 }, quoteEta: { color: colors.stone, fontSize: 12, marginTop: 5 }, quoteBreakdown: { borderTopWidth: 1, borderTopColor: "#CFE5EF", marginTop: 10, paddingTop: 7 }, quoteLine: { flexDirection: "row", justifyContent: "space-between", gap: 8, paddingVertical: 4 }, quoteLineName: { color: colors.stone, fontSize: 11, flex: 1 }, quoteLinePrice: { color: colors.navy, fontSize: 11, fontWeight: "800" }, quoteNotes: { color: colors.stone, fontSize: 11, lineHeight: 16, marginTop: 7, fontStyle: "italic" }, quoteValidity: { color: colors.blue, fontSize: 10, fontWeight: "800", marginTop: 7 }, paymentBox: { backgroundColor: "#E7F7F0", borderRadius: 12, padding: 12, marginTop: 11 }, paymentTitle: { color: colors.green, fontWeight: "900", fontSize: 13 }, paymentText: { color: "#315F51", fontSize: 12, lineHeight: 17, marginTop: 4 }, lastMessage: { color: colors.stone, fontSize: 12, fontStyle: "italic", marginTop: 11 }, actionRow: { flexDirection: "row", gap: 8, marginTop: 12 }, outlineAction: { flex: 1, minHeight: 46, borderWidth: 1, borderColor: colors.blue, borderRadius: 11, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 }, outlineActionText: { color: colors.blue, fontSize: 12, fontWeight: "900", textAlign: "center" }, primaryAction: { flex: 1.25, minHeight: 46, borderRadius: 11, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 }, primaryActionFull: { minHeight: 46, borderRadius: 11, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", paddingHorizontal: 10, marginTop: 12 }, primaryActionText: { color: "white", fontSize: 12, fontWeight: "900", textAlign: "center" }, cardLinks: { flexDirection: "row", flexWrap: "wrap", justifyContent: "space-between", gap: 12, marginTop: 14 }, cardLink: { color: colors.blue, fontSize: 12, fontWeight: "800" }, cancelLink: { color: "#B7452B", fontSize: 12, fontWeight: "800" }, reviewPublished: { backgroundColor: "#F7FAFB", borderRadius: 12, padding: 12, marginTop: 12 }, reviewStars: { color: colors.orange, fontSize: 18, letterSpacing: 2 }, reviewPublishedText: { color: colors.navy, lineHeight: 19, marginTop: 5 }, verifiedReview: { color: colors.green, fontSize: 11, fontWeight: "800", marginTop: 7 },
-  accountCard: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 16, flexDirection: "row", alignItems: "center", marginTop: 8 }, profileAvatar: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.navy, alignItems: "center", justifyContent: "center", marginRight: 13 }, profileAvatarText: { color: "white", fontSize: 23, fontWeight: "900" }, accountBody: { flex: 1 }, accountName: { color: colors.navy, fontSize: 18, fontWeight: "900" }, accountEmail: { color: colors.stone, marginTop: 2 }, localBadge: { color: colors.green, fontSize: 11, fontWeight: "800", marginTop: 7 }, providerPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 17, marginTop: 14 }, panelEyebrow: { color: colors.stone, fontSize: 11, fontWeight: "900" }, publishedBadge: { color: colors.green, backgroundColor: "#E7F7F0", borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4, fontSize: 11, fontWeight: "900" }, providerTrade: { color: colors.navy, fontSize: 21, fontWeight: "900", marginTop: 13 }, skillsLine: { color: colors.blue, fontSize: 13, fontWeight: "700", marginTop: 10 }, tariffSummary: { marginTop: 16, paddingTop: 14, borderTopWidth: 1, borderTopColor: "#E4EDF2", flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 }, tariffSummaryTitle: { color: colors.navy, fontSize: 15, fontWeight: "900", marginTop: 3 }, tariffButton: { minHeight: 40, justifyContent: "center", borderRadius: 10, backgroundColor: colors.blue, paddingHorizontal: 12 }, tariffButtonText: { color: "white", fontSize: 11, fontWeight: "900" }, membershipHint: { color: colors.stone, backgroundColor: "#F3F7F9", borderRadius: 9, padding: 10, fontSize: 10, lineHeight: 15, marginTop: 10 }, providerInvite: { backgroundColor: colors.navy, borderRadius: 20, padding: 20, marginTop: 14 }, providerInviteTitle: { color: "white", fontSize: 20, fontWeight: "900" }, logoutButton: { alignSelf: "center", padding: 14, marginTop: 13 }, logoutText: { color: "#B7452B", fontWeight: "800" }, adminMetrics: { flexDirection: "row", flexWrap: "wrap", gap: 10 }, adminMetric: { flexGrow: 1, flexBasis: 150, backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 14, padding: 16 }, adminMetricValue: { color: colors.navy, fontSize: 27, fontWeight: "900", marginTop: 6 }, adminLink: { minHeight: 48, borderTopWidth: 1, borderTopColor: "#EDF4F7", flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, adminLinkText: { color: colors.navy, fontWeight: "800" }, adminLinkArrow: { color: colors.blue, fontSize: 25 },
+  accountCard: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 16, flexDirection: "row", alignItems: "center", marginTop: 8 }, profileAvatar: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.navy, alignItems: "center", justifyContent: "center", marginRight: 13 }, profilePhoto: { width: 56, height: 56, borderRadius: 28, marginRight: 13 }, profileAvatarText: { color: "white", fontSize: 23, fontWeight: "900" }, accountBody: { flex: 1 }, verifiedNameRow: { flexDirection: "row", alignItems: "center", gap: 7 }, accountName: { color: colors.navy, fontSize: 18, fontWeight: "900" }, verifiedIcon: { width: 19, height: 19, borderRadius: 10, color: "white", backgroundColor: colors.blue, textAlign: "center", lineHeight: 19, fontSize: 11, fontWeight: "900" }, accountEmail: { color: colors.stone, marginTop: 2 }, localBadge: { color: colors.green, fontSize: 11, fontWeight: "800", marginTop: 7 }, followersButton: { alignItems: "center", justifyContent: "center", paddingHorizontal: 8 }, followersCount: { color: colors.navy, fontSize: 17, fontWeight: "900" }, followersLabel: { color: colors.blue, fontSize: 9, fontWeight: "800" }, followersPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 15, padding: 14, marginTop: 10 }, followerRow: { minHeight: 45, flexDirection: "row", alignItems: "center", borderTopWidth: 1, borderTopColor: "#EDF4F7" }, followerAvatar: { width: 29, height: 29, borderRadius: 15, backgroundColor: "#DDF0F7", alignItems: "center", justifyContent: "center", marginRight: 9 }, followerInitial: { color: colors.navy, fontWeight: "900" }, followerName: { flex: 1, color: colors.navy, fontSize: 12, fontWeight: "800" }, followingBadge: { color: colors.green, fontSize: 9, fontWeight: "900" }, providerPanel: { backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 18, padding: 17, marginTop: 14 }, panelEyebrow: { color: colors.stone, fontSize: 11, fontWeight: "900" }, publishedBadge: { color: colors.green, backgroundColor: "#E7F7F0", borderRadius: 12, paddingHorizontal: 9, paddingVertical: 4, fontSize: 11, fontWeight: "900" }, providerTrade: { color: colors.navy, fontSize: 21, fontWeight: "900", marginTop: 13 }, profileSection: { marginTop: 16, paddingTop: 14, borderTopWidth: 1, borderTopColor: "#E4EDF2" }, profileSectionText: { color: colors.stone, fontSize: 12, lineHeight: 18, marginTop: 7 }, certificationList: { flexDirection: "row", flexWrap: "wrap", gap: 7, marginTop: 9 }, certificationBadge: { flexDirection: "row", alignItems: "center", gap: 5, paddingHorizontal: 9, paddingVertical: 7, borderRadius: 12, backgroundColor: "#EAF8F2", borderWidth: 1, borderColor: "#B8E5D4" }, certificationIcon: { width: 16, height: 16, borderRadius: 8, color: "white", backgroundColor: colors.green, textAlign: "center", lineHeight: 16, fontSize: 9, fontWeight: "900" }, certificationText: { color: "#315F51", fontSize: 10, fontWeight: "900" }, servicePlanBadge: { color: colors.green, fontSize: 9, fontWeight: "900" }, profileServiceCard: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 12, marginTop: 9, backgroundColor: "#FAFDFE" }, profileServiceCopy: { flex: 1 }, profileServiceName: { color: colors.navy, fontSize: 13, fontWeight: "900" }, profileServiceTime: { color: colors.stone, fontSize: 10, marginTop: 4 }, profileServicePrice: { color: colors.navy, fontSize: 17, fontWeight: "900", textAlign: "right" }, profileServiceCurrency: { color: colors.stone, fontSize: 8, fontWeight: "900", textAlign: "right" }, lockedProfileService: { minHeight: 39, justifyContent: "center", borderRadius: 10, backgroundColor: "#F1F4F6", paddingHorizontal: 11, marginTop: 7 }, lockedProfileServiceText: { color: colors.stone, fontSize: 10, fontWeight: "800" }, reviewAverage: { color: colors.orange, fontSize: 12, fontWeight: "900" }, profileReview: { backgroundColor: "#F8FBFC", borderRadius: 12, padding: 11, marginTop: 9 }, reviewAuthorRow: { flexDirection: "row", alignItems: "center" }, reviewAvatar: { width: 32, height: 32, borderRadius: 16, backgroundColor: "#DDF0F7", alignItems: "center", justifyContent: "center", marginRight: 8 }, reviewAvatarText: { color: colors.navy, fontWeight: "900" }, reviewAuthorCopy: { flex: 1 }, reviewAuthor: { color: colors.navy, fontSize: 11, fontWeight: "900" }, reviewDate: { color: colors.stone, fontSize: 8, marginTop: 2 }, reviewStarsSmall: { color: colors.orange, fontSize: 10, letterSpacing: 1 }, reviewComment: { color: colors.stone, fontSize: 11, lineHeight: 16, marginTop: 8 }, providerInvite: { backgroundColor: colors.navy, borderRadius: 20, padding: 20, marginTop: 14 }, providerInviteTitle: { color: "white", fontSize: 20, fontWeight: "900" }, logoutButton: { alignSelf: "center", padding: 14, marginTop: 13 }, logoutText: { color: "#B7452B", fontWeight: "800" }, adminMetrics: { flexDirection: "row", flexWrap: "wrap", gap: 10 }, adminMetric: { flexGrow: 1, flexBasis: 150, backgroundColor: "white", borderWidth: 1, borderColor: colors.line, borderRadius: 14, padding: 16 }, adminMetricValue: { color: colors.navy, fontSize: 27, fontWeight: "900", marginTop: 6 }, adminLink: { minHeight: 48, borderTopWidth: 1, borderTopColor: "#EDF4F7", flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, adminLinkText: { color: colors.navy, fontWeight: "800" }, adminLinkArrow: { color: colors.blue, fontSize: 25 },
   toast: { position: "absolute", bottom: 72, left: 18, right: 18, backgroundColor: colors.green, borderRadius: 14, padding: 14, flexDirection: "row", justifyContent: "space-between", alignItems: "center" }, toastText: { color: "white", fontWeight: "700", flex: 1 }, toastClose: { color: "white", textDecorationLine: "underline", marginLeft: 12 }, nav: { position: "absolute", bottom: 0, left: 0, right: 0, height: 66, backgroundColor: "white", borderTopWidth: 1, borderTopColor: colors.line, flexDirection: "row" }, navItem: { flex: 1, alignItems: "center", justifyContent: "center" }, navText: { color: colors.stone, fontWeight: "700" }, navActive: { color: colors.orange },
   modalBackdrop: { position: Platform.OS === "web" ? ("fixed" as "absolute") : "absolute", top: 0, right: 0, bottom: 0, left: 0, zIndex: 1000, elevation: 20, backgroundColor: "rgba(0,19,40,0.62)", justifyContent: "flex-end" }, modalCard: { backgroundColor: "white", borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 22, paddingBottom: 30, maxHeight: "92%" }, modalClose: { position: "absolute", right: 18, top: 12, zIndex: 2, width: 36, height: 36, borderRadius: 18, backgroundColor: "#EEF5F8", alignItems: "center", justifyContent: "center" }, modalCloseText: { color: colors.navy, fontSize: 27, lineHeight: 29 }, modalTitle: { color: colors.navy, fontSize: 24, fontWeight: "900", marginTop: 4, paddingRight: 36 }, modalCopy: { color: colors.stone, fontSize: 14, lineHeight: 20, marginTop: 6, marginBottom: 14 }, modalInput: { minHeight: 48, borderWidth: 1, borderColor: colors.line, borderRadius: 12, paddingHorizontal: 14, color: colors.navy, fontSize: 15, marginBottom: 10, backgroundColor: "#FBFDFE" }, multiline: { minHeight: 88, paddingTop: 13, textAlignVertical: "top" }, modalLabel: { color: colors.navy, fontSize: 13, fontWeight: "800", marginTop: 2, marginBottom: 8 }, demoAccounts: { marginBottom: 10 }, demoAccountButton: { minHeight: 50, borderWidth: 1, borderColor: colors.line, borderRadius: 11, paddingHorizontal: 12, marginBottom: 7, flexDirection: "row", alignItems: "center", justifyContent: "space-between", backgroundColor: "#FAFDFE" }, demoAccountTitle: { color: colors.navy, fontSize: 12, fontWeight: "900" }, demoAccountEmail: { color: colors.stone, fontSize: 10, marginTop: 2 }, demoAccountArrow: { color: colors.blue, fontSize: 24 }, loginDivider: { flexDirection: "row", alignItems: "center", gap: 8, marginVertical: 8 }, loginDividerLine: { height: 1, flex: 1, backgroundColor: colors.line }, loginDividerText: { color: colors.stone, fontSize: 10 }, twoTradesHint: { color: "#6D5B45", backgroundColor: "#FFF7E9", borderRadius: 9, padding: 9, fontSize: 10, lineHeight: 15, marginTop: -2, marginBottom: 9 }, roleRow: { flexDirection: "row", gap: 8, marginBottom: 12 }, roleChoice: { flex: 1, minHeight: 42, borderWidth: 1, borderColor: colors.line, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 }, roleChoiceActive: { borderColor: colors.blue, backgroundColor: "#E8F6FD" }, roleChoiceText: { color: colors.stone, fontSize: 12, fontWeight: "800" }, roleChoiceTextActive: { color: colors.navy }, termsRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 }, checkbox: { color: colors.orange, fontSize: 22, marginRight: 7 }, termsText: { color: colors.stone, fontSize: 12, flex: 1 }, modalError: { color: "#BF4525", fontSize: 13, fontWeight: "700", marginBottom: 10 }, modalPrimary: { minHeight: 50, borderRadius: 12, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", marginTop: 4 }, modalPrimaryText: { color: "white", fontSize: 15, fontWeight: "900" }, recoveryLink: { color: colors.navy, fontWeight: "800", textAlign: "center", marginTop: 14 }, modalSwitch: { color: colors.blue, fontWeight: "800", textAlign: "center", marginTop: 15 }, privacyHint: { color: colors.stone, fontSize: 12, lineHeight: 17, marginBottom: 10 },
   buttonDisabled: { opacity: 0.55 },

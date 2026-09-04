@@ -64,12 +64,35 @@ export type SavedProviderProfile = {
   city: string;
   trade: string;
   secondaryTrade?: string;
+  photoUri?: string;
+  verified?: boolean;
+  followersCount?: number;
   bio: string;
+  training?: string;
+  certifications?: string[];
+  services?: SavedServiceOffer[];
+  profileReviews?: SavedProfileReview[];
   skills: string;
   zones: string;
   availability: string;
   tariffItems?: SavedTariffItem[];
   published: boolean;
+};
+
+export type SavedServiceOffer = {
+  id: string;
+  service: string;
+  price: number;
+  startTime: string;
+  endTime: string;
+};
+
+export type SavedProfileReview = {
+  id: string;
+  authorName: string;
+  rating: number;
+  comment: string;
+  createdAt: string;
 };
 
 export type SavedTariffItem = {
@@ -95,10 +118,21 @@ export async function loadLocalState(): Promise<LocalAppState> {
     const raw = await AsyncStorage.getItem(STORAGE_KEY);
     if (!raw) return emptyState;
     const parsed = JSON.parse(raw) as Partial<LocalAppState>;
+    const rawProfile = parsed.providerProfile ?? null;
+    const providerProfile = rawProfile ? {
+      ...rawProfile,
+      services: rawProfile.services?.length ? rawProfile.services : rawProfile.tariffItems?.slice(0, 2).map((item, index) => ({
+        id: item.id || `legacy-service-${index}`,
+        service: item.label,
+        price: item.unitPrice,
+        startTime: "09:00",
+        endTime: "18:00",
+      })),
+    } : null;
     return {
       session: parsed.session ?? null,
       requests: Array.isArray(parsed.requests) ? parsed.requests : [],
-      providerProfile: parsed.providerProfile ?? null,
+      providerProfile,
     };
   } catch {
     return emptyState;

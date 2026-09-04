@@ -22,8 +22,8 @@ Cada ítem guarda oficio, servicio, unidad, precio, modalidad y estado activo. E
 
 ## Multioficio y membresía
 
-- Plan gratuito: hasta 2 oficios publicados.
-- Futuro plan Multioficio: desde el tercer oficio, hasta 10 oficios.
+- Plan gratuito: una presentación profesional y hasta 2 servicios publicados.
+- Futuro plan Multioficio: desde el segundo oficio o el tercer servicio, hasta 10 de cada uno.
 - No cobrar por responder presupuestos, guardar el tarifario ni recibir solicitudes.
 - El precio de la membresía queda en cero hasta validar demanda, conversión y disposición de pago.
 - Los oficios regulados siguen requiriendo verificación individual de matrícula.
