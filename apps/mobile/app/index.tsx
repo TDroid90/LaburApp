@@ -259,7 +259,7 @@ export default function Home() {
     const services = (nextDraft.services ?? []).slice(0, 2);
     const tariffItems = services.map((item) => ({ id: item.id, trade: nextDraft.trade.trim(), label: item.service, unit: "servicio", unitPrice: item.price, enabled: true }));
     let photoUri = nextDraft.photoUri;
-    if (supabase) {
+    if (supabase && !isDemoSession) {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) { setProfileBusy(false); return setProfileError("Volvé a ingresar para publicar el perfil."); }
       if (photoUri?.startsWith("data:")) {
