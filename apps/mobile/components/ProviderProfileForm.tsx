@@ -1,48 +1,42 @@
 import { useMemo, useState } from "react";
 import * as ImagePicker from "expo-image-picker";
 import { Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from "react-native";
+import { containsContactAttempt } from "@laburapp/shared";
 import type { SavedProviderProfile, SavedServiceOffer } from "../lib/local-store";
+import { certificationSuggestions, professionalSuggestions, providerServiceCatalog, serviceCombinationIsValid, specialtyDescription } from "./provider-service-catalog";
 
-const serviceOptions = [
-  "Diagnóstico / visita técnica",
-  "Reparación",
-  "Instalación",
-  "Mantenimiento preventivo",
-  "Urgencia",
-  "Asesoramiento",
-  "Mano de obra por hora",
-  "Jornada completa",
-  "Media jornada",
-  "Visita de medición",
-  "Limpieza general",
-  "Limpieza profunda",
-  "Cuidado por hora",
-  "Guardia nocturna",
-  "Carga y descarga",
-  "Entrega / reparto",
-  "Armado",
-  "Pintura por m²",
-  "Poda / jardinería",
-  "Soporte técnico",
-];
+const cities = ["Río Grande", "Ushuaia", "Tolhuin"];
+const coverageOptions = ["Solo localidad", "Híbrido", "Toda la provincia"];
 
 function numericValue(value: string) {
   const parsed = Number(value.replace(/\./g, "").replace(",", ".").replace(/[^0-9.]/g, ""));
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
-function timeToMinutes(value: string) {
-  const [hours = "0", minutes = "0"] = value.split(":");
-  return Number(hours) * 60 + Number(minutes);
+function isDiagnostic(service?: string) {
+  const value = service?.toLocaleLowerCase("es-AR") ?? "";
+  return value.includes("diagnóstico") || value.includes("visita técnica");
 }
 
-function shiftTime(value: string, direction: number) {
-  const next = (timeToMinutes(value) + direction * 30 + 1440) % 1440;
-  return `${String(Math.floor(next / 60)).padStart(2, "0")}:${String(next % 60).padStart(2, "0")}`;
+function defaultService(seed: string | number = Date.now()): SavedServiceOffer {
+  return { id: `service-${seed}`, family: "", service: "", description: "", price: 0, startTime: "", endTime: "" };
 }
 
-function defaultService(): SavedServiceOffer {
-  return { id: `service-${Date.now()}`, service: "Diagnóstico / visita técnica", price: 35000, startTime: "09:00", endTime: "18:00" };
+function inferredService(trade: string): SavedServiceOffer {
+  const normalizedTrade = trade.toLocaleLowerCase("es-AR").replace(/ matriculad[oa]$/, "");
+  const match = providerServiceCatalog.flatMap((family) => family.specialties.map((specialty) => ({ family, specialty })))
+    .find(({ specialty }) => normalizedTrade.includes(specialty.toLocaleLowerCase("es-AR")) || specialty.toLocaleLowerCase("es-AR").includes(normalizedTrade));
+  if (!match) return defaultService();
+  return { ...defaultService(), family: match.family.name, service: match.specialty, description: specialtyDescription(match.family.name, match.specialty) };
+}
+
+function normalizeServices(profile: SavedProviderProfile) {
+  const realServices = (profile.services ?? []).filter((item) => !isDiagnostic(item.service)).slice(0, 2).map((item) => ({
+    ...item,
+    family: item.family ?? "",
+    description: item.description ?? "",
+  }));
+  return realServices.length ? realServices : [inferredService(profile.trade)];
 }
 
 export function ProviderProfileForm({ darkMode, initialProfile, email, busy, remoteError, onCancel, onSubmit }: {
@@ -57,18 +51,35 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
   const { width } = useWindowDimensions();
   const styles = useMemo(() => createStyles(darkMode), [darkMode]);
   const compact = width < 720;
+  const legacyDiagnostic = initialProfile.services?.find((item) => isDiagnostic(item.service));
   const [draft, setDraft] = useState<SavedProviderProfile>(() => ({
     ...initialProfile,
-    services: initialProfile.services?.length ? initialProfile.services.slice(0, 2) : [defaultService()],
+    diagnosticPrice: initialProfile.diagnosticPrice ?? legacyDiagnostic?.price ?? 35000,
+    services: normalizeServices(initialProfile),
     certifications: initialProfile.certifications ?? [],
+    zones: coverageOptions.includes(initialProfile.zones) ? initialProfile.zones : "Solo localidad",
   }));
-  const [openServiceId, setOpenServiceId] = useState<string | null>(null);
+  const [cityOpen, setCityOpen] = useState(false);
+  const [coverageOpen, setCoverageOpen] = useState(false);
+  const [tradeFocused, setTradeFocused] = useState(false);
+  const [certificationInput, setCertificationInput] = useState("");
+  const [openFamilyId, setOpenFamilyId] = useState<string | null>(null);
+  const [openSpecialtyId, setOpenSpecialtyId] = useState<string | null>(null);
+  const [membershipNotice, setMembershipNotice] = useState(false);
   const [localError, setLocalError] = useState("");
   const services = draft.services ?? [];
-  const certificationsText = useMemo(() => (draft.certifications ?? []).join(", "), [draft.certifications]);
+  const filteredTrades = professionalSuggestions.filter((item) => item.toLocaleLowerCase("es-AR").includes(draft.trade.trim().toLocaleLowerCase("es-AR"))).slice(0, 6);
+  const filteredCertifications = certificationSuggestions.filter((item) => !draft.certifications?.includes(item) && item.toLocaleLowerCase("es-AR").includes(certificationInput.trim().toLocaleLowerCase("es-AR"))).slice(0, 6);
 
   function updateService(id: string, patch: Partial<SavedServiceOffer>) {
     setDraft((current) => ({ ...current, services: (current.services ?? []).map((item) => item.id === id ? { ...item, ...patch } : item) }));
+  }
+
+  function addCertification(value: string) {
+    const certification = value.trim().replace(/^#/, "");
+    if (certification.length < 2 || draft.certifications?.some((item) => item.toLocaleLowerCase("es-AR") === certification.toLocaleLowerCase("es-AR"))) return;
+    setDraft((current) => ({ ...current, certifications: [...(current.certifications ?? []), certification] }));
+    setCertificationInput("");
   }
 
   async function pickPhoto() {
@@ -82,73 +93,93 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
   function submit() {
     setLocalError("");
     if (draft.displayName.trim().length < 3) return setLocalError("Ingresá tu nombre y apellido.");
-    if (!draft.city.trim()) return setLocalError("Indicá tu ciudad.");
-    if (!draft.trade.trim()) return setLocalError("Indicá cómo querés presentarte profesionalmente.");
+    if (!cities.includes(draft.city)) return setLocalError("Elegí tu ciudad.");
+    if ((draft.diagnosticPrice ?? 0) <= 0) return setLocalError("Indicá el valor inicial del diagnóstico o visita.");
+    if (draft.trade.trim().length < 3) return setLocalError("Indicá cómo querés presentarte profesionalmente.");
     if (draft.bio.trim().length < 20) return setLocalError("Escribí una presentación de al menos 20 caracteres.");
-    if (!draft.zones.trim()) return setLocalError("Indicá dónde trabajás.");
-    if (!services.length || services.some((item) => !item.service || item.price <= 0 || item.startTime === item.endTime)) return setLocalError("Completá servicio, precio y un horario válido.");
-    const availability = services.map((item) => `${item.service}: ${item.startTime} a ${item.endTime}`).join(" · ");
-    const skills = services.map((item) => item.service).join(", ");
-    onSubmit({ ...draft, availability, skills, secondaryTrade: undefined, services });
+    if (containsContactAttempt(draft.bio)) return setLocalError("No incluyas teléfonos, correos, redes ni enlaces en tu presentación.");
+    if (!coverageOptions.includes(draft.zones)) return setLocalError("Elegí hasta dónde te trasladás.");
+    if (!services.length || services.some((item) => !serviceCombinationIsValid(item.family, item.service))) return setLocalError("Elegí una familia y una especialidad válidas para cada servicio.");
+    if (services.some((item) => (item.description?.trim().length ?? 0) < 10 || (item.description?.trim().length ?? 0) > 240)) return setLocalError("Describí cada servicio con entre 10 y 240 caracteres.");
+    if (services.some((item) => containsContactAttempt(item.description ?? ""))) return setLocalError("No incluyas teléfonos, correos, redes ni enlaces en la descripción del servicio.");
+    onSubmit({ ...draft, availability: draft.zones, skills: services.map((item) => item.service).join(", "), secondaryTrade: undefined, services });
   }
 
   return <View style={styles.card}>
     <Text style={styles.eyebrow}>UN SOLO PASO</Text>
     <Text style={styles.title}>Tu perfil profesional</Text>
-    <Text style={styles.copy}>Completá tu presentación y el servicio que querés ofrecer. Después vas a poder editar todo.</Text>
+    <Text style={styles.copy}>Completá tu presentación, tu tarifa inicial y los servicios que realmente ofrecés.</Text>
     <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
       <Text style={styles.sectionTitle}>Tu información</Text>
       <View style={styles.identityRow}>
         {draft.photoUri ? <Image source={{ uri: draft.photoUri }} style={styles.photo} /> : <View style={styles.photoFallback}><Text style={styles.photoInitial}>{draft.displayName.slice(0, 1).toUpperCase() || "P"}</Text></View>}
-        <View style={styles.identityFields}>
-          <TouchableOpacity accessibilityRole="button" style={styles.photoButton} onPress={() => void pickPhoto()}><Text style={styles.photoButtonText}>{draft.photoUri ? "Cambiar foto" : "Agregar foto"}</Text></TouchableOpacity>
-          <Text style={styles.email}>{email}</Text>
-        </View>
+        <View style={styles.identityFields}><TouchableOpacity accessibilityRole="button" style={styles.photoButton} onPress={() => void pickPhoto()}><Text style={styles.photoButtonText}>{draft.photoUri ? "Cambiar foto" : "Agregar foto"}</Text></TouchableOpacity><Text style={styles.email}>{email}</Text></View>
       </View>
       <View style={[styles.fieldsRow, compact && styles.fieldsColumn]}>
-        <TextInput value={draft.displayName} onChangeText={(displayName) => setDraft({ ...draft, displayName })} placeholder="Nombre y apellido" placeholderTextColor="#71818B" style={[styles.input, styles.flexField]} />
-        <TextInput value={draft.city} onChangeText={(city) => setDraft({ ...draft, city })} placeholder="Ciudad" placeholderTextColor="#71818B" style={[styles.input, styles.flexField]} />
+        <View style={styles.flexField}><Text style={styles.label}>Nombre y apellido</Text><TextInput value={draft.displayName} onChangeText={(displayName) => setDraft({ ...draft, displayName })} placeholder="Nombre y apellido" placeholderTextColor="#71818B" style={styles.input} /></View>
+        <View style={styles.diagnosticField}><Text style={styles.label}>Diagnóstico desde</Text><View style={styles.money}><Text style={styles.currency}>$</Text><TextInput value={`${draft.diagnosticPrice || ""}`} onChangeText={(value) => setDraft({ ...draft, diagnosticPrice: numericValue(value) })} keyboardType="numeric" placeholder="35000" placeholderTextColor="#71818B" style={styles.priceInput} /><Text style={styles.currency}>ARS</Text></View></View>
       </View>
+      <Text style={styles.help}>Es una tarifa inicial de visita o diagnóstico; no cuenta como servicio.</Text>
+
+      <Text style={styles.label}>Ciudad</Text>
+      <TouchableOpacity accessibilityRole="button" accessibilityLabel="Elegir ciudad" style={styles.selector} onPress={() => setCityOpen((current) => !current)}><Text style={[styles.selectorText, !draft.city && styles.placeholder]}>{draft.city || "Seleccioná tu ciudad"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
+      {cityOpen && <View style={styles.options}>{cities.map((city) => <TouchableOpacity key={city} style={[styles.option, draft.city === city && styles.optionActive]} onPress={() => { setDraft({ ...draft, city }); setCityOpen(false); }}><Text style={[styles.optionText, draft.city === city && styles.optionTextActive]}>{city}</Text></TouchableOpacity>)}</View>}
 
       <Text style={styles.label}>Profesional</Text>
-      <TextInput value={draft.trade} onChangeText={(trade) => setDraft({ ...draft, trade })} placeholder="Ej. Gasista matriculado" placeholderTextColor="#71818B" style={styles.input} />
-      <Text style={styles.help}>Así vas a presentarte debajo de tu nombre en el perfil.</Text>
-      <TextInput multiline value={draft.bio} onChangeText={(bio) => setDraft({ ...draft, bio })} placeholder="Breve presentación: qué hacés y cómo trabajás" placeholderTextColor="#71818B" style={[styles.input, styles.multiline]} />
-      <TextInput multiline value={draft.training ?? ""} onChangeText={(training) => setDraft({ ...draft, training })} placeholder="Formación y experiencia" placeholderTextColor="#71818B" style={[styles.input, styles.multilineSmall]} />
-      <TextInput value={certificationsText} onChangeText={(value) => setDraft({ ...draft, certifications: value.split(",").map((item) => item.trim()).filter(Boolean) })} placeholder="Certificaciones, separadas por comas" placeholderTextColor="#71818B" style={styles.input} />
-      <TextInput value={draft.zones} onChangeText={(zones) => setDraft({ ...draft, zones })} placeholder="Dónde trabajás: ciudad, barrios o zonas" placeholderTextColor="#71818B" style={styles.input} />
+      <TextInput value={draft.trade} onFocus={() => setTradeFocused(true)} onChangeText={(trade) => { setDraft({ ...draft, trade }); setTradeFocused(true); }} placeholder="Ej. Gasista matriculado" placeholderTextColor="#71818B" style={styles.input} />
+      {tradeFocused && filteredTrades.length > 0 && <View style={styles.suggestions}>{filteredTrades.map((trade) => <TouchableOpacity key={trade} style={styles.suggestion} onPress={() => { setDraft({ ...draft, trade }); setTradeFocused(false); }}><Text style={styles.suggestionHash}>+</Text><Text style={styles.suggestionText}>{trade}</Text></TouchableOpacity>)}</View>}
+      <Text style={styles.help}>Escribí y elegí una sugerencia, o usá una presentación propia.</Text>
+      <TextInput multiline value={draft.bio} onChangeText={(bio) => setDraft({ ...draft, bio })} placeholder="Breve presentación: qué hacés y cómo trabajás" placeholderTextColor="#71818B" maxLength={600} style={[styles.input, styles.multiline]} />
+      <TextInput multiline value={draft.training ?? ""} onChangeText={(training) => setDraft({ ...draft, training })} placeholder="Formación y experiencia" placeholderTextColor="#71818B" maxLength={1200} style={[styles.input, styles.multilineSmall]} />
 
-      <View style={styles.servicesHeading}>
-        <View><Text style={styles.sectionTitle}>Tus servicios</Text><Text style={styles.help}>Dos líneas incluidas en el plan gratuito.</Text></View>
-        <Text style={styles.freeBadge}>GRATIS · 2</Text>
-      </View>
-      {services.map((item, index) => <View key={item.id} style={styles.serviceCard}>
-        <View style={styles.serviceTop}><Text style={styles.serviceNumber}>SERVICIO {index + 1}</Text>{index > 0 && <TouchableOpacity onPress={() => setDraft({ ...draft, services: services.filter((service) => service.id !== item.id) })}><Text style={styles.remove}>Quitar</Text></TouchableOpacity>}</View>
-        <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Elegir servicio ${index + 1}`} style={styles.selector} onPress={() => setOpenServiceId(openServiceId === item.id ? null : item.id)}><Text style={styles.selectorText}>{item.service}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
-        {openServiceId === item.id && <ScrollView nestedScrollEnabled style={styles.options}>{serviceOptions.map((option) => <TouchableOpacity key={option} style={[styles.option, item.service === option && styles.optionActive]} onPress={() => { updateService(item.id, { service: option }); setOpenServiceId(null); }}><Text style={[styles.optionText, item.service === option && styles.optionTextActive]}>{option}</Text></TouchableOpacity>)}</ScrollView>}
-        <View style={[styles.serviceDataRow, compact && styles.fieldsColumn]}>
-          <View style={styles.priceWrap}><Text style={styles.miniLabel}>PRECIO</Text><View style={styles.money}><Text style={styles.currency}>$</Text><TextInput value={`${item.price || ""}`} onChangeText={(value) => updateService(item.id, { price: numericValue(value) })} keyboardType="numeric" placeholder="35000" placeholderTextColor="#71818B" style={styles.priceInput} /><Text style={styles.currency}>ARS</Text></View></View>
-          <TimeStepper darkMode={darkMode} label="DESDE" value={item.startTime} onChange={(startTime) => updateService(item.id, { startTime })} />
-          <TimeStepper darkMode={darkMode} label="HASTA" value={item.endTime} onChange={(endTime) => updateService(item.id, { endTime })} />
-        </View>
-      </View>)}
-      {services.length < 2 && <TouchableOpacity accessibilityRole="button" style={styles.addService} onPress={() => setDraft({ ...draft, services: [...services, { ...defaultService(), id: `service-${Date.now()}-${services.length}` }] })}><Text style={styles.addServiceText}>＋ Agregar segundo servicio</Text></TouchableOpacity>}
-      <View style={styles.lockedService}><View><Text style={styles.lockedTitle}>🔒 Tercer servicio</Text><Text style={styles.lockedText}>Disponible con la membresía profesional.</Text></View><Text style={styles.membershipBadge}>MEMBRESÍA</Text></View>
-      <Text style={styles.planNote}>El plan gratuito incluye una presentación profesional y hasta dos servicios. Los oficios adicionales se habilitarán con la membresía multioficio.</Text>
+      <Text style={styles.label}>Certificaciones</Text>
+      {!!draft.certifications?.length && <View style={styles.chipList}>{draft.certifications.map((certification) => <View key={certification} style={styles.chip}><Text style={styles.chipText}>#{certification.replace(/\s+/g, "_")}</Text><TouchableOpacity accessibilityRole="button" accessibilityLabel={`Quitar ${certification}`} onPress={() => setDraft((current) => ({ ...current, certifications: current.certifications?.filter((item) => item !== certification) }))}><Text style={styles.chipRemove}>×</Text></TouchableOpacity></View>)}</View>}
+      <TextInput value={certificationInput} onChangeText={setCertificationInput} onSubmitEditing={() => addCertification(certificationInput)} placeholder="Escribí para agregar una certificación" placeholderTextColor="#71818B" style={styles.input} />
+      {certificationInput.trim().length > 0 && <View style={styles.suggestions}>{filteredCertifications.map((certification) => <TouchableOpacity key={certification} style={styles.suggestion} onPress={() => addCertification(certification)}><Text style={styles.suggestionHash}>#</Text><Text style={styles.suggestionText}>{certification}</Text></TouchableOpacity>)}<TouchableOpacity style={styles.suggestion} onPress={() => addCertification(certificationInput)}><Text style={styles.suggestionHash}>+</Text><Text style={styles.suggestionText}>Agregar “{certificationInput.trim()}”</Text></TouchableOpacity></View>}
+
+      <Text style={styles.label}>Dónde trabajás</Text>
+      <TouchableOpacity accessibilityRole="button" accessibilityLabel="Elegir alcance de trabajo" style={styles.selector} onPress={() => setCoverageOpen((current) => !current)}><Text style={styles.selectorText}>{draft.zones}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
+      {coverageOpen && <View style={styles.options}>{coverageOptions.map((coverage) => <TouchableOpacity key={coverage} style={[styles.option, draft.zones === coverage && styles.optionActive]} onPress={() => { setDraft({ ...draft, zones: coverage }); setCoverageOpen(false); }}><Text style={[styles.optionText, draft.zones === coverage && styles.optionTextActive]}>{coverage}</Text></TouchableOpacity>)}</View>}
+
+      <View style={styles.servicesHeading}><View><Text style={styles.sectionTitle}>Tus servicios</Text><Text style={styles.help}>Elegí el rubro y después una especialidad concreta.</Text></View><Text style={styles.freeBadge}>GRATIS · 2</Text></View>
+      {services.map((item, index) => {
+        const family = providerServiceCatalog.find((option) => option.name === item.family);
+        const descriptionLength = item.description?.length ?? 0;
+        return <View key={item.id} style={styles.serviceCard}>
+          <View style={styles.serviceTop}><Text style={styles.serviceNumber}>SERVICIO {index + 1}</Text>{services.length > 1 && <TouchableOpacity onPress={() => setDraft({ ...draft, services: services.filter((service) => service.id !== item.id) })}><Text style={styles.remove}>Quitar</Text></TouchableOpacity>}</View>
+          <Text style={styles.miniLabel}>FAMILIA</Text>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Elegir familia del servicio ${index + 1}`} style={styles.selector} onPress={() => { setOpenFamilyId(openFamilyId === item.id ? null : item.id); setOpenSpecialtyId(null); }}><Text style={[styles.selectorText, !item.family && styles.placeholder]}>{item.family || "Elegí un rubro"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
+          {openFamilyId === item.id && <ScrollView nestedScrollEnabled style={styles.catalogOptions}>{providerServiceCatalog.map((option) => <TouchableOpacity key={option.name} style={[styles.familyOption, item.family === option.name && styles.optionActive]} onPress={() => { updateService(item.id, { family: option.name, service: "", description: "" }); setOpenFamilyId(null); setOpenSpecialtyId(item.id); }}><Text style={[styles.optionText, item.family === option.name && styles.optionTextActive]}>{option.name}</Text><Text style={styles.optionDescription}>{option.description}</Text></TouchableOpacity>)}</ScrollView>}
+          <Text style={styles.miniLabel}>ESPECIALIDAD</Text>
+          <TouchableOpacity accessibilityRole="button" disabled={!family} accessibilityLabel={`Elegir especialidad del servicio ${index + 1}`} style={[styles.selector, !family && styles.disabledSelector]} onPress={() => family && setOpenSpecialtyId(openSpecialtyId === item.id ? null : item.id)}><Text style={[styles.selectorText, !item.service && styles.placeholder]}>{item.service || "Primero elegí una familia"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
+          {openSpecialtyId === item.id && family && <ScrollView nestedScrollEnabled style={styles.specialtyOptions}>{family.specialties.map((specialty) => <TouchableOpacity key={specialty} style={[styles.specialtyOption, item.service === specialty && styles.specialtyOptionActive]} onPress={() => { updateService(item.id, { service: specialty, description: specialtyDescription(family.name, specialty) }); setOpenSpecialtyId(null); }}><Text style={[styles.specialtyTitle, item.service === specialty && styles.optionTextActive]}>{specialty}</Text><Text style={styles.optionDescription}>{specialtyDescription(family.name, specialty)}</Text></TouchableOpacity>)}</ScrollView>}
+          <View style={styles.descriptionHeading}><Text style={styles.miniLabel}>CONTALE BREVEMENTE AL CLIENTE QUÉ OFRECÉS</Text><Text style={styles.counter}>{descriptionLength}/240</Text></View>
+          <TextInput multiline maxLength={240} value={item.description ?? ""} onChangeText={(description) => updateService(item.id, { description })} placeholder="Ej. Reviso la instalación, detecto la falla y explico las opciones antes de comenzar." placeholderTextColor="#71818B" style={[styles.input, styles.serviceDescription]} />
+          <Text style={styles.help}>No incluyas teléfono, correo, redes sociales ni enlaces.</Text>
+        </View>;
+      })}
+      <TouchableOpacity accessibilityRole="button" style={styles.addService} onPress={() => {
+        if (services.length >= 2) return setMembershipNotice(true);
+        setMembershipNotice(false);
+        setDraft({ ...draft, services: [...services, defaultService(`${Date.now()}-${services.length}`)] });
+      }}><Text style={styles.addServiceText}>＋ Agregar otro servicio</Text></TouchableOpacity>
+      {membershipNotice && <View style={styles.membershipNotice}><Text style={styles.lockedTitle}>🔒 Alcanzaste los 2 servicios gratuitos</Text><Text style={styles.lockedText}>El tercer servicio se habilitará con la membresía profesional. Por ahora podés editar o quitar uno de los anteriores.</Text></View>}
+      <View style={styles.lockedService}><View><Text style={styles.lockedTitle}>Tercer servicio</Text><Text style={styles.lockedText}>Próximamente con membresía profesional.</Text></View><Text style={styles.membershipBadge}>MEMBRESÍA</Text></View>
     </ScrollView>
     {!!(localError || remoteError) && <Text style={styles.error}>{localError || remoteError}</Text>}
     <View style={styles.actions}><TouchableOpacity style={styles.cancel} onPress={onCancel}><Text style={styles.cancelText}>Cancelar</Text></TouchableOpacity><TouchableOpacity disabled={busy} style={[styles.save, busy && styles.disabled]} onPress={submit}><Text style={styles.saveText}>{busy ? "Guardando…" : "Guardar y publicar"}</Text></TouchableOpacity></View>
   </View>;
 }
 
-function TimeStepper({ darkMode, label, value, onChange }: { darkMode: boolean; label: string; value: string; onChange: (value: string) => void }) {
-  const styles = useMemo(() => createStyles(darkMode), [darkMode]);
-  return <View style={styles.timeWrap}><Text style={styles.miniLabel}>{label}</Text><View style={styles.timeControl}><TouchableOpacity accessibilityRole="button" accessibilityLabel={`Restar 30 minutos a ${label.toLowerCase()}`} style={styles.timeButton} onPress={() => onChange(shiftTime(value, -1))}><Text style={styles.timeButtonText}>−</Text></TouchableOpacity><Text style={styles.timeValue}>{value}</Text><TouchableOpacity accessibilityRole="button" accessibilityLabel={`Sumar 30 minutos a ${label.toLowerCase()}`} style={styles.timeButton} onPress={() => onChange(shiftTime(value, 1))}><Text style={styles.timeButtonText}>＋</Text></TouchableOpacity></View></View>;
-}
-
 function createStyles(darkMode: boolean) {
-  const palette = darkMode ? { background: "#10202F", surface: "#162A3B", input: "#132738", text: "#EAF4FC", muted: "#AFC2D2", line: "#29465B", avatar: "#183A54", soft: "#1B3041", warning: "#3A291B", warningText: "#FFC078", danger: "#FF8A72" } : { background: "#FFFFFF", surface: "#F8FCFE", input: "#FBFDFE", text: "#063C78", muted: "#5E7183", line: "#D6E8F2", avatar: "#063C78", soft: "#EEF7FB", warning: "#FFF7E9", warningText: "#6D5B45", danger: "#B7452B" };
+  const palette = darkMode ? { background: "#10202F", surface: "#162A3B", input: "#132738", text: "#EAF4FC", muted: "#AFC2D2", line: "#29465B", soft: "#1B3041", warning: "#3A291B", warningText: "#FFC078", danger: "#FF8A72" } : { background: "#FFFFFF", surface: "#F8FCFE", input: "#FBFDFE", text: "#063C78", muted: "#5E7183", line: "#D6E8F2", soft: "#EEF7FB", warning: "#FFF7E9", warningText: "#6D5B45", danger: "#B7452B" };
   return StyleSheet.create({
-  card: { backgroundColor: palette.background, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: 24, maxHeight: "96%" }, eyebrow: { color: "#FF8A1F", fontSize: 11, fontWeight: "900", letterSpacing: 0.8 }, title: { color: palette.text, fontSize: 25, fontWeight: "900", marginTop: 3 }, copy: { color: palette.muted, fontSize: 12, lineHeight: 17, marginTop: 4, marginBottom: 7 }, scroll: { maxHeight: 650 }, scrollContent: { paddingBottom: 12 }, sectionTitle: { color: palette.text, fontSize: 16, fontWeight: "900", marginTop: 12, marginBottom: 8 }, identityRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 }, photo: { width: 68, height: 68, borderRadius: 34, marginRight: 13 }, photoFallback: { width: 68, height: 68, borderRadius: 34, backgroundColor: "#063C78", alignItems: "center", justifyContent: "center", marginRight: 13 }, photoInitial: { color: "white", fontSize: 27, fontWeight: "900" }, identityFields: { flex: 1 }, photoButton: { minHeight: 38, alignSelf: "flex-start", justifyContent: "center", paddingHorizontal: 13, borderWidth: 1, borderColor: "#49B2F5", borderRadius: 10 }, photoButtonText: { color: "#49B2F5", fontSize: 12, fontWeight: "900" }, email: { color: palette.muted, fontSize: 11, marginTop: 7 }, fieldsRow: { flexDirection: "row", gap: 8 }, fieldsColumn: { flexDirection: "column" }, flexField: { flex: 1 }, input: { minHeight: 46, borderWidth: 1, borderColor: palette.line, borderRadius: 11, paddingHorizontal: 12, color: palette.text, backgroundColor: palette.input, marginBottom: 8 }, label: { color: palette.text, fontSize: 12, fontWeight: "900", marginTop: 5, marginBottom: 6 }, help: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: -3, marginBottom: 8 }, multiline: { minHeight: 76, paddingTop: 11, textAlignVertical: "top" }, multilineSmall: { minHeight: 62, paddingTop: 11, textAlignVertical: "top" }, servicesHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 2 }, freeBadge: { color: "#56D3A1", backgroundColor: palette.soft, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, fontSize: 10, fontWeight: "900" }, serviceCard: { borderWidth: 1, borderColor: palette.line, backgroundColor: palette.surface, borderRadius: 14, padding: 11, marginTop: 8 }, serviceTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 7 }, serviceNumber: { color: "#49B2F5", fontSize: 10, fontWeight: "900", letterSpacing: 0.4 }, remove: { color: palette.danger, fontSize: 10, fontWeight: "900" }, selector: { minHeight: 44, borderWidth: 1, borderColor: palette.line, backgroundColor: palette.input, borderRadius: 10, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 11 }, selectorText: { color: palette.text, fontSize: 12, fontWeight: "800", flex: 1 }, chevron: { color: "#49B2F5", fontSize: 17, fontWeight: "900" }, options: { maxHeight: 230, borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: 5, backgroundColor: palette.input }, option: { minHeight: 37, justifyContent: "center", paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: palette.line }, optionActive: { backgroundColor: palette.soft }, optionText: { color: palette.muted, fontSize: 11 }, optionTextActive: { color: palette.text, fontWeight: "900" }, serviceDataRow: { flexDirection: "row", gap: 8, marginTop: 9 }, priceWrap: { flex: 1.45 }, timeWrap: { flex: 1 }, miniLabel: { color: palette.muted, fontSize: 9, fontWeight: "900", marginBottom: 4 }, money: { minHeight: 42, flexDirection: "row", alignItems: "center", borderWidth: 1, borderColor: palette.line, borderRadius: 9, backgroundColor: palette.input, paddingHorizontal: 8 }, currency: { color: palette.muted, fontSize: 9, fontWeight: "900" }, priceInput: { flex: 1, color: palette.text, fontWeight: "900", paddingHorizontal: 5 }, timeControl: { minHeight: 42, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderWidth: 1, borderColor: palette.line, borderRadius: 9, backgroundColor: palette.input, overflow: "hidden" }, timeButton: { width: 34, height: 40, alignItems: "center", justifyContent: "center", backgroundColor: palette.soft }, timeButtonText: { color: "#49B2F5", fontSize: 17, fontWeight: "900" }, timeValue: { color: palette.text, fontSize: 11, fontWeight: "900" }, addService: { minHeight: 44, borderWidth: 1, borderStyle: "dashed", borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center", marginTop: 9 }, addServiceText: { color: "#49B2F5", fontSize: 12, fontWeight: "900" }, lockedService: { minHeight: 58, borderRadius: 11, backgroundColor: palette.soft, marginTop: 9, paddingHorizontal: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, opacity: 0.86 }, lockedTitle: { color: palette.muted, fontSize: 12, fontWeight: "900" }, lockedText: { color: palette.muted, fontSize: 10, marginTop: 2 }, membershipBadge: { color: palette.warningText, fontSize: 9, fontWeight: "900", backgroundColor: palette.warning, borderRadius: 9, paddingHorizontal: 7, paddingVertical: 4 }, planNote: { color: palette.warningText, backgroundColor: palette.warning, borderRadius: 9, padding: 9, fontSize: 10, lineHeight: 15, marginTop: 9 }, error: { color: palette.danger, fontSize: 12, fontWeight: "800", marginTop: 7 }, actions: { flexDirection: "row", gap: 8, marginTop: 12 }, cancel: { minHeight: 48, minWidth: 92, borderWidth: 1, borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center" }, cancelText: { color: "#49B2F5", fontWeight: "900" }, save: { flex: 1, minHeight: 48, borderRadius: 11, backgroundColor: "#FF7800", alignItems: "center", justifyContent: "center" }, saveText: { color: "white", fontWeight: "900" }, disabled: { opacity: 0.55 },
+    card: { backgroundColor: palette.background, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: 24, maxHeight: "96%" }, eyebrow: { color: "#FF8A1F", fontSize: 11, fontWeight: "900", letterSpacing: 0.8 }, title: { color: palette.text, fontSize: 25, fontWeight: "900", marginTop: 3 }, copy: { color: palette.muted, fontSize: 12, lineHeight: 17, marginTop: 4, marginBottom: 7 },
+    scroll: { maxHeight: 650 }, scrollContent: { paddingBottom: 12 }, sectionTitle: { color: palette.text, fontSize: 16, fontWeight: "900", marginTop: 12, marginBottom: 8 }, identityRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 }, photo: { width: 68, height: 68, borderRadius: 34, marginRight: 13 }, photoFallback: { width: 68, height: 68, borderRadius: 34, backgroundColor: "#063C78", alignItems: "center", justifyContent: "center", marginRight: 13 }, photoInitial: { color: "white", fontSize: 27, fontWeight: "900" }, identityFields: { flex: 1 }, photoButton: { minHeight: 38, alignSelf: "flex-start", justifyContent: "center", paddingHorizontal: 13, borderWidth: 1, borderColor: "#49B2F5", borderRadius: 10 }, photoButtonText: { color: "#49B2F5", fontSize: 12, fontWeight: "900" }, email: { color: palette.muted, fontSize: 11, marginTop: 7 },
+    fieldsRow: { flexDirection: "row", gap: 10 }, fieldsColumn: { flexDirection: "column" }, flexField: { flex: 1.6 }, diagnosticField: { flex: 1 }, input: { minHeight: 46, borderWidth: 1, borderColor: palette.line, borderRadius: 11, paddingHorizontal: 12, color: palette.text, backgroundColor: palette.input, marginBottom: 8 }, label: { color: palette.text, fontSize: 12, fontWeight: "900", marginTop: 5, marginBottom: 6 }, help: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: -3, marginBottom: 8 }, multiline: { minHeight: 76, paddingTop: 11, textAlignVertical: "top" }, multilineSmall: { minHeight: 62, paddingTop: 11, textAlignVertical: "top" }, money: { minHeight: 46, flexDirection: "row", alignItems: "center", borderWidth: 1, borderColor: palette.line, borderRadius: 11, backgroundColor: palette.input, paddingHorizontal: 10, marginBottom: 8 }, currency: { color: palette.muted, fontSize: 10, fontWeight: "900" }, priceInput: { flex: 1, color: palette.text, fontWeight: "900", paddingHorizontal: 6 },
+    selector: { minHeight: 46, borderWidth: 1, borderColor: palette.line, backgroundColor: palette.input, borderRadius: 11, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, marginBottom: 7 }, disabledSelector: { opacity: 0.48 }, selectorText: { color: palette.text, fontSize: 12, fontWeight: "800", flex: 1 }, placeholder: { color: palette.muted, fontWeight: "500" }, chevron: { color: "#49B2F5", fontSize: 17, fontWeight: "900" }, options: { borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 8, backgroundColor: palette.input }, catalogOptions: { maxHeight: 265, borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 9, backgroundColor: palette.input }, specialtyOptions: { maxHeight: 280, borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 9, backgroundColor: palette.input }, option: { minHeight: 41, justifyContent: "center", paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: palette.line }, familyOption: { minHeight: 57, justifyContent: "center", paddingHorizontal: 11, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: palette.line }, specialtyOption: { minHeight: 66, justifyContent: "center", paddingHorizontal: 11, paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: palette.line }, specialtyOptionActive: { backgroundColor: palette.soft }, optionActive: { backgroundColor: palette.soft }, optionText: { color: palette.muted, fontSize: 12, fontWeight: "800" }, optionTextActive: { color: palette.text, fontWeight: "900" }, optionDescription: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: 3 }, specialtyTitle: { color: palette.text, fontSize: 12, fontWeight: "900" },
+    suggestions: { borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", backgroundColor: palette.surface, marginTop: -5, marginBottom: 9 }, suggestion: { minHeight: 40, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: palette.line }, suggestionHash: { color: "#49B2F5", fontSize: 13, fontWeight: "900" }, suggestionText: { color: palette.text, fontSize: 11, fontWeight: "800" }, chipList: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 8 }, chip: { flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderColor: "#49B2F5", backgroundColor: palette.soft, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 14 }, chipText: { color: "#49B2F5", fontSize: 10, fontWeight: "900" }, chipRemove: { color: palette.danger, fontSize: 16, lineHeight: 16, fontWeight: "900" },
+    servicesHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 2 }, freeBadge: { color: "#56D3A1", backgroundColor: palette.soft, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, fontSize: 10, fontWeight: "900" }, serviceCard: { borderWidth: 1, borderColor: palette.line, backgroundColor: palette.surface, borderRadius: 14, padding: 11, marginTop: 8 }, serviceTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 9 }, serviceNumber: { color: "#49B2F5", fontSize: 10, fontWeight: "900", letterSpacing: 0.4 }, remove: { color: palette.danger, fontSize: 10, fontWeight: "900" }, miniLabel: { color: palette.muted, fontSize: 9, fontWeight: "900", marginTop: 4, marginBottom: 5 }, descriptionHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }, counter: { color: palette.muted, fontSize: 9, fontWeight: "800" }, serviceDescription: { minHeight: 82, paddingTop: 11, textAlignVertical: "top" }, addService: { minHeight: 44, borderWidth: 1, borderStyle: "dashed", borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center", marginTop: 9 }, addServiceText: { color: "#49B2F5", fontSize: 12, fontWeight: "900" }, lockedService: { minHeight: 58, borderRadius: 11, backgroundColor: palette.soft, marginTop: 9, paddingHorizontal: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, opacity: 0.86 }, membershipNotice: { borderWidth: 1, borderColor: palette.warningText, borderRadius: 11, backgroundColor: palette.warning, marginTop: 9, padding: 11 }, lockedTitle: { color: palette.muted, fontSize: 12, fontWeight: "900" }, lockedText: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: 2 }, membershipBadge: { color: palette.warningText, fontSize: 9, fontWeight: "900", backgroundColor: palette.warning, borderRadius: 9, paddingHorizontal: 7, paddingVertical: 4 },
+    error: { color: palette.danger, fontSize: 12, fontWeight: "800", marginTop: 7 }, actions: { flexDirection: "row", gap: 8, marginTop: 12 }, cancel: { minHeight: 48, minWidth: 92, borderWidth: 1, borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center" }, cancelText: { color: "#49B2F5", fontWeight: "900" }, save: { flex: 1, minHeight: 48, borderRadius: 11, backgroundColor: "#FF7800", alignItems: "center", justifyContent: "center" }, saveText: { color: "white", fontWeight: "900" }, disabled: { opacity: 0.55 },
   });
 }

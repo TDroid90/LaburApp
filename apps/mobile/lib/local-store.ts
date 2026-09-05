@@ -63,6 +63,7 @@ export type SavedProviderProfile = {
   displayName: string;
   city: string;
   trade: string;
+  diagnosticPrice?: number;
   secondaryTrade?: string;
   photoUri?: string;
   verified?: boolean;
@@ -81,7 +82,9 @@ export type SavedProviderProfile = {
 
 export type SavedServiceOffer = {
   id: string;
+  family?: string;
   service: string;
+  description?: string;
   price: number;
   startTime: string;
   endTime: string;
@@ -119,15 +122,28 @@ export async function loadLocalState(): Promise<LocalAppState> {
     if (!raw) return emptyState;
     const parsed = JSON.parse(raw) as Partial<LocalAppState>;
     const rawProfile = parsed.providerProfile ?? null;
-    const providerProfile = rawProfile ? {
-      ...rawProfile,
-      services: rawProfile.services?.length ? rawProfile.services : rawProfile.tariffItems?.slice(0, 2).map((item, index) => ({
+    const legacyServices = rawProfile?.services?.length ? rawProfile.services : rawProfile?.tariffItems?.slice(0, 2).map((item, index) => ({
         id: item.id || `legacy-service-${index}`,
         service: item.label,
         price: item.unitPrice,
         startTime: "09:00",
         endTime: "18:00",
-      })),
+      }));
+    const diagnosticService = legacyServices?.find((item) => /diagnóstico|visita técnica/i.test(item.service));
+    const savedRealServices = legacyServices?.filter((item) => !/diagnóstico|visita técnica/i.test(item.service)) ?? [];
+    const realServices = savedRealServices.length ? savedRealServices : rawProfile && /gasista/i.test(rawProfile.trade) ? [{
+      id: "migrated-gasista",
+      family: "Instalaciones",
+      service: "Gasista",
+      description: "Reviso instalaciones domiciliarias, detecto fallas y explico las opciones de reparación antes de comenzar.",
+      price: 0,
+      startTime: "",
+      endTime: "",
+    }] : [];
+    const providerProfile = rawProfile ? {
+      ...rawProfile,
+      diagnosticPrice: rawProfile.diagnosticPrice ?? diagnosticService?.price ?? 35000,
+      services: realServices,
     } : null;
     return {
       session: parsed.session ?? null,
