@@ -3,10 +3,17 @@ import * as ImagePicker from "expo-image-picker";
 import { Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from "react-native";
 import { containsContactAttempt } from "@laburapp/shared";
 import type { SavedProviderProfile, SavedServiceOffer } from "../lib/local-store";
-import { certificationSuggestions, professionalSuggestions, providerServiceCatalog, serviceCombinationIsValid, specialtyDescription } from "./provider-service-catalog";
+import { certificationSuggestions, professionalSuggestions, providerServiceCatalog, serviceSpecialtiesAreValid, specialtyDescription } from "./provider-service-catalog";
 
-const cities = ["Río Grande", "Ushuaia", "Tolhuin"];
-const coverageOptions = ["Solo localidad", "Híbrido", "Toda la provincia"];
+const cities = ["San Sebastián", "Río Grande", "Tolhuin", "Almanza", "Ushuaia"];
+const coverageChoices = [...cities, "Zonas rurales"];
+
+function coverageLabel(areas: string[]) {
+  if (coverageChoices.every((choice) => areas.includes(choice))) return "Toda la provincia";
+  if (!areas.length) return "Elegí las localidades";
+  if (areas.length === 1) return areas[0];
+  return `${areas.length} zonas seleccionadas`;
+}
 
 function numericValue(value: string) {
   const parsed = Number(value.replace(/\./g, "").replace(",", ".").replace(/[^0-9.]/g, ""));
@@ -19,7 +26,7 @@ function isDiagnostic(service?: string) {
 }
 
 function defaultService(seed: string | number = Date.now()): SavedServiceOffer {
-  return { id: `service-${seed}`, family: "", service: "", description: "", price: 0, startTime: "", endTime: "" };
+  return { id: `service-${seed}`, family: "", service: "", specialties: [], description: "", price: 0, startTime: "", endTime: "" };
 }
 
 function inferredService(trade: string): SavedServiceOffer {
@@ -27,13 +34,14 @@ function inferredService(trade: string): SavedServiceOffer {
   const match = providerServiceCatalog.flatMap((family) => family.specialties.map((specialty) => ({ family, specialty })))
     .find(({ specialty }) => normalizedTrade.includes(specialty.toLocaleLowerCase("es-AR")) || specialty.toLocaleLowerCase("es-AR").includes(normalizedTrade));
   if (!match) return defaultService();
-  return { ...defaultService(), family: match.family.name, service: match.specialty, description: specialtyDescription(match.family.name, match.specialty) };
+  return { ...defaultService(), family: match.family.name, service: match.specialty, specialties: [match.specialty], description: specialtyDescription(match.family.name, match.specialty) };
 }
 
 function normalizeServices(profile: SavedProviderProfile) {
   const realServices = (profile.services ?? []).filter((item) => !isDiagnostic(item.service)).slice(0, 2).map((item) => ({
     ...item,
     family: item.family ?? "",
+    specialties: item.specialties?.length ? item.specialties.slice(0, 2) : item.service ? [item.service] : [],
     description: item.description ?? "",
   }));
   return realServices.length ? realServices : [inferredService(profile.trade)];
@@ -52,12 +60,14 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
   const styles = useMemo(() => createStyles(darkMode), [darkMode]);
   const compact = width < 720;
   const legacyDiagnostic = initialProfile.services?.find((item) => isDiagnostic(item.service));
+  const initialCoverage = initialProfile.coverageAreas?.filter((area) => coverageChoices.includes(area)) ?? (initialProfile.zones === "Toda la provincia" ? coverageChoices : initialProfile.city ? [initialProfile.city] : []);
   const [draft, setDraft] = useState<SavedProviderProfile>(() => ({
     ...initialProfile,
     diagnosticPrice: initialProfile.diagnosticPrice ?? legacyDiagnostic?.price ?? 35000,
     services: normalizeServices(initialProfile),
     certifications: initialProfile.certifications ?? [],
-    zones: coverageOptions.includes(initialProfile.zones) ? initialProfile.zones : "Solo localidad",
+    coverageAreas: initialCoverage,
+    zones: coverageLabel(initialCoverage),
   }));
   const [cityOpen, setCityOpen] = useState(false);
   const [coverageOpen, setCoverageOpen] = useState(false);
@@ -73,6 +83,39 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
 
   function updateService(id: string, patch: Partial<SavedServiceOffer>) {
     setDraft((current) => ({ ...current, services: (current.services ?? []).map((item) => item.id === id ? { ...item, ...patch } : item) }));
+  }
+
+  function selectCity(city: string) {
+    setDraft((current) => {
+      const currentCoverage = current.coverageAreas ?? [];
+      const coverageAreas = currentCoverage.length === 1 && currentCoverage[0] === current.city ? [city] : currentCoverage;
+      return { ...current, city, coverageAreas, zones: coverageLabel(coverageAreas) };
+    });
+    setCityOpen(false);
+  }
+
+  function toggleCoverage(area: string) {
+    setDraft((current) => {
+      const selected = current.coverageAreas ?? [];
+      const coverageAreas = selected.includes(area) ? selected.filter((item) => item !== area) : [...selected, area];
+      return { ...current, coverageAreas, zones: coverageLabel(coverageAreas) };
+    });
+  }
+
+  function toggleAllCoverage() {
+    setDraft((current) => {
+      const coverageAreas = coverageChoices.every((choice) => current.coverageAreas?.includes(choice)) ? [] : [...coverageChoices];
+      return { ...current, coverageAreas, zones: coverageLabel(coverageAreas) };
+    });
+  }
+
+  function toggleSpecialty(item: SavedServiceOffer, specialty: string) {
+    const selected = item.specialties?.length ? item.specialties : item.service ? [item.service] : [];
+    const specialties = selected.includes(specialty) ? selected.filter((value) => value !== specialty) : selected.length < 2 ? [...selected, specialty] : selected;
+    const service = specialties.join(" · ");
+    const family = providerServiceCatalog.find((option) => option.name === item.family);
+    const description = !item.description?.trim() || selected.length === 0 ? `${specialties.join(" y ")}. ${family?.description ?? ""}`.trim() : item.description;
+    updateService(item.id, { specialties, service, description });
   }
 
   function addCertification(value: string) {
@@ -98,11 +141,11 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
     if (draft.trade.trim().length < 3) return setLocalError("Indicá cómo querés presentarte profesionalmente.");
     if (draft.bio.trim().length < 20) return setLocalError("Escribí una presentación de al menos 20 caracteres.");
     if (containsContactAttempt(draft.bio)) return setLocalError("No incluyas teléfonos, correos, redes ni enlaces en tu presentación.");
-    if (!coverageOptions.includes(draft.zones)) return setLocalError("Elegí hasta dónde te trasladás.");
-    if (!services.length || services.some((item) => !serviceCombinationIsValid(item.family, item.service))) return setLocalError("Elegí una familia y una especialidad válidas para cada servicio.");
+    if (!draft.coverageAreas?.length || draft.coverageAreas.some((area) => !coverageChoices.includes(area))) return setLocalError("Elegí al menos una localidad o zona de cobertura.");
+    if (!services.length || services.some((item) => !serviceSpecialtiesAreValid(item.family, item.specialties?.length ? item.specialties : item.service ? [item.service] : []))) return setLocalError("Elegí una familia y hasta dos especialidades válidas para cada servicio.");
     if (services.some((item) => (item.description?.trim().length ?? 0) < 10 || (item.description?.trim().length ?? 0) > 240)) return setLocalError("Describí cada servicio con entre 10 y 240 caracteres.");
     if (services.some((item) => containsContactAttempt(item.description ?? ""))) return setLocalError("No incluyas teléfonos, correos, redes ni enlaces en la descripción del servicio.");
-    onSubmit({ ...draft, availability: draft.zones, skills: services.map((item) => item.service).join(", "), secondaryTrade: undefined, services });
+    onSubmit({ ...draft, zones: coverageLabel(draft.coverageAreas), availability: coverageLabel(draft.coverageAreas), skills: services.flatMap((item) => item.specialties ?? [item.service]).join(", "), secondaryTrade: undefined, services });
   }
 
   return <View style={styles.card}>
@@ -123,7 +166,7 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
 
       <Text style={styles.label}>Ciudad</Text>
       <TouchableOpacity accessibilityRole="button" accessibilityLabel="Elegir ciudad" style={styles.selector} onPress={() => { setCityOpen((current) => !current); setCoverageOpen(false); setTradeFocused(false); setOpenFamilyId(null); setOpenSpecialtyId(null); }}><Text style={[styles.selectorText, !draft.city && styles.placeholder]}>{draft.city || "Seleccioná tu ciudad"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
-      {cityOpen && <View style={styles.options}>{cities.map((city) => <TouchableOpacity key={city} style={[styles.option, draft.city === city && styles.optionActive]} onPress={() => { setDraft({ ...draft, city }); setCityOpen(false); }}><Text style={[styles.optionText, draft.city === city && styles.optionTextActive]}>{city}</Text></TouchableOpacity>)}</View>}
+      {cityOpen && <View style={styles.options}>{cities.map((city) => <TouchableOpacity key={city} style={[styles.option, draft.city === city && styles.optionActive]} onPress={() => selectCity(city)}><Text style={[styles.optionText, draft.city === city && styles.optionTextActive]}>{city}</Text></TouchableOpacity>)}</View>}
 
       <Text style={styles.label}>Profesional</Text>
       <TextInput value={draft.trade} onFocus={() => { setTradeFocused(true); setCityOpen(false); setCoverageOpen(false); }} onChangeText={(trade) => { setDraft({ ...draft, trade }); setTradeFocused(true); }} placeholder="Ej. Gasista matriculado" placeholderTextColor="#71818B" style={styles.input} />
@@ -139,7 +182,13 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
 
       <Text style={styles.label}>Dónde trabajás</Text>
       <TouchableOpacity accessibilityRole="button" accessibilityLabel="Elegir alcance de trabajo" style={styles.selector} onPress={() => { setCoverageOpen((current) => !current); setCityOpen(false); setTradeFocused(false); setOpenFamilyId(null); setOpenSpecialtyId(null); }}><Text style={styles.selectorText}>{draft.zones}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
-      {coverageOpen && <View style={styles.options}>{coverageOptions.map((coverage) => <TouchableOpacity key={coverage} style={[styles.option, draft.zones === coverage && styles.optionActive]} onPress={() => { setDraft({ ...draft, zones: coverage }); setCoverageOpen(false); }}><Text style={[styles.optionText, draft.zones === coverage && styles.optionTextActive]}>{coverage}</Text></TouchableOpacity>)}</View>}
+      {coverageOpen && <View style={styles.options}>
+        <TouchableOpacity style={[styles.coverageOption, draft.zones === "Toda la provincia" && styles.optionActive]} onPress={toggleAllCoverage}><Text style={styles.optionCheck}>{draft.zones === "Toda la provincia" ? "☑" : "☐"}</Text><Text style={[styles.optionText, draft.zones === "Toda la provincia" && styles.optionTextActive]}>Toda la provincia</Text></TouchableOpacity>
+        {coverageChoices.map((coverage) => {
+          const selected = draft.coverageAreas?.includes(coverage) ?? false;
+          return <TouchableOpacity key={coverage} style={[styles.coverageOption, selected && styles.optionActive]} onPress={() => toggleCoverage(coverage)}><Text style={styles.optionCheck}>{selected ? "☑" : "☐"}</Text><Text style={[styles.optionText, selected && styles.optionTextActive]}>{coverage}</Text></TouchableOpacity>;
+        })}
+      </View>}
 
       <View style={styles.servicesHeading}><View><Text style={styles.sectionTitle}>Tus servicios</Text><Text style={styles.help}>Elegí el rubro y después una especialidad concreta.</Text></View><Text style={styles.freeBadge}>GRATIS · 2</Text></View>
       {services.map((item, index) => {
@@ -149,10 +198,14 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
           <View style={styles.serviceTop}><Text style={styles.serviceNumber}>SERVICIO {index + 1}</Text>{services.length > 1 && <TouchableOpacity onPress={() => setDraft({ ...draft, services: services.filter((service) => service.id !== item.id) })}><Text style={styles.remove}>Quitar</Text></TouchableOpacity>}</View>
           <Text style={styles.miniLabel}>FAMILIA</Text>
           <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Elegir familia del servicio ${index + 1}`} style={styles.selector} onPress={() => { setOpenFamilyId(openFamilyId === item.id ? null : item.id); setOpenSpecialtyId(null); setCityOpen(false); setCoverageOpen(false); setTradeFocused(false); }}><Text style={[styles.selectorText, !item.family && styles.placeholder]}>{item.family || "Elegí un rubro"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
-          {openFamilyId === item.id && <ScrollView nestedScrollEnabled style={styles.catalogOptions}>{providerServiceCatalog.map((option) => <TouchableOpacity key={option.name} style={[styles.familyOption, item.family === option.name && styles.optionActive]} onPress={() => { updateService(item.id, { family: option.name, service: "", description: "" }); setOpenFamilyId(null); setOpenSpecialtyId(item.id); }}><Text style={[styles.optionText, item.family === option.name && styles.optionTextActive]}>{option.name}</Text><Text style={styles.optionDescription}>{option.description}</Text></TouchableOpacity>)}</ScrollView>}
-          <Text style={styles.miniLabel}>ESPECIALIDAD</Text>
-          <TouchableOpacity accessibilityRole="button" disabled={!family} accessibilityLabel={`Elegir especialidad del servicio ${index + 1}`} style={[styles.selector, !family && styles.disabledSelector]} onPress={() => family && setOpenSpecialtyId(openSpecialtyId === item.id ? null : item.id)}><Text style={[styles.selectorText, !item.service && styles.placeholder]}>{item.service || "Primero elegí una familia"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
-          {openSpecialtyId === item.id && family && <ScrollView nestedScrollEnabled style={styles.specialtyOptions}>{family.specialties.map((specialty) => <TouchableOpacity key={specialty} style={[styles.specialtyOption, item.service === specialty && styles.specialtyOptionActive]} onPress={() => { updateService(item.id, { service: specialty, description: specialtyDescription(family.name, specialty) }); setOpenSpecialtyId(null); }}><Text style={[styles.specialtyTitle, item.service === specialty && styles.optionTextActive]}>{specialty}</Text><Text style={styles.optionDescription}>{specialtyDescription(family.name, specialty)}</Text></TouchableOpacity>)}</ScrollView>}
+          {openFamilyId === item.id && <ScrollView nestedScrollEnabled style={styles.catalogOptions}>{providerServiceCatalog.map((option) => <TouchableOpacity key={option.name} style={[styles.familyOption, item.family === option.name && styles.optionActive]} onPress={() => { updateService(item.id, { family: option.name, service: "", specialties: [], description: "" }); setOpenFamilyId(null); setOpenSpecialtyId(item.id); }}><Text style={[styles.optionText, item.family === option.name && styles.optionTextActive]}>{option.name}</Text><Text style={styles.optionDescription}>{option.description}</Text></TouchableOpacity>)}</ScrollView>}
+          <Text style={styles.miniLabel}>ESPECIALIDADES · ELEGÍ HASTA 2</Text>
+          <TouchableOpacity accessibilityRole="button" disabled={!family} accessibilityLabel={`Elegir especialidades del servicio ${index + 1}`} style={[styles.selector, !family && styles.disabledSelector]} onPress={() => family && setOpenSpecialtyId(openSpecialtyId === item.id ? null : item.id)}><Text style={[styles.selectorText, !item.specialties?.length && styles.placeholder]}>{item.specialties?.length ? item.specialties.join(" · ") : family ? "Elegí hasta 2 especialidades" : "Primero elegí una familia"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
+          {openSpecialtyId === item.id && family && <ScrollView nestedScrollEnabled style={styles.specialtyOptions}>{family.specialties.map((specialty) => {
+            const selected = item.specialties?.includes(specialty) ?? false;
+            const unavailable = !selected && (item.specialties?.length ?? 0) >= 2;
+            return <TouchableOpacity key={specialty} disabled={unavailable} style={[styles.specialtyOption, selected && styles.specialtyOptionActive, unavailable && styles.unavailableOption]} onPress={() => toggleSpecialty(item, specialty)}><View style={styles.specialtyTitleRow}><Text style={styles.optionCheck}>{selected ? "☑" : "☐"}</Text><Text style={[styles.specialtyTitle, selected && styles.optionTextActive]}>{specialty}</Text></View><Text style={styles.optionDescription}>{specialtyDescription(family.name, specialty)}</Text></TouchableOpacity>;
+          })}</ScrollView>}
           <View style={styles.descriptionHeading}><Text style={styles.miniLabel}>CONTALE BREVEMENTE AL CLIENTE QUÉ OFRECÉS</Text><Text style={styles.counter}>{descriptionLength}/240</Text></View>
           <TextInput multiline maxLength={240} value={item.description ?? ""} onChangeText={(description) => updateService(item.id, { description })} placeholder="Ej. Reviso la instalación, detecto la falla y explico las opciones antes de comenzar." placeholderTextColor="#71818B" style={[styles.input, styles.serviceDescription]} />
           <Text style={styles.help}>No incluyas teléfono, correo, redes sociales ni enlaces.</Text>
@@ -177,7 +230,7 @@ function createStyles(darkMode: boolean) {
     card: { backgroundColor: palette.background, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: 24, maxHeight: "96%" }, eyebrow: { color: "#FF8A1F", fontSize: 11, fontWeight: "900", letterSpacing: 0.8 }, title: { color: palette.text, fontSize: 25, fontWeight: "900", marginTop: 3 }, copy: { color: palette.muted, fontSize: 12, lineHeight: 17, marginTop: 4, marginBottom: 7 },
     scroll: { maxHeight: 650 }, scrollContent: { paddingBottom: 12 }, sectionTitle: { color: palette.text, fontSize: 16, fontWeight: "900", marginTop: 12, marginBottom: 8 }, identityRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 }, photo: { width: 68, height: 68, borderRadius: 34, marginRight: 13 }, photoFallback: { width: 68, height: 68, borderRadius: 34, backgroundColor: "#063C78", alignItems: "center", justifyContent: "center", marginRight: 13 }, photoInitial: { color: "white", fontSize: 27, fontWeight: "900" }, identityFields: { flex: 1 }, photoButton: { minHeight: 38, alignSelf: "flex-start", justifyContent: "center", paddingHorizontal: 13, borderWidth: 1, borderColor: "#49B2F5", borderRadius: 10 }, photoButtonText: { color: "#49B2F5", fontSize: 12, fontWeight: "900" }, email: { color: palette.muted, fontSize: 11, marginTop: 7 },
     fieldsRow: { flexDirection: "row", gap: 10 }, fieldsColumn: { flexDirection: "column" }, flexField: { flex: 1.6 }, diagnosticField: { flex: 1 }, input: { minHeight: 46, borderWidth: 1, borderColor: palette.line, borderRadius: 11, paddingHorizontal: 12, color: palette.text, backgroundColor: palette.input, marginBottom: 8 }, label: { color: palette.text, fontSize: 12, fontWeight: "900", marginTop: 5, marginBottom: 6 }, help: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: -3, marginBottom: 8 }, multiline: { minHeight: 76, paddingTop: 11, textAlignVertical: "top" }, multilineSmall: { minHeight: 62, paddingTop: 11, textAlignVertical: "top" }, money: { minHeight: 46, flexDirection: "row", alignItems: "center", borderWidth: 1, borderColor: palette.line, borderRadius: 11, backgroundColor: palette.input, paddingHorizontal: 10, marginBottom: 8 }, currency: { color: palette.muted, fontSize: 10, fontWeight: "900" }, priceInput: { flex: 1, color: palette.text, fontWeight: "900", paddingHorizontal: 6 },
-    selector: { minHeight: 46, borderWidth: 1, borderColor: palette.line, backgroundColor: palette.input, borderRadius: 11, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, marginBottom: 7 }, disabledSelector: { opacity: 0.48 }, selectorText: { color: palette.text, fontSize: 12, fontWeight: "800", flex: 1 }, placeholder: { color: palette.muted, fontWeight: "500" }, chevron: { color: "#49B2F5", fontSize: 17, fontWeight: "900" }, options: { borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 8, backgroundColor: palette.input }, catalogOptions: { maxHeight: 265, borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 9, backgroundColor: palette.input }, specialtyOptions: { maxHeight: 280, borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 9, backgroundColor: palette.input }, option: { minHeight: 41, justifyContent: "center", paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: palette.line }, familyOption: { minHeight: 57, justifyContent: "center", paddingHorizontal: 11, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: palette.line }, specialtyOption: { minHeight: 66, justifyContent: "center", paddingHorizontal: 11, paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: palette.line }, specialtyOptionActive: { backgroundColor: palette.soft }, optionActive: { backgroundColor: palette.soft }, optionText: { color: palette.muted, fontSize: 12, fontWeight: "800" }, optionTextActive: { color: palette.text, fontWeight: "900" }, optionDescription: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: 3 }, specialtyTitle: { color: palette.text, fontSize: 12, fontWeight: "900" },
+    selector: { minHeight: 46, borderWidth: 1, borderColor: palette.line, backgroundColor: palette.input, borderRadius: 11, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, marginBottom: 7 }, disabledSelector: { opacity: 0.48 }, selectorText: { color: palette.text, fontSize: 12, fontWeight: "800", flex: 1 }, placeholder: { color: palette.muted, fontWeight: "500" }, chevron: { color: "#49B2F5", fontSize: 17, fontWeight: "900" }, options: { borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 8, backgroundColor: palette.input }, catalogOptions: { maxHeight: 265, borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 9, backgroundColor: palette.input }, specialtyOptions: { maxHeight: 280, borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 9, backgroundColor: palette.input }, option: { minHeight: 41, justifyContent: "center", paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: palette.line }, coverageOption: { minHeight: 42, flexDirection: "row", alignItems: "center", gap: 9, paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: palette.line }, optionCheck: { color: "#49B2F5", fontSize: 15, fontWeight: "900" }, familyOption: { minHeight: 57, justifyContent: "center", paddingHorizontal: 11, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: palette.line }, specialtyOption: { minHeight: 66, justifyContent: "center", paddingHorizontal: 11, paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: palette.line }, specialtyOptionActive: { backgroundColor: palette.soft }, unavailableOption: { opacity: 0.38 }, specialtyTitleRow: { flexDirection: "row", alignItems: "center", gap: 8 }, optionActive: { backgroundColor: palette.soft }, optionText: { color: palette.muted, fontSize: 12, fontWeight: "800" }, optionTextActive: { color: palette.text, fontWeight: "900" }, optionDescription: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: 3 }, specialtyTitle: { color: palette.text, fontSize: 12, fontWeight: "900" },
     suggestions: { borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", backgroundColor: palette.surface, marginTop: -5, marginBottom: 9 }, suggestion: { minHeight: 40, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: palette.line }, suggestionHash: { color: "#49B2F5", fontSize: 13, fontWeight: "900" }, suggestionText: { color: palette.text, fontSize: 11, fontWeight: "800" }, chipList: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 8 }, chip: { flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderColor: "#49B2F5", backgroundColor: palette.soft, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 14 }, chipText: { color: "#49B2F5", fontSize: 10, fontWeight: "900" }, chipRemove: { color: palette.danger, fontSize: 16, lineHeight: 16, fontWeight: "900" },
     servicesHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 2 }, freeBadge: { color: "#56D3A1", backgroundColor: palette.soft, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, fontSize: 10, fontWeight: "900" }, serviceCard: { borderWidth: 1, borderColor: palette.line, backgroundColor: palette.surface, borderRadius: 14, padding: 11, marginTop: 8 }, serviceTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 9 }, serviceNumber: { color: "#49B2F5", fontSize: 10, fontWeight: "900", letterSpacing: 0.4 }, remove: { color: palette.danger, fontSize: 10, fontWeight: "900" }, miniLabel: { color: palette.muted, fontSize: 9, fontWeight: "900", marginTop: 4, marginBottom: 5 }, descriptionHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }, counter: { color: palette.muted, fontSize: 9, fontWeight: "800" }, serviceDescription: { minHeight: 82, paddingTop: 11, textAlignVertical: "top" }, addService: { minHeight: 44, borderWidth: 1, borderStyle: "dashed", borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center", marginTop: 9 }, addServiceText: { color: "#49B2F5", fontSize: 12, fontWeight: "900" }, lockedService: { minHeight: 58, borderRadius: 11, backgroundColor: palette.soft, marginTop: 9, paddingHorizontal: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, opacity: 0.86 }, membershipNotice: { borderWidth: 1, borderColor: palette.warningText, borderRadius: 11, backgroundColor: palette.warning, marginTop: 9, padding: 11 }, lockedTitle: { color: palette.muted, fontSize: 12, fontWeight: "900" }, lockedText: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: 2 }, membershipBadge: { color: palette.warningText, fontSize: 9, fontWeight: "900", backgroundColor: palette.warning, borderRadius: 9, paddingHorizontal: 7, paddingVertical: 4 },
     error: { color: palette.danger, fontSize: 12, fontWeight: "800", marginTop: 7 }, actions: { flexDirection: "row", gap: 8, marginTop: 12 }, cancel: { minHeight: 48, minWidth: 92, borderWidth: 1, borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center" }, cancelText: { color: "#49B2F5", fontWeight: "900" }, save: { flex: 1, minHeight: 48, borderRadius: 11, backgroundColor: "#FF7800", alignItems: "center", justifyContent: "center" }, saveText: { color: "white", fontWeight: "900" }, disabled: { opacity: 0.55 },

@@ -4,6 +4,9 @@
   "outputDirectory": "apps/mobile/dist",
   "installCommand": "npm ci",
   "framework": null,
+  "functions": {
+    "api/drive-sync.mjs": { "maxDuration": 60 }
+  },
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
   ]

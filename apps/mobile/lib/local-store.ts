@@ -60,6 +60,7 @@ export type SavedMessage = {
 };
 
 export type SavedProviderProfile = {
+  publicId?: string;
   displayName: string;
   city: string;
   trade: string;
@@ -72,6 +73,8 @@ export type SavedProviderProfile = {
   training?: string;
   certifications?: string[];
   services?: SavedServiceOffer[];
+  coverageAreas?: string[];
+  portfolioWorks?: SavedPortfolioWork[];
   profileReviews?: SavedProfileReview[];
   skills: string;
   zones: string;
@@ -84,10 +87,27 @@ export type SavedServiceOffer = {
   id: string;
   family?: string;
   service: string;
+  specialties?: string[];
   description?: string;
   price: number;
   startTime: string;
   endTime: string;
+};
+
+export type SavedWorkPhoto = {
+  id: string;
+  uri: string;
+  storagePath?: string;
+  driveFileId?: string;
+  driveUrl?: string;
+  watermarked: boolean;
+};
+
+export type SavedPortfolioWork = {
+  id: string;
+  service: string;
+  description: string;
+  photos: SavedWorkPhoto[];
 };
 
 export type SavedProfileReview = {
@@ -131,7 +151,7 @@ export async function loadLocalState(): Promise<LocalAppState> {
       }));
     const diagnosticService = legacyServices?.find((item) => /diagnóstico|visita técnica/i.test(item.service));
     const savedRealServices = legacyServices?.filter((item) => !/diagnóstico|visita técnica/i.test(item.service)) ?? [];
-    const realServices = savedRealServices.length ? savedRealServices : rawProfile && /gasista/i.test(rawProfile.trade) ? [{
+    const realServices: SavedServiceOffer[] = savedRealServices.length ? savedRealServices as SavedServiceOffer[] : rawProfile && /gasista/i.test(rawProfile.trade) ? [{
       id: "migrated-gasista",
       family: "Instalaciones",
       service: "Gasista",
@@ -143,7 +163,9 @@ export async function loadLocalState(): Promise<LocalAppState> {
     const providerProfile = rawProfile ? {
       ...rawProfile,
       diagnosticPrice: rawProfile.diagnosticPrice ?? diagnosticService?.price ?? 35000,
-      services: realServices,
+      services: realServices.map((service) => ({ ...service, specialties: service.specialties?.length ? service.specialties : service.service ? [service.service] : [] })),
+      coverageAreas: rawProfile.coverageAreas?.length ? rawProfile.coverageAreas : rawProfile.zones === "Toda la provincia" ? ["San Sebastián", "Río Grande", "Tolhuin", "Almanza", "Ushuaia", "Zonas rurales"] : rawProfile.city ? [rawProfile.city] : [],
+      portfolioWorks: rawProfile.portfolioWorks ?? [],
     } : null;
     return {
       session: parsed.session ?? null,

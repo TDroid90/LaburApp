@@ -8,7 +8,7 @@ export const providerServiceCatalog: ServiceFamily[] = [
   { name: "Instalaciones", description: "Instalaciones y reparaciones esenciales del hogar.", specialties: ["Gasista", "Electricidad domiciliaria", "Reparación de pérdidas de agua", "Instalación de agua", "Instalación de desagües", "Instalación de cloacas", "Instalación sanitaria", "Destape de cañerías", "Instalación de termotanque", "Instalación de calefón", "Instalación de cocina", "Instalación de artefactos"] },
   { name: "Calefacción", description: "Instalación, limpieza y mantenimiento de sistemas de calefacción.", specialties: ["Reparación de calefactores", "Limpieza de calefactores", "Reparación de calderas", "Instalación de radiadores", "Mantenimiento de calefacción"] },
   { name: "Climatización", description: "Soluciones de frío, aire acondicionado y refrigeración.", specialties: ["Reparación de aire acondicionado", "Instalación de aire acondicionado", "Carga de gas", "Reparación de heladeras", "Reparación de freezers"] },
-  { name: "Construcción", description: "Obra, terminaciones y reparaciones estructurales.", specialties: ["Albañilería", "Construcción en seco", "Durlock", "Revoques", "Reparación de paredes", "Reparación de techos", "Reparación de humedad"] },
+  { name: "Construcción", description: "Obra, aberturas, terminaciones y reparaciones estructurales.", specialties: ["Albañilería", "Construcción en seco", "Durlock", "Revoques", "Reparación de paredes", "Reparación de techos", "Reparación de humedad", "Aberturas", "Instalación de puertas", "Instalación de ventanas", "Reparación de puertas y ventanas", "Colocación de mosquiteros", "Sellado y ajuste de aberturas"] },
   { name: "Pisos y revestimientos", description: "Colocación, terminación y mantenimiento de pisos.", specialties: ["Colocación de cerámicos", "Colocación de porcelanato", "Colocación de pisos flotantes", "Colocación de pisos vinílicos", "Colocación de zócalos", "Pulido de pisos"] },
   { name: "Pintura", description: "Pintura, protección e impermeabilización de superficies.", specialties: ["Pintura interior", "Pintura exterior", "Pintura de muebles", "Pintura de aberturas", "Impermeabilización", "Aplicación de revestimientos"] },
   { name: "Carpintería", description: "Fabricación, armado e instalación de trabajos en madera.", specialties: ["Fabricación de muebles", "Reparación de muebles", "Armado de muebles", "Instalación de placares", "Instalación de estantes", "Reparación de puertas", "Reparación de ventanas"] },
@@ -29,7 +29,7 @@ export const providerServiceCatalog: ServiceFamily[] = [
 ];
 
 export const professionalSuggestions = [
-  "Gasista matriculado", "Electricista domiciliario", "Plomero", "Técnico en calefacción", "Técnico en refrigeración", "Albañil", "Pintor", "Carpintero", "Herrero", "Técnico en reparación de electrodomésticos", "Técnico en informática", "Mecánico", "Fletero", "Personal de limpieza", "Jardinero", "Cerrajero", "Cuidador de adultos mayores", "Niñera", "Peluquero", "Costurero", "Fotógrafo", "Profesor particular",
+  "Gasista matriculado", "Electricista domiciliario", "Plomero", "Técnico en calefacción", "Técnico en refrigeración", "Albañil", "Instalador de aberturas", "Pintor", "Carpintero", "Herrero", "Técnico en reparación de electrodomésticos", "Técnico en informática", "Mecánico", "Fletero", "Personal de limpieza", "Jardinero", "Cerrajero", "Cuidador de adultos mayores", "Niñera", "Peluquero", "Costurero", "Fotógrafo", "Profesor particular",
 ];
 
 export const certificationSuggestions = [
@@ -43,4 +43,8 @@ export function specialtyDescription(familyName: string, specialty: string) {
 
 export function serviceCombinationIsValid(familyName?: string, specialty?: string) {
   return !!providerServiceCatalog.find((family) => family.name === familyName)?.specialties.includes(specialty ?? "");
+}
+
+export function serviceSpecialtiesAreValid(familyName?: string, specialties: string[] = []) {
+  return specialties.length >= 1 && specialties.length <= 2 && specialties.every((specialty) => serviceCombinationIsValid(familyName, specialty));
 }
