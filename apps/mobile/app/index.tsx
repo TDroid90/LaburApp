@@ -499,6 +499,15 @@ const providers = [
     badge: "Identidad verificada",
     skills: "Motores · Cubierta · Reparaciones",
   },
+  {
+    name: "Profesional Demo",
+    trade: "Gasista matriculado",
+    city: "Río Grande",
+    rating: "5,0",
+    jobs: 3,
+    badge: "Matrícula verificada",
+    skills: "Calefones · Cañerías · Instalaciones",
+  },
 ];
 
 const quickSearches = [
@@ -525,6 +534,19 @@ type FeaturedWork = {
   description: string;
   photoUri: string;
 };
+type PublicPortfolioWork = {
+  id: string;
+  title: string;
+  description: string;
+  photoUris: string[];
+};
+type PublicProfileDetails = {
+  bio: string;
+  certifications: string[];
+  diagnosticPrice?: number;
+  reviews: Array<{ author: string; comment: string; rating: number }>;
+};
+type InfoPageKey = "terms" | "privacy" | "about" | "usage" | "certifications";
 
 const featuredWorks: Record<string, FeaturedWork> = {
   "Martín Gómez": { title: "Reparación de calefón", description: "Diagnóstico, cambio de componentes y prueba final de funcionamiento seguro.", photoUri: "https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=900&q=75" },
@@ -537,6 +559,48 @@ const featuredWorks: Record<string, FeaturedWork> = {
   "Tomás Roldán": { title: "Entrega de paquetería", description: "Ruta urbana optimizada y entrega confirmada dentro de la franja acordada.", photoUri: "https://images.unsplash.com/photo-1526367790999-0150786686a2?auto=format&fit=crop&w=900&q=75" },
   "Kevin Almirón": { title: "Preparación de materiales", description: "Asistencia de obra, preparación de mezcla y orden del espacio de trabajo.", photoUri: "https://images.unsplash.com/photo-1541888946425-d81bb19240f5?auto=format&fit=crop&w=900&q=75" },
   "Julia Ferreyra": { title: "Pintura interior", description: "Preparación de paredes, enduido y terminación uniforme en dos manos.", photoUri: "https://images.unsplash.com/photo-1562259949-e8e7689d7828?auto=format&fit=crop&w=900&q=75" },
+  "Profesional Demo": { title: "Revisión integral de calefón", description: "Diagnóstico, limpieza, recambio de componentes y prueba final de funcionamiento.", photoUri: "https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=900&q=75" },
+};
+
+const portfolioPhotoPool = [
+  "https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=900&q=75",
+  "https://images.unsplash.com/photo-1621905252507-b35492cc74b4?auto=format&fit=crop&w=900&q=75",
+  "https://images.unsplash.com/photo-1607472586893-edb57bdc0e39?auto=format&fit=crop&w=900&q=75",
+  "https://images.unsplash.com/photo-1581578731548-c64695cc6952?auto=format&fit=crop&w=900&q=75",
+  "https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?auto=format&fit=crop&w=900&q=75",
+  "https://images.unsplash.com/photo-1607472586893-edb57bdc0e39?auto=format&fit=crop&w=900&q=75",
+  "https://images.unsplash.com/photo-1526367790999-0150786686a2?auto=format&fit=crop&w=900&q=75",
+  "https://images.unsplash.com/photo-1541888946425-d81bb19240f5?auto=format&fit=crop&w=900&q=75",
+  "https://images.unsplash.com/photo-1562259949-e8e7689d7828?auto=format&fit=crop&w=900&q=75",
+];
+
+const demoPortfolioWorks: SavedPortfolioWork[] = [
+  {
+    id: "demo-work-1",
+    service: "Revisión integral de calefón",
+    description: "Diagnóstico, limpieza, recambio de componentes y prueba final de funcionamiento.",
+    photos: portfolioPhotoPool.slice(0, 3).map((uri, index) => ({ id: `demo-work-1-photo-${index + 1}`, uri, watermarked: true })),
+  },
+  {
+    id: "demo-work-2",
+    service: "Renovación de cañería",
+    description: "Reemplazo del tramo deteriorado, nuevas conexiones y control completo de pérdidas.",
+    photos: portfolioPhotoPool.slice(3, 6).map((uri, index) => ({ id: `demo-work-2-photo-${index + 1}`, uri, watermarked: true })),
+  },
+  {
+    id: "demo-work-3",
+    service: "Puesta a punto de instalación",
+    description: "Revisión preventiva, ajuste de conexiones y verificación final de seguridad.",
+    photos: portfolioPhotoPool.slice(6, 9).map((uri, index) => ({ id: `demo-work-3-photo-${index + 1}`, uri, watermarked: true })),
+  },
+];
+
+const infoPages: Record<InfoPageKey, { title: string; body: string }> = {
+  terms: { title: "Términos y condiciones", body: "Reglas de uso de LaburApp para clientes y profesionales, contratación, presupuestos, pagos, cancelaciones y responsabilidades." },
+  privacy: { title: "Política de privacidad", body: "Cómo protegemos los datos personales, qué información utiliza la aplicación y cómo se puede solicitar su corrección o eliminación." },
+  about: { title: "Nosotros", body: "LaburApp conecta personas con profesionales locales, priorizando perfiles claros, trabajos verificables y presupuestos ordenados." },
+  usage: { title: "Mecánica de uso", body: "Buscá un servicio, compará perfiles y trabajos realizados, pedí un presupuesto y seguí todo desde tu cuenta." },
+  certifications: { title: "Certificaciones", body: "Las insignias permiten distinguir identidad, matrículas y documentación revisada. Cada validación mostrará su alcance y vigencia." },
 };
 
 function featuredWorkFor(provider: Provider): FeaturedWork {
@@ -544,6 +608,43 @@ function featuredWorkFor(provider: Provider): FeaturedWork {
     title: `Trabajo de ${provider.trade}`,
     description: `Trabajo finalizado en ${provider.city}, seleccionado por el profesional como muestra destacada.`,
     photoUri: "https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=900&q=75",
+  };
+}
+
+function publicPortfolioFor(provider: Provider): PublicPortfolioWork[] {
+  if (provider.name === "Profesional Demo") {
+    return demoPortfolioWorks.map((work) => ({
+      id: work.id,
+      title: work.service,
+      description: work.description,
+      photoUris: work.photos.map((photo) => photo.uri),
+    }));
+  }
+  const featured = featuredWorkFor(provider);
+  const specialties = provider.skills.split(" · ");
+  return [
+    { id: `${provider.name}-work-1`, title: featured.title, description: featured.description, photoUris: [featured.photoUri, portfolioPhotoPool[1], portfolioPhotoPool[2]] },
+    { id: `${provider.name}-work-2`, title: `${specialties[0] ?? provider.trade}: trabajo terminado`, description: `Trabajo de ${provider.trade.toLowerCase()} realizado en ${provider.city}, con revisión y entrega final.`, photoUris: portfolioPhotoPool.slice(3, 6) },
+    { id: `${provider.name}-work-3`, title: `${specialties[1] ?? provider.trade}: puesta a punto`, description: "Preparación, ejecución y control final documentado por el profesional.", photoUris: portfolioPhotoPool.slice(6, 9) },
+  ];
+}
+
+function publicDetailsFor(provider: Provider): PublicProfileDetails {
+  if (provider.name === "Profesional Demo") {
+    return {
+      bio: "Mantenimiento, diagnóstico y reparaciones domiciliarias con atención clara y ordenada. Formación técnica y más de seis años de experiencia.",
+      certifications: ["Matrícula vigente", "Instalaciones domiciliarias"],
+      diagnosticPrice: 35000,
+      reviews: [
+        { author: "María Fernández", rating: 5, comment: "Llegó en horario, explicó el problema y dejó todo funcionando." },
+        { author: "Jorge Acosta", rating: 5, comment: "Muy prolijo y el presupuesto coincidió con el trabajo realizado." },
+      ],
+    };
+  }
+  return {
+    bio: `${provider.name} ofrece servicios de ${provider.trade.toLowerCase()} en ${provider.city}, con experiencia respaldada por sus trabajos publicados.`,
+    certifications: [provider.badge],
+    reviews: [],
   };
 }
 
@@ -567,6 +668,45 @@ const demoAccounts: Array<SavedSession & { label: string }> = [
     role: "admin",
   },
 ];
+
+function createDemoProviderProfile(displayName = "Profesional Demo"): SavedProviderProfile {
+  const services = [
+    {
+      id: "demo-gasista",
+      family: "Instalaciones",
+      service: "Gasista",
+      specialties: ["Gasista"],
+      description: "Reviso instalaciones domiciliarias, detecto fallas y explico las opciones de reparación antes de comenzar.",
+      price: 0,
+      startTime: "",
+      endTime: "",
+    },
+  ];
+  return {
+    publicId: "LP000001",
+    displayName,
+    city: "Río Grande",
+    trade: "Gasista matriculado",
+    diagnosticPrice: 35000,
+    bio: "Mantenimiento, diagnóstico y reparaciones domiciliarias con atención clara y ordenada.",
+    training: "Formación técnica en instalaciones domiciliarias. Más de seis años de experiencia en mantenimiento y detección de pérdidas.",
+    certifications: ["Matrícula vigente", "Instalaciones domiciliarias"],
+    verified: true,
+    followersCount: 128,
+    profileReviews: [
+      { id: "review-demo-1", authorName: "María Fernández", rating: 5, comment: "Llegó en horario, explicó el problema y dejó todo funcionando.", createdAt: "2026-08-28" },
+      { id: "review-demo-2", authorName: "Jorge Acosta", rating: 5, comment: "Muy prolijo y el presupuesto coincidió con el trabajo realizado.", createdAt: "2026-08-17" },
+    ],
+    services,
+    coverageAreas: ["Río Grande"],
+    portfolioWorks: demoPortfolioWorks,
+    skills: services.map((item) => item.service).join(", "),
+    zones: "Solo localidad",
+    availability: "Solo localidad",
+    tariffItems: [{ id: "diagnostic-fee", trade: "Gasista matriculado", label: "Diagnóstico / visita técnica", unit: "visita", unitPrice: 35000, enabled: true }],
+    published: true,
+  };
+}
 
 const lightColors = {
   navy: "#063C78",
@@ -668,6 +808,8 @@ export default function Home() {
   const [expandedProviderName, setExpandedProviderName] = useState<string | null>(null);
   const [publicProfileProvider, setPublicProfileProvider] = useState<Provider | null>(null);
   const [workPhoto, setWorkPhoto] = useState<{ provider: Provider; work: FeaturedWork } | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [infoPage, setInfoPage] = useState<InfoPageKey | null>(null);
   const [tab, setTab] = useState("Inicio");
   const [requested, setRequested] = useState<string | null>(null);
   const [authMode, setAuthMode] = useState<
@@ -735,11 +877,16 @@ export default function Home() {
     });
     void flushMirrorEvents();
     loadLocalState().then((saved) => {
+      const restoredProviderProfile =
+        saved.session?.email === "profesional@laburapp.demo" &&
+        (!saved.providerProfile || !saved.providerProfile.portfolioWorks?.length)
+          ? createDemoProviderProfile(saved.session.name)
+          : saved.providerProfile;
       setSession(saved.session);
       setSignedInName(saved.session?.name ?? null);
       setRequests(saved.requests);
-      setProviderProfile(saved.providerProfile);
-      if (saved.providerProfile) setProfileDraft(saved.providerProfile);
+      setProviderProfile(restoredProviderProfile);
+      if (restoredProviderProfile) setProfileDraft(restoredProviderProfile);
       setHydrated(true);
     });
   }, []);
@@ -750,6 +897,16 @@ export default function Home() {
       void AsyncStorage.setItem(THEME_STORAGE_KEY, next ? "dark" : "light");
       return next;
     });
+  }
+
+  function goHome() {
+    setTab("Inicio");
+    setQuery("");
+    setCityFilter("Todas");
+    setOpenFilter(null);
+    setExpandedProviderName(null);
+    setPublicProfileProvider(null);
+    setMenuOpen(false);
   }
 
   useEffect(() => {
@@ -881,69 +1038,11 @@ export default function Home() {
     setAuthError("");
     setAuthPassword("");
     if (account.role === "admin") setTab("Panel");
-    if (account.role === "provider" && !providerProfile) {
-      const services = [
-        {
-          id: "demo-gasista",
-          family: "Instalaciones",
-          service: "Gasista",
-          specialties: ["Gasista"],
-          description:
-            "Reviso instalaciones domiciliarias, detecto fallas y explico las opciones de reparación antes de comenzar.",
-          price: 0,
-          startTime: "",
-          endTime: "",
-        },
-      ];
-      const baseProfile: SavedProviderProfile = {
-        publicId: "LP000001",
-        displayName: account.name,
-        city: "Río Grande",
-        trade: "Gasista matriculado",
-        diagnosticPrice: 35000,
-        bio: "Mantenimiento, diagnóstico y reparaciones domiciliarias con atención clara y ordenada.",
-        training:
-          "Formación técnica en instalaciones domiciliarias. Más de seis años de experiencia en mantenimiento y detección de pérdidas.",
-        certifications: ["Matrícula vigente", "Instalaciones domiciliarias"],
-        verified: true,
-        followersCount: 128,
-        profileReviews: [
-          {
-            id: "review-demo-1",
-            authorName: "María Fernández",
-            rating: 5,
-            comment:
-              "Llegó en horario, explicó el problema y dejó todo funcionando.",
-            createdAt: "2026-08-28",
-          },
-          {
-            id: "review-demo-2",
-            authorName: "Jorge Acosta",
-            rating: 5,
-            comment:
-              "Muy prolijo y el presupuesto coincidió con el trabajo realizado.",
-            createdAt: "2026-08-17",
-          },
-        ],
-        services,
-        coverageAreas: ["Río Grande"],
-        portfolioWorks: [],
-        skills: services.map((item) => item.service).join(", "),
-        zones: "Solo localidad",
-        availability: "Solo localidad",
-        tariffItems: [
-          {
-            id: "diagnostic-fee",
-            trade: "Gasista matriculado",
-            label: "Diagnóstico / visita técnica",
-            unit: "visita",
-            unitPrice: 35000,
-            enabled: true,
-          },
-        ],
-        published: true,
-      };
-      setProviderProfile(baseProfile);
+    if (
+      account.role === "provider" &&
+      (!providerProfile || providerProfile.displayName === "Profesional Demo")
+    ) {
+      setProviderProfile(createDemoProviderProfile(account.name));
     }
   }
 
@@ -1564,20 +1663,42 @@ export default function Home() {
         .map(({ provider }) => provider),
     [query, cityFilter, providerSort],
   );
+  const selectedPublicWorks = publicProfileProvider
+    ? publicPortfolioFor(publicProfileProvider)
+    : [];
+  const selectedPublicDetails = publicProfileProvider
+    ? publicDetailsFor(publicProfileProvider)
+    : null;
 
   return (
     <SafeAreaView style={styles.safe}>
       <View style={[styles.header, compactHeader && styles.headerCompact]}>
         <View style={styles.brandRow}>
-          <Image
-            source={officialWordmark}
-            accessibilityLabel="LaburApp"
-            resizeMode="contain"
-            style={[
-              styles.wordmarkLogo,
-              !compactHeader && styles.wordmarkLogoWide,
-            ]}
-          />
+          <TouchableOpacity
+            accessibilityRole="button"
+            accessibilityLabel="Abrir menú"
+            accessibilityState={{ expanded: menuOpen }}
+            style={styles.menuButton}
+            onPress={() => setMenuOpen(true)}
+          >
+            <View style={styles.menuLine} />
+            <View style={styles.menuLine} />
+            <View style={styles.menuLine} />
+          </TouchableOpacity>
+          <TouchableOpacity
+            accessibilityRole="link"
+            accessibilityLabel="Ir al inicio de LaburApp"
+            onPress={goHome}
+          >
+            <Image
+              source={officialWordmark}
+              resizeMode="contain"
+              style={[
+                styles.wordmarkLogo,
+                !compactHeader && styles.wordmarkLogoWide,
+              ]}
+            />
+          </TouchableOpacity>
         </View>
         <View style={styles.headerActions}>
           <TouchableOpacity
@@ -1765,28 +1886,30 @@ export default function Home() {
               const expanded = expandedProviderName === provider.name;
               const initials = provider.name.split(" ").map((part) => part[0]).join("");
               return <View key={provider.name} style={[styles.card, expanded && styles.cardExpanded]}>
-                <TouchableOpacity accessibilityRole="link" accessibilityLabel={`Ver perfil de ${provider.name}`} style={styles.avatar} onPress={() => setPublicProfileProvider(provider)}>
-                  <Text style={styles.avatarText}>{initials}</Text>
-                </TouchableOpacity>
-                <View style={styles.cardBody}>
-                  <View style={styles.row}>
-                    <TouchableOpacity accessibilityRole="link" accessibilityLabel={`Abrir perfil profesional de ${provider.name}`} style={styles.nameButton} onPress={() => setPublicProfileProvider(provider)}><Text style={styles.nameLink}>{provider.name}</Text></TouchableOpacity>
-                    <Text style={styles.rating}>★ {provider.rating}</Text>
+                <TouchableOpacity accessibilityRole="link" accessibilityLabel={`Abrir perfil profesional completo de ${provider.name}`} style={styles.cardOpenArea} onPress={() => setPublicProfileProvider(provider)}>
+                  <View style={styles.avatar}>
+                    <Text style={styles.avatarText}>{initials}</Text>
                   </View>
-                  <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded }} accessibilityLabel={`${expanded ? "Ocultar" : "Ver"} trabajo destacado de ${provider.name}`} style={styles.cardInfoButton} onPress={() => setExpandedProviderName(expanded ? null : provider.name)}>
+                  <View style={styles.cardBody}>
+                    <View style={styles.row}>
+                      <Text style={styles.nameLink}>{provider.name}</Text>
+                      <Text style={styles.rating}>★ {provider.rating}</Text>
+                    </View>
                     <Text style={styles.trade}>{provider.trade} · {provider.city}</Text>
                     <Text style={styles.skills}>{provider.skills}</Text>
                     <Text style={styles.badge}>✓ {provider.badge} · {provider.jobs} trabajos</Text>
-                    <Text style={styles.featuredToggle}>{expanded ? "Ocultar trabajo destacado ︿" : "Ver trabajo destacado ﹀"}</Text>
-                  </TouchableOpacity>
-                  {expanded && <View style={styles.featuredWork}>
+                  </View>
+                </TouchableOpacity>
+                <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded }} accessibilityLabel={`${expanded ? "Ocultar" : "Ver"} trabajo destacado de ${provider.name}`} style={styles.featuredToggleButton} onPress={() => setExpandedProviderName(expanded ? null : provider.name)}>
+                  <Text style={styles.featuredToggle}>{expanded ? "Ocultar trabajo destacado ︿" : "Ver trabajo destacado ﹀"}</Text>
+                </TouchableOpacity>
+                {expanded && <View style={styles.featuredWork}>
                     <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Ampliar foto de ${featuredWork.title}`} style={styles.featuredPhotoButton} onPress={() => setWorkPhoto({ provider, work: featuredWork })}>
                       <Image source={{ uri: featuredWork.photoUri }} resizeMode="cover" style={styles.featuredPhoto} />
                     </TouchableOpacity>
                     <View style={styles.featuredWorkCopy}><Text style={styles.favoriteLabel}>★ DESTACADO</Text><Text style={styles.featuredWorkTitle}>{featuredWork.title}</Text><Text numberOfLines={3} style={styles.featuredWorkDescription}>{featuredWork.description}</Text><TouchableOpacity accessibilityRole="link" onPress={() => setPublicProfileProvider(provider)}><Text style={styles.viewProfileLink}>Ver perfil completo</Text></TouchableOpacity></View>
-                  </View>}
-                  <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => startQuote(provider)}><Text style={styles.buttonText}>Solicitar presupuesto</Text></TouchableOpacity>
-                </View>
+                </View>}
+                <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => startQuote(provider)}><Text style={styles.buttonText}>Solicitar presupuesto</Text></TouchableOpacity>
               </View>;
             })}
             {filtered.length === 0 && (
@@ -2505,6 +2628,59 @@ export default function Home() {
           </TouchableOpacity>
         </View>
       )}
+      <AppModal visible={menuOpen} onRequestClose={() => setMenuOpen(false)}>
+        <View style={styles.drawerBackdrop}>
+          <View style={styles.drawerPanel}>
+            <View style={styles.drawerHeader}>
+              <Text style={styles.drawerTitle}>LaburApp</Text>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar menú" style={styles.drawerClose} onPress={() => setMenuOpen(false)}>
+                <Text style={styles.drawerCloseText}>×</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.drawerEyebrow}>INFORMACIÓN</Text>
+            {(
+              [
+                ["terms", "Términos y condiciones"],
+                ["privacy", "Política de privacidad"],
+                ["about", "Nosotros"],
+                ["usage", "Mecánica de uso"],
+                ["certifications", "Certificaciones"],
+              ] as const
+            ).map(([key, label]) => (
+              <TouchableOpacity
+                key={key}
+                accessibilityRole="link"
+                style={styles.drawerItem}
+                onPress={() => {
+                  setMenuOpen(false);
+                  setInfoPage(key);
+                }}
+              >
+                <Text style={styles.drawerItemText}>{label}</Text>
+                <Text style={styles.drawerItemArrow}>›</Text>
+              </TouchableOpacity>
+            ))}
+            <View style={styles.socialRow}>
+              <TouchableOpacity accessibilityRole="link" accessibilityLabel="Facebook de LaburApp" style={styles.socialButton} onPress={() => setRequested("Falta vincular la cuenta oficial de Facebook.")}>
+                <Text style={styles.facebookIcon}>f</Text>
+              </TouchableOpacity>
+              <TouchableOpacity accessibilityRole="link" accessibilityLabel="Instagram de LaburApp" style={styles.socialButton} onPress={() => setRequested("Falta vincular la cuenta oficial de Instagram.")}>
+                <View style={styles.instagramIcon}><View style={styles.instagramLens} /><View style={styles.instagramDot} /></View>
+              </TouchableOpacity>
+            </View>
+          </View>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar menú lateral" style={styles.drawerDismissArea} onPress={() => setMenuOpen(false)} />
+        </View>
+      </AppModal>
+      <AppModal visible={infoPage !== null} onRequestClose={() => setInfoPage(null)}>
+        <View style={styles.modalBackdrop}>
+          {infoPage && <View style={styles.infoPageCard}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar información" style={styles.modalClose} onPress={() => setInfoPage(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+            <Text style={styles.modalTitle}>{infoPages[infoPage].title}</Text>
+            <Text style={styles.infoPageBody}>{infoPages[infoPage].body}</Text>
+          </View>}
+        </View>
+      </AppModal>
       <AppModal visible={publicProfileProvider !== null} onRequestClose={() => setPublicProfileProvider(null)}>
         <View style={styles.modalBackdrop}>
           {publicProfileProvider && <ScrollView style={styles.publicProfileCard} contentContainerStyle={styles.publicProfileContent}>
@@ -2514,7 +2690,59 @@ export default function Home() {
               <View style={styles.publicProfileIdentity}><View style={styles.verifiedNameRow}><Text style={styles.publicProfileName}>{publicProfileProvider.name}</Text><Text accessibilityLabel="Perfil verificado" style={styles.verifiedIcon}>✓</Text></View><Text style={styles.publicProfileTrade}>{publicProfileProvider.trade} · {publicProfileProvider.city}</Text><Text style={styles.publicProfileSkills}>{publicProfileProvider.skills}</Text></View>
             </View>
             <View style={styles.publicProfileStats}><View style={styles.publicProfileStat}><Text style={styles.publicProfileStatValue}>★ {publicProfileProvider.rating}</Text><Text style={styles.publicProfileStatLabel}>calificación</Text></View><View style={styles.publicProfileStat}><Text style={styles.publicProfileStatValue}>{publicProfileProvider.jobs}</Text><Text style={styles.publicProfileStatLabel}>trabajos</Text></View><View style={styles.publicProfileStat}><Text style={styles.publicProfileStatValue}>✓</Text><Text style={styles.publicProfileStatLabel}>{publicProfileProvider.badge}</Text></View></View>
-            <View style={styles.publicProfileSection}><View style={styles.workCardTop}><Text style={styles.panelEyebrow}>TRABAJO DESTACADO</Text><Text style={styles.favoriteLabel}>★ FAVORITO</Text></View><TouchableOpacity accessibilityRole="button" accessibilityLabel={`Ampliar foto del trabajo de ${publicProfileProvider.name}`} onPress={() => setWorkPhoto({ provider: publicProfileProvider, work: featuredWorkFor(publicProfileProvider) })}><Image source={{ uri: featuredWorkFor(publicProfileProvider).photoUri }} resizeMode="cover" style={styles.publicProfileWorkPhoto} /></TouchableOpacity><Text style={styles.publicProfileWorkTitle}>{featuredWorkFor(publicProfileProvider).title}</Text><Text style={styles.publicProfileWorkDescription}>{featuredWorkFor(publicProfileProvider).description}</Text></View>
+            {selectedPublicDetails && <>
+              <View style={styles.publicProfileSection}>
+                <Text style={styles.panelEyebrow}>SOBRE EL PROFESIONAL</Text>
+                <Text style={styles.publicProfileWorkDescription}>{selectedPublicDetails.bio}</Text>
+              </View>
+              <View style={styles.publicProfileSection}>
+                <View style={styles.workCardTop}>
+                  <Text style={styles.panelEyebrow}>SERVICIO</Text>
+                  {!!selectedPublicDetails.diagnosticPrice && <Text style={styles.diagnosticBadge}>Diagnóstico desde ${selectedPublicDetails.diagnosticPrice.toLocaleString("es-AR")}</Text>}
+                </View>
+                <Text style={styles.publicProfileWorkTitle}>{publicProfileProvider.trade}</Text>
+                <Text style={styles.publicProfileWorkDescription}>{publicProfileProvider.skills}</Text>
+              </View>
+              <View style={styles.publicProfileSection}>
+                <Text style={styles.panelEyebrow}>CERTIFICACIONES</Text>
+                <View style={styles.certificationList}>
+                  {selectedPublicDetails.certifications.map((certification) => <View key={certification} style={styles.certificationBadge}><Text style={styles.certificationIcon}>✓</Text><Text style={styles.certificationText}>{certification}</Text></View>)}
+                </View>
+              </View>
+              {!!selectedPublicDetails.reviews.length && <View style={styles.publicProfileSection}>
+                <View style={styles.workCardTop}><Text style={styles.panelEyebrow}>RESEÑAS</Text><Text style={styles.reviewAverage}>★ 5,0</Text></View>
+                {selectedPublicDetails.reviews.map((review) => <View key={review.author} style={styles.publicReviewRow}><View><Text style={styles.reviewAuthor}>{review.author}</Text><Text style={styles.publicReviewComment}>“{review.comment}”</Text></View><Text style={styles.reviewStarsSmall}>{"★".repeat(review.rating)}</Text></View>)}
+              </View>}
+            </>}
+            <View style={styles.publicProfileSection}>
+              <View style={styles.workCardTop}>
+                <Text style={styles.panelEyebrow}>TRABAJOS REALIZADOS</Text>
+                <Text style={styles.servicePlanBadge}>3 · PLAN GRATIS</Text>
+              </View>
+              {selectedPublicWorks.map((work, workIndex) => (
+                <View key={work.id} style={styles.publicPortfolioWork}>
+                  <View style={styles.workCardTop}>
+                    <Text style={styles.publicWorkNumber}>TRABAJO {workIndex + 1}</Text>
+                    {workIndex === 0 && <Text style={styles.favoriteLabel}>★ FAVORITO</Text>}
+                  </View>
+                  <View style={styles.publicWorkPhotos}>
+                    {work.photoUris.slice(0, 3).map((photoUri, photoIndex) => (
+                      <TouchableOpacity
+                        key={`${work.id}-photo-${photoIndex}`}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Ampliar foto ${photoIndex + 1} de ${work.title}`}
+                        style={styles.publicWorkPhotoButton}
+                        onPress={() => setWorkPhoto({ provider: publicProfileProvider, work: { title: work.title, description: work.description, photoUri } })}
+                      >
+                        <Image source={{ uri: photoUri }} resizeMode="cover" style={styles.publicWorkPhoto} />
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                  <Text style={styles.publicProfileWorkTitle}>{work.title}</Text>
+                  <Text style={styles.publicProfileWorkDescription}>{work.description}</Text>
+                </View>
+              ))}
+            </View>
             <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => { const provider = publicProfileProvider; setPublicProfileProvider(null); startQuote(provider); }}><Text style={styles.buttonText}>Solicitar presupuesto</Text></TouchableOpacity>
           </ScrollView>}
         </View>
@@ -3030,7 +3258,19 @@ function createStyles(colors: ThemeColors) {
       paddingVertical: 6,
       backgroundColor: "#000000",
     },
-    brandRow: { flexDirection: "row", alignItems: "center" },
+    brandRow: { flexDirection: "row", alignItems: "center", gap: 7 },
+    menuButton: {
+      width: 34,
+      height: 34,
+      borderRadius: 10,
+      borderWidth: 1,
+      borderColor: "rgba(102,208,245,0.72)",
+      backgroundColor: "#0B2035",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 4,
+    },
+    menuLine: { width: 15, height: 2, borderRadius: 2, backgroundColor: "white" },
     wordmarkLogo: { width: 176, height: 48 },
     wordmarkLogoWide: { width: 210, height: 60 },
     headerActions: { flexDirection: "row", alignItems: "center", gap: 8 },
@@ -3186,9 +3426,10 @@ function createStyles(colors: ThemeColors) {
       borderColor: colors.line,
       padding: 15,
       marginBottom: 12,
-      flexDirection: "row",
+      flexDirection: "column",
     },
     cardExpanded: { borderColor: colors.blue },
+    cardOpenArea: { flexDirection: "row", alignItems: "flex-start" },
     avatar: {
       width: 52,
       height: 52,
@@ -3201,11 +3442,8 @@ function createStyles(colors: ThemeColors) {
     avatarText: { color: colors.navy, fontWeight: "900" },
     cardBody: { flex: 1 },
     row: { flexDirection: "row", justifyContent: "space-between", gap: 8 },
-    name: { color: colors.navy, fontSize: 17, fontWeight: "800", flex: 1 },
-    nameButton: { flex: 1 },
     nameLink: { color: colors.blue, fontSize: 17, fontWeight: "900" },
     rating: { color: colors.navy, fontWeight: "700" },
-    cardInfoButton: { alignItems: "stretch" },
     trade: { color: colors.blue, fontWeight: "700", marginTop: 2 },
     skills: { color: colors.stone, marginTop: 6 },
     badge: {
@@ -3222,7 +3460,8 @@ function createStyles(colors: ThemeColors) {
       marginTop: 12,
     },
     buttonText: { color: "white", fontWeight: "800" },
-    featuredToggle: { color: colors.blue, fontSize: 10, fontWeight: "900", marginTop: 9 },
+    featuredToggleButton: { alignSelf: "flex-start", minHeight: 30, justifyContent: "center", marginLeft: 65 },
+    featuredToggle: { color: colors.blue, fontSize: 10, fontWeight: "900" },
     featuredWork: { flexDirection: "row", gap: 11, marginTop: 11, paddingTop: 11, borderTopWidth: 1, borderTopColor: colors.line },
     featuredPhotoButton: { width: 108, height: 108, borderRadius: 11, overflow: "hidden", backgroundColor: colors.raised },
     featuredPhoto: { width: 108, height: 108 },
@@ -3916,6 +4155,44 @@ function createStyles(colors: ThemeColors) {
     navItem: { flex: 1, alignItems: "center", justifyContent: "center" },
     navText: { color: colors.stone, fontWeight: "700" },
     navActive: { color: colors.orange },
+    drawerBackdrop: {
+      position: Platform.OS === "web" ? ("fixed" as "absolute") : "absolute",
+      top: 0,
+      right: 0,
+      bottom: 0,
+      left: 0,
+      zIndex: 1150,
+      elevation: 28,
+      backgroundColor: "rgba(0,6,12,0.76)",
+      flexDirection: "row",
+    },
+    drawerPanel: {
+      width: "82%",
+      maxWidth: 350,
+      height: "100%",
+      backgroundColor: colors.surface,
+      borderRightWidth: 1,
+      borderRightColor: colors.line,
+      paddingTop: 24,
+      paddingHorizontal: 20,
+    },
+    drawerDismissArea: { flex: 1 },
+    drawerHeader: { minHeight: 48, flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 24 },
+    drawerTitle: { color: colors.navy, fontSize: 24, fontWeight: "900" },
+    drawerClose: { width: 36, height: 36, alignItems: "center", justifyContent: "center" },
+    drawerCloseText: { color: colors.navy, fontSize: 30, lineHeight: 32, fontWeight: "800" },
+    drawerEyebrow: { color: colors.orange, fontSize: 10, fontWeight: "900", letterSpacing: 1, marginBottom: 8 },
+    drawerItem: { minHeight: 54, borderBottomWidth: 1, borderBottomColor: colors.line, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+    drawerItemText: { color: colors.navy, fontSize: 15, fontWeight: "800" },
+    drawerItemArrow: { color: colors.blue, fontSize: 24, fontWeight: "700" },
+    socialRow: { flexDirection: "row", alignItems: "center", gap: 18, marginTop: 24 },
+    socialButton: { width: 38, height: 38, alignItems: "center", justifyContent: "center" },
+    facebookIcon: { color: colors.blue, fontSize: 31, lineHeight: 36, fontWeight: "900" },
+    instagramIcon: { width: 25, height: 25, borderRadius: 7, borderWidth: 2.5, borderColor: colors.blue, alignItems: "center", justifyContent: "center" },
+    instagramLens: { width: 9, height: 9, borderRadius: 5, borderWidth: 2, borderColor: colors.blue },
+    instagramDot: { position: "absolute", width: 3, height: 3, borderRadius: 2, backgroundColor: colors.blue, top: 4, right: 4 },
+    infoPageCard: { backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 22, paddingBottom: 38, minHeight: 220 },
+    infoPageBody: { color: colors.stone, fontSize: 15, lineHeight: 23, marginTop: 14, maxWidth: 680 },
     publicProfileCard: { width: "100%", maxWidth: 680, maxHeight: "92%", alignSelf: "center", backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
     publicProfileContent: { padding: 22, paddingBottom: 30 },
     publicProfileHeader: { flexDirection: "row", alignItems: "center", paddingRight: 38 },
@@ -3930,7 +4207,13 @@ function createStyles(colors: ThemeColors) {
     publicProfileStatValue: { color: colors.navy, fontSize: 15, fontWeight: "900" },
     publicProfileStatLabel: { color: colors.stone, fontSize: 8, fontWeight: "700", textAlign: "center", marginTop: 3 },
     publicProfileSection: { marginTop: 17, paddingTop: 14, borderTopWidth: 1, borderTopColor: colors.line },
-    publicProfileWorkPhoto: { width: "100%", aspectRatio: 1.65, borderRadius: 14, backgroundColor: colors.raised, marginTop: 10 },
+    publicPortfolioWork: { marginTop: 12, padding: 12, borderRadius: 14, backgroundColor: colors.raised },
+    publicWorkNumber: { color: colors.blue, fontSize: 9, fontWeight: "900", letterSpacing: 0.5 },
+    publicWorkPhotos: { flexDirection: "row", gap: 7, marginTop: 9 },
+    publicWorkPhotoButton: { flex: 1, aspectRatio: 1, borderRadius: 10, overflow: "hidden", backgroundColor: colors.surfaceSoft },
+    publicWorkPhoto: { width: "100%", height: "100%" },
+    publicReviewRow: { marginTop: 9, padding: 11, borderRadius: 11, backgroundColor: colors.raised, flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 10 },
+    publicReviewComment: { color: colors.stone, fontSize: 10, lineHeight: 15, marginTop: 4, maxWidth: 470 },
     publicProfileWorkTitle: { color: colors.navy, fontSize: 17, fontWeight: "900", marginTop: 10 },
     publicProfileWorkDescription: { color: colors.stone, fontSize: 12, lineHeight: 18, marginTop: 5 },
     lightboxBackdrop: { position: Platform.OS === "web" ? ("fixed" as "absolute") : "absolute", top: 0, right: 0, bottom: 0, left: 0, zIndex: 1200, elevation: 30, backgroundColor: "rgba(0,6,12,0.96)", alignItems: "center", justifyContent: "center", paddingTop: 28, paddingBottom: 18 },
