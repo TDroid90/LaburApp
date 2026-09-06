@@ -5,10 +5,12 @@ export type SavedSession = {
   name: string;
   email: string;
   role: "client" | "provider" | "admin";
+  photoUri?: string;
 };
 
 export type SavedRequest = {
   id: string;
+  jobId?: string;
   clientEmail?: string;
   providerId?: string;
   provider: string;
@@ -19,6 +21,9 @@ export type SavedRequest = {
   preferredStartTime?: string;
   preferredEndTime?: string;
   createdAt: string;
+  expiresAt?: string;
+  completedAt?: string;
+  completionVerifiedAt?: string;
   status: JobStatus;
   quote?: SavedQuote;
   payment?: {
@@ -31,6 +36,7 @@ export type SavedRequest = {
   review?: {
     rating: number;
     comment: string;
+    qualities?: string[];
     createdAt: string;
   };
 };
@@ -54,6 +60,7 @@ export type SavedQuote = {
   items?: SavedQuoteItem[];
   notes?: string;
   validDays?: number;
+  expiresAt?: string;
 };
 
 export type SavedMessage = {
@@ -61,6 +68,7 @@ export type SavedMessage = {
   sender: "client" | "provider" | "system";
   body: string;
   createdAt: string;
+  expiresAt?: string;
 };
 
 export type SavedProviderProfile = {
@@ -139,6 +147,8 @@ export type LocalAppState = {
 
 const STORAGE_KEY = "laburapp.demo.v1";
 const emptyState: LocalAppState = { session: null, requests: [], providerProfile: null };
+const FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000;
+const durableRequestStatuses = new Set(["quote_accepted", "payment_pending", "payment_authorized", "funds_held", "scheduled", "in_progress", "completion_proposed", "client_confirmation_pending", "completed", "funds_released", "disputed", "refunded"]);
 
 export async function loadLocalState(): Promise<LocalAppState> {
   try {
@@ -171,9 +181,16 @@ export async function loadLocalState(): Promise<LocalAppState> {
       coverageAreas: rawProfile.coverageAreas?.length ? rawProfile.coverageAreas : rawProfile.zones === "Toda la provincia" ? ["San Sebastián", "Río Grande", "Tolhuin", "Almanza", "Ushuaia", "Zonas rurales"] : rawProfile.city ? [rawProfile.city] : [],
       portfolioWorks: rawProfile.portfolioWorks ?? [],
     } : null;
+    const now = Date.now();
+    const requests = (Array.isArray(parsed.requests) ? parsed.requests : [])
+      .filter((request) => durableRequestStatuses.has(request.status) || new Date(request.expiresAt ?? new Date(new Date(request.createdAt).getTime() + FIVE_DAYS_MS).toISOString()).getTime() > now)
+      .map((request) => ({
+        ...request,
+        messages: request.messages?.filter((message) => new Date(message.expiresAt ?? new Date(new Date(message.createdAt).getTime() + FIVE_DAYS_MS).toISOString()).getTime() > now),
+      }));
     return {
       session: parsed.session ?? null,
-      requests: Array.isArray(parsed.requests) ? parsed.requests : [],
+      requests,
       providerProfile,
     };
   } catch {

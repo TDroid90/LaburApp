@@ -22,7 +22,7 @@ describe("simulador del flujo de trabajo", () => {
     request = applyDemoAction(request, "confirm_completion");
     request = applyDemoAction(request, "release");
     expect(request.status).toBe("funds_released");
-    expect(reviewIsEligible({ isClient: true, paidInApp: !!request.payment?.protected, status: request.status, alreadyReviewed: false })).toBe(true);
+    expect(reviewIsEligible({ isClient: true, paidInApp: !!request.payment?.protected, status: request.status, alreadyReviewed: false, completionVerified: true })).toBe(true);
   });
 
   it("rechaza acciones fuera de orden", () => {

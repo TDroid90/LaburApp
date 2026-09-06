@@ -127,12 +127,14 @@ export function createDemoScenarios(): SavedRequest[] {
   const stamp = Date.now();
   const makeRequest = (suffix: string, provider: string, trade: string, description: string): SavedRequest => ({
     id: `scenario-${stamp}-${suffix}`,
+    jobId: `demo-job-${stamp}-${suffix}`,
     provider,
     trade,
     description,
     zone: "Río Grande",
     desiredAt: "Esta semana",
     createdAt: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 5 * 86400000).toISOString(),
     status: "request_sent",
     messages: [],
   });

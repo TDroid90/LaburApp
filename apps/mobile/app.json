@@ -16,6 +16,14 @@
           "cameraPermission": false,
           "microphonePermission": false
         }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "LaburApp usa la cámara únicamente para confirmar trabajos mediante un código QR.",
+          "recordAudioAndroid": false,
+          "barcodeScannerEnabled": true
+        }
       ]
     ],
     "ios": {

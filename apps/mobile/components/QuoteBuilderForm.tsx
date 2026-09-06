@@ -31,7 +31,7 @@ export function QuoteBuilderForm({ darkMode, request, tariffItems = emptyTariffI
         items: request.quote.items?.map((current) => ({ ...current })) ?? template.items,
         eta: request.quote.eta,
         notes: request.quote.notes ?? "",
-        validDays: request.quote.validDays ?? 7,
+        validDays: Math.min(request.quote.validDays ?? 5, 5),
       });
     } else setDraft(availableTariff.length ? { ...template, pricingMode: "itemized", items: availableTariff.map((current) => ({ id: current.id, label: current.label, quantity: 1, unit: current.unit, unitPrice: current.unitPrice })) } : template);
     setError("");
@@ -62,7 +62,7 @@ export function QuoteBuilderForm({ darkMode, request, tariffItems = emptyTariffI
       scope: draft.pricingMode === "itemized" ? items.map((line) => line.label).join(" · ") : `${draft.pricingMode === "fixed" ? "Precio fijo" : "Honorarios desde"} para: ${request.description}`,
       eta: draft.eta.trim(),
       notes: draft.notes.trim(),
-      validDays: Math.max(1, draft.validDays),
+      validDays: Math.min(5, Math.max(1, draft.validDays)),
     });
   }
 
@@ -96,7 +96,7 @@ export function QuoteBuilderForm({ darkMode, request, tariffItems = emptyTariffI
 
       <Text style={styles.label}>Plazo estimado</Text>
       <TextInput value={draft.eta} onChangeText={(eta) => setDraft((current) => ({ ...current, eta }))} placeholder="Ej. 1 jornada o 3 días" placeholderTextColor="#71818B" style={styles.input} />
-      <Text style={styles.label}>Vigencia en días</Text>
+      <Text style={styles.label}>Vigencia en días (máximo 5)</Text>
       <TextInput value={`${draft.validDays}`} onChangeText={(value) => setDraft((current) => ({ ...current, validDays: numericValue(value) }))} keyboardType="numeric" style={styles.input} />
       <Text style={styles.label}>Observaciones</Text>
       <TextInput multiline value={draft.notes} onChangeText={(notes) => setDraft((current) => ({ ...current, notes }))} placeholder="Condiciones, materiales o aclaraciones" placeholderTextColor="#71818B" style={[styles.input, styles.multiline]} />

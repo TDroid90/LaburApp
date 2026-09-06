@@ -63,6 +63,14 @@ export function containsContactAttempt(input: string) {
     || /\d{8,15}/.test(compact);
 }
 
-export function reviewIsEligible(input: { isClient: boolean; paidInApp: boolean; status: JobStatus; alreadyReviewed: boolean }) {
-  return input.isClient && input.paidInApp && input.status === "funds_released" && !input.alreadyReviewed;
+export function containsPriceAttempt(input: string) {
+  const normalized = input.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  return /(?:\$|\bars\b|\bpesos?\b|\bprecio\b|\bcobro\b|\bcuesta\b|\bhonorarios?\b)[^\n]{0,28}\d|\d[^\n]{0,20}(?:\$|\bars\b|\bpesos?\b)/.test(normalized);
+}
+
+export function reviewIsEligible(input: { isClient: boolean; paidInApp: boolean; status: JobStatus; alreadyReviewed: boolean; completionVerified?: boolean }) {
+  return input.isClient
+    && !!input.completionVerified
+    && (input.status === "completed" || input.status === "funds_released")
+    && !input.alreadyReviewed;
 }

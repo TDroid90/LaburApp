@@ -14,7 +14,10 @@ import {
   View,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { containsContactAttempt, reviewIsEligible } from "@laburapp/shared";
+import { CameraView, useCameraPermissions } from "expo-camera";
+import * as ImagePicker from "expo-image-picker";
+import QRCode from "react-native-qrcode-svg";
+import { containsContactAttempt, containsPriceAttempt, reviewIsEligible } from "@laburapp/shared";
 import { PortfolioEditor } from "../components/PortfolioEditor";
 import { ProviderProfileForm } from "../components/ProviderProfileForm";
 import { QuoteBuilderForm } from "../components/QuoteBuilderForm";
@@ -576,6 +579,18 @@ type PublicProfileDetails = {
 type InfoPageKey = "terms" | "privacy" | "about" | "usage" | "certifications";
 
 const CONTACT_WARNING = "No está permitido compartir teléfonos de contacto o emails.";
+const FREE_WEEKLY_REQUEST_LIMIT = 3;
+const REQUEST_LIFETIME_MS = 5 * 24 * 60 * 60 * 1000;
+const CLIENT_HISTORY_MS = 183 * 24 * 60 * 60 * 1000;
+const reviewQualitySuggestions = [
+  "Puntualidad",
+  "Rapidez",
+  "Buena comunicación",
+  "Buena charla",
+  "Prolijidad",
+  "Amabilidad",
+  "Cumplió lo acordado",
+];
 const timeOptions = Array.from({ length: 48 }, (_, index) => {
   const hour = Math.floor(index / 2).toString().padStart(2, "0");
   const minutes = index % 2 === 0 ? "00" : "30";
@@ -595,6 +610,27 @@ const hiredStatuses = new Set([
   "disputed",
   "refunded",
 ]);
+
+const completedStatuses = new Set(["completed", "funds_released"]);
+const cancellableStatuses = new Set(["request_created", "request_sent", "provider_reviewing", "quote_sent", "quote_revision_requested"]);
+
+function startOfCurrentWeek() {
+  const now = new Date();
+  const day = now.getDay() || 7;
+  now.setHours(0, 0, 0, 0);
+  now.setDate(now.getDate() - day + 1);
+  return now.getTime();
+}
+
+function requestExpiresAt(request: SavedRequest) {
+  return request.expiresAt
+    ? new Date(request.expiresAt).getTime()
+    : new Date(request.createdAt).getTime() + REQUEST_LIFETIME_MS;
+}
+
+function activeRequest(request: SavedRequest) {
+  return hiredStatuses.has(request.status) || requestExpiresAt(request) > Date.now();
+}
 
 const featuredWorks: Record<string, FeaturedWork> = {
   "Martín Gómez": { title: "Reparación de calefón", description: "Diagnóstico, cambio de componentes y prueba final de funcionamiento seguro.", photoUri: "https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=900&q=75" },
@@ -910,7 +946,16 @@ export default function Home() {
   const [reviewRequestId, setReviewRequestId] = useState<string | null>(null);
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewComment, setReviewComment] = useState("");
+  const [reviewQualities, setReviewQualities] = useState<string[]>([]);
   const [reviewError, setReviewError] = useState("");
+  const [acceptQuoteRequestId, setAcceptQuoteRequestId] = useState<string | null>(null);
+  const [completionQr, setCompletionQr] = useState<{ requestId: string; value: string } | null>(null);
+  const [qrBusy, setQrBusy] = useState(false);
+  const [qrScanned, setQrScanned] = useState(false);
+  const [manualQrCode, setManualQrCode] = useState("");
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const [clientPlan, setClientPlan] = useState<"free" | "plus">("free");
+  const [clientPhotoBusy, setClientPhotoBusy] = useState(false);
   const [quoteBuilderRequestId, setQuoteBuilderRequestId] = useState<
     string | null
   >(null);
@@ -922,7 +967,7 @@ export default function Home() {
     session?.role === "admin"
       ? ["Inicio", "Panel", "Perfil"]
       : session?.role === "client"
-        ? ["Inicio", "Trabajos", "Contratados", "Perfil"]
+        ? ["Inicio", "Solicitudes", "QR", "Contratados", "Perfil"]
         : ["Inicio", "Trabajos", "Perfil"];
   const isDemoSession = session?.email.endsWith("@laburapp.demo") ?? false;
 
@@ -976,9 +1021,22 @@ export default function Home() {
     if (!hydrated || !session || !supabase || isDemoSession) return;
     let cancelled = false;
     void (async () => {
+      const userResult = await supabase.auth.getUser();
+      const currentUserId = userResult.data.user?.id;
+      if (!currentUserId || cancelled) return;
+      await supabase.rpc("purge_expired_client_data");
+      if (session.role === "client") {
+        const membership = await supabase
+          .from("client_memberships")
+          .select("plan_code")
+          .eq("client_id", currentUserId)
+          .maybeSingle();
+        if (!cancelled && membership.data?.plan_code === "plus") setClientPlan("plus");
+      }
       const result = await supabase
         .from("service_requests")
-        .select("id, provider_id, description, approximate_zone, desired_at, preferred_start_time, preferred_end_time, status, created_at, profiles!service_requests_provider_id_fkey(full_name), quotes(total, scope, eta, version, pricing_mode, items, notes, valid_days)")
+        .select("id, provider_id, description, approximate_zone, desired_at, preferred_start_time, preferred_end_time, status, created_at, expires_at, completion_verified_at, profiles!service_requests_provider_id_fkey(full_name), quotes(total, scope, eta, version, pricing_mode, items, notes, valid_days, expires_at), jobs(id, completion_verified_at, updated_at), messages(id, sender_id, body, created_at, expires_at)")
+        .gte("created_at", new Date(Date.now() - CLIENT_HISTORY_MS).toISOString())
         .order("created_at", { ascending: false });
       if (result.error || cancelled) return;
       const providerIds = Array.from(new Set((result.data ?? []).map((row: any) => row.provider_id)));
@@ -991,8 +1049,21 @@ export default function Home() {
         const profile = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
         const quoteRows = Array.isArray(row.quotes) ? [...row.quotes].sort((a, b) => b.version - a.version) : [];
         const quote = quoteRows[0];
+        const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+        const activeMessages = (Array.isArray(row.messages) ? row.messages : [])
+          .filter((message: any) => !message.expires_at || new Date(message.expires_at).getTime() > Date.now())
+          .map((message: any) => ({
+            id: message.id,
+            sender: message.sender_id === currentUserId
+              ? session.role === "provider" ? "provider" : "client"
+              : session.role === "client" ? "provider" : "client",
+            body: message.body,
+            createdAt: message.created_at,
+            expiresAt: message.expires_at,
+          }));
         return {
           id: row.id,
+          jobId: job?.id,
           providerId: row.provider_id,
           clientEmail: session.role === "client" ? session.email : undefined,
           provider: profile?.full_name ?? providerProfile?.displayName ?? "Profesional",
@@ -1003,10 +1074,14 @@ export default function Home() {
           preferredStartTime: row.preferred_start_time?.slice(0, 5),
           preferredEndTime: row.preferred_end_time?.slice(0, 5),
           createdAt: row.created_at,
+          expiresAt: row.expires_at,
+          completedAt: job?.updated_at,
+          completionVerifiedAt: row.completion_verified_at ?? job?.completion_verified_at,
           status: row.status,
+          messages: activeMessages,
           quote: quote ? {
             amount: Number(quote.total), scope: quote.scope, eta: quote.eta ?? "", version: quote.version,
-            pricingMode: quote.pricing_mode, items: quote.items ?? [], notes: quote.notes ?? "", validDays: quote.valid_days,
+            pricingMode: quote.pricing_mode, items: quote.items ?? [], notes: quote.notes ?? "", validDays: quote.valid_days, expiresAt: quote.expires_at,
           } : undefined,
         };
       });
@@ -1054,6 +1129,7 @@ export default function Home() {
       authMode === "register" ? authName.trim() : authEmail.split("@")[0];
     let resolvedRole: SavedSession["role"] =
       authMode === "register" ? authRole : "client";
+    let photoUri: string | undefined;
     if (supabase) {
       const result =
         authMode === "register"
@@ -1092,6 +1168,13 @@ export default function Home() {
           : roles?.some((item) => item.role === "provider")
             ? "provider"
             : "client";
+        const profileResult = await supabase
+          .from("profiles")
+          .select("full_name, avatar_path")
+          .eq("id", result.data.user.id)
+          .maybeSingle();
+        if (profileResult.data?.full_name) name = profileResult.data.full_name;
+        photoUri = profileResult.data?.avatar_path ?? undefined;
       }
     } else if (authMode === "login") {
       const demo = demoAccounts.find(
@@ -1106,6 +1189,7 @@ export default function Home() {
       name,
       email: authEmail.trim().toLowerCase(),
       role: resolvedRole,
+      photoUri,
     };
     setSession(nextSession);
     setSignedInName(name);
@@ -1147,6 +1231,16 @@ export default function Home() {
 
   async function submitQuote() {
     if (!quoteProvider) return;
+    const weeklyRequests = requests.filter(
+      (request) =>
+        (!request.clientEmail || request.clientEmail === session?.email) &&
+        new Date(request.createdAt).getTime() >= startOfCurrentWeek() &&
+        request.status !== "cancelled",
+    ).length;
+    if (clientPlan === "free" && weeklyRequests >= FREE_WEEKLY_REQUEST_LIMIT)
+      return setRequested(
+        "Ya usaste tus 3 solicitudes gratuitas de esta semana. Para pedir más necesitás la suscripción Cliente Plus.",
+      );
     if (quoteDescription.trim().length < 10)
       return setRequested("Contanos un poco más (mínimo 10 caracteres)");
     if (containsContactAttempt(`${quoteDescription} ${quoteZone}`))
@@ -1192,7 +1286,11 @@ export default function Home() {
           result = await supabase.from("service_requests").insert(compatiblePayload).select("id").single();
         }
         if (result.error)
-          return setRequested(`No pudimos guardar la solicitud: ${result.error.message}`);
+          return setRequested(
+            result.error.message.includes("FREE_WEEKLY_REQUEST_LIMIT")
+              ? "Ya usaste tus 3 solicitudes gratuitas de esta semana. Para pedir más necesitás Cliente Plus."
+              : `No pudimos guardar la solicitud: ${result.error.message}`,
+          );
         requestId = result.data.id;
         storedInDatabase = true;
       }
@@ -1209,6 +1307,7 @@ export default function Home() {
       preferredStartTime: quoteStartTime,
       preferredEndTime: quoteEndTime,
       createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + REQUEST_LIFETIME_MS).toISOString(),
       status: "request_sent",
     };
     setRequests((current) => [nextRequest, ...current]);
@@ -1699,6 +1798,100 @@ export default function Home() {
     }
   }
 
+  async function acceptQuote(request: SavedRequest) {
+    try {
+      let jobId = request.jobId;
+      if (supabase && !isDemoSession && /^[0-9a-f-]{36}$/i.test(request.id)) {
+        const result = await supabase.rpc("accept_service_quote", { target_request_id: request.id });
+        if (result.error) throw result.error;
+        jobId = String(result.data);
+      }
+      updateRequest(request.id, (current) => ({
+        ...applyDemoAction(current, "accept_quote"),
+        jobId,
+      }));
+      setAcceptQuoteRequestId(null);
+      setRequested("Presupuesto aceptado. Ya figura como trabajo contratado.");
+    } catch {
+      setAcceptQuoteRequestId(null);
+      setRequested("El presupuesto venció o ya no está disponible para aceptar.");
+    }
+  }
+
+  async function cancelRequest(request: SavedRequest) {
+    try {
+      if (supabase && !isDemoSession && /^[0-9a-f-]{36}$/i.test(request.id)) {
+        const result = await supabase.rpc("cancel_service_request", { target_request_id: request.id });
+        if (result.error) throw result.error;
+      }
+      updateRequest(request.id, (current) => ({ ...current, status: "cancelled" }));
+      setRequested("Solicitud cancelada.");
+    } catch {
+      setRequested("Esta solicitud ya no se puede cancelar.");
+    }
+  }
+
+  function openRevisionChat(request: SavedRequest) {
+    setChatRequestId(request.id);
+    setChatError("");
+    setChatMessage(`Solicitud de Cambios Presupuesto ${request.id}\n`);
+  }
+
+  async function issueCompletionQr(request: SavedRequest) {
+    setQrBusy(true);
+    try {
+      let token = `DEMO-${request.id}`;
+      if (supabase && !isDemoSession && request.jobId) {
+        const result = await supabase.rpc("issue_completion_token", { target_job_id: request.jobId });
+        if (result.error) throw result.error;
+        token = String(result.data);
+      }
+      setCompletionQr({ requestId: request.id, value: `laburapp://complete?token=${encodeURIComponent(token)}` });
+    } catch {
+      setRequested("No pudimos generar el QR. El trabajo debe estar coordinado o en curso.");
+    } finally {
+      setQrBusy(false);
+    }
+  }
+
+  async function confirmCompletionCode(rawValue: string) {
+    if (qrBusy || qrScanned) return;
+    setQrBusy(true);
+    setQrScanned(true);
+    try {
+      const match = rawValue.match(/[?&]token=([^&]+)/);
+      const token = decodeURIComponent(match?.[1] ?? rawValue.trim());
+      let requestId = token.startsWith("DEMO-") ? token.slice(5) : "";
+      if (supabase && !isDemoSession && !token.startsWith("DEMO-")) {
+        const result = await supabase.rpc("confirm_completion_token", { raw_token: token });
+        if (result.error) throw result.error;
+        requestId = String(result.data);
+      }
+      if (!requestId) throw new Error("invalid_token");
+      const completedAt = new Date().toISOString();
+      updateRequest(requestId, (request) => ({
+        ...request,
+        status: "completed",
+        completedAt,
+        completionVerifiedAt: completedAt,
+        messages: [...(request.messages ?? []), {
+          id: `${Date.now()}-qr`,
+          sender: "system",
+          body: "Trabajo terminado y verificado mediante QR.",
+          createdAt: completedAt,
+        }],
+      }));
+      setManualQrCode("");
+      setTab("Contratados");
+      setRequested("Trabajo terminado. Ya podés dejar tu reseña verificada.");
+    } catch {
+      setRequested("El QR no corresponde a tu trabajo, venció o ya fue utilizado.");
+    } finally {
+      setQrBusy(false);
+      setTimeout(() => setQrScanned(false), 1200);
+    }
+  }
+
   function loadSimulations() {
     setRequests((current) => [...createDemoScenarios(), ...current]);
     setRequested(
@@ -1710,6 +1903,8 @@ export default function Home() {
     if (!quoteBuilderRequestId) return;
     const request = requests.find((item) => item.id === quoteBuilderRequestId);
     try {
+      const validDays = Math.min(draft.validDays ?? 5, 5);
+      const normalizedDraft = { ...draft, validDays };
       let storedInDatabase = false;
       if (request && supabase && !isDemoSession && /^[0-9a-f-]{36}$/i.test(request.id)) {
         const nextVersion = (request.quote?.version ?? 0) + 1;
@@ -1722,8 +1917,8 @@ export default function Home() {
           items: draft.items ?? [],
           eta: draft.eta,
           notes: draft.notes ?? "",
-          valid_days: draft.validDays ?? 7,
-          expires_at: new Date(Date.now() + (draft.validDays ?? 7) * 86400000).toISOString(),
+          valid_days: validDays,
+          expires_at: new Date(Date.now() + validDays * 86400000).toISOString(),
         });
         if (quoteResult.error) throw quoteResult.error;
         const statusResult = await supabase.from("service_requests").update({ status: "quote_sent" }).eq("id", request.id);
@@ -1731,7 +1926,7 @@ export default function Home() {
         storedInDatabase = true;
       }
       updateRequest(quoteBuilderRequestId, (request) =>
-        submitCustomQuote(request, draft),
+        submitCustomQuote(request, normalizedDraft),
       );
       if (request && !storedInDatabase)
         void enqueueMirrorEvent("Presupuestos", {
@@ -1743,7 +1938,7 @@ export default function Home() {
           amount_ars: draft.amount,
           scope: draft.scope,
           eta: draft.eta,
-          valid_days: draft.validDays ?? 0,
+          valid_days: validDays,
           notes: draft.notes ?? "",
           items_json: JSON.stringify(draft.items ?? []),
         });
@@ -1754,7 +1949,7 @@ export default function Home() {
     }
   }
 
-  function sendChatMessage() {
+  async function sendChatMessage() {
     const body = chatMessage.trim();
     setChatError("");
     if (!chatRequestId || !body)
@@ -1763,17 +1958,33 @@ export default function Home() {
       return setChatError(
         "Por seguridad, no compartas teléfonos, correos, redes ni enlaces antes de contratar.",
       );
+    if (containsPriceAttempt(body))
+      return setChatError(
+        "Los precios sólo se envían mediante un presupuesto. Usá el chat para consultar el alcance del servicio.",
+      );
+    const messageExpiry = new Date(Date.now() + REQUEST_LIFETIME_MS).toISOString();
     const message: SavedMessage = {
-      id: `${Date.now()}-client`,
-      sender: "client",
+      id: `${Date.now()}-${session?.role ?? "client"}`,
+      sender: session?.role === "provider" ? "provider" : "client",
       body,
       createdAt: new Date().toISOString(),
+      expiresAt: messageExpiry,
     };
-    updateRequest(chatRequestId, (request) => ({
-      ...request,
-      messages: [...(request.messages ?? []), message],
-    }));
     const request = requests.find((item) => item.id === chatRequestId);
+    const isRevision = body.startsWith(`Solicitud de Cambios Presupuesto ${chatRequestId}`);
+    if (request && supabase && !isDemoSession && /^[0-9a-f-]{36}$/i.test(request.id)) {
+      const userResult = await supabase.auth.getUser();
+      if (!userResult.data.user) return setChatError("Volvé a ingresar para enviar el mensaje.");
+      const result = isRevision
+        ? await supabase.rpc("request_quote_revision", { target_request_id: request.id, revision_message: body })
+        : await supabase.from("messages").insert({ request_id: request.id, sender_id: userResult.data.user.id, body });
+      if (result.error) return setChatError("No pudimos enviar el mensaje. Revisá si la solicitud sigue vigente.");
+    }
+    updateRequest(chatRequestId, (current) => ({
+      ...current,
+      status: isRevision ? "quote_revision_requested" : current.status,
+      messages: [...(current.messages ?? []).map((item) => ({ ...item, expiresAt: messageExpiry })), message],
+    }));
     if (request)
       void enqueueMirrorEvent("Contactos", {
         request_id: request.id,
@@ -1789,7 +2000,7 @@ export default function Home() {
     setChatMessage("");
   }
 
-  function submitReview() {
+  async function submitReview() {
     const request = requests.find((item) => item.id === reviewRequestId);
     setReviewError("");
     if (
@@ -1799,29 +2010,76 @@ export default function Home() {
         paidInApp: !!request.payment?.protected,
         status: request.status,
         alreadyReviewed: !!request.review,
+        completionVerified: !!request.completionVerifiedAt,
       })
     )
       return setReviewError("Esta reseña todavía no está habilitada.");
     if (reviewComment.trim().length < 5)
       return setReviewError("Contá brevemente cómo fue el trabajo.");
+    if (reviewQualities.length > 3)
+      return setReviewError("Elegí hasta 3 cualidades.");
+    if (supabase && !isDemoSession && request.jobId && request.providerId) {
+      const userResult = await supabase.auth.getUser();
+      if (!userResult.data.user) return setReviewError("Volvé a ingresar para publicar la reseña.");
+      const result = await supabase.from("reviews").insert({
+        job_id: request.jobId,
+        client_id: userResult.data.user.id,
+        provider_id: request.providerId,
+        rating: reviewRating,
+        comment: reviewComment.trim(),
+        qualities: reviewQualities,
+      });
+      if (result.error) return setReviewError("No pudimos publicar la reseña verificada.");
+    }
     updateRequest(request.id, (item) => ({
       ...item,
       review: {
         rating: reviewRating,
         comment: reviewComment.trim(),
+        qualities: reviewQualities,
         createdAt: new Date().toISOString(),
       },
     }));
     setReviewRequestId(null);
     setReviewComment("");
     setReviewRating(5);
+    setReviewQualities([]);
     setRequested("Reseña verificada publicada.");
+  }
+
+  async function pickClientPhoto() {
+    if (!session || session.role !== "client") return;
+    setClientPhotoBusy(true);
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: true, aspect: [1, 1], quality: 0.72 });
+      if (result.canceled || !result.assets[0]?.uri) return;
+      let photoUri = result.assets[0].uri;
+      if (supabase && !isDemoSession) {
+        const userResult = await supabase.auth.getUser();
+        if (!userResult.data.user) throw new Error("not_signed_in");
+        const photoBlob = await (await fetch(photoUri)).blob();
+        const storagePath = `${userResult.data.user.id}/perfil.jpg`;
+        const upload = await supabase.storage.from("avatars").upload(storagePath, photoBlob, { contentType: "image/jpeg", upsert: true });
+        if (upload.error) throw upload.error;
+        photoUri = supabase.storage.from("avatars").getPublicUrl(storagePath).data.publicUrl;
+        const profileUpdate = await supabase.from("profiles").update({ avatar_path: photoUri }).eq("id", userResult.data.user.id);
+        if (profileUpdate.error) throw profileUpdate.error;
+      }
+      setSession((current) => current ? { ...current, photoUri } : current);
+      setRequested("Foto de perfil actualizada.");
+    } catch {
+      setRequested("No pudimos actualizar la foto.");
+    } finally {
+      setClientPhotoBusy(false);
+    }
   }
 
   const chatRequest =
     requests.find((request) => request.id === chatRequestId) ?? null;
   const reviewRequest =
     requests.find((request) => request.id === reviewRequestId) ?? null;
+  const acceptQuoteRequest =
+    requests.find((request) => request.id === acceptQuoteRequestId) ?? null;
   const quoteBuilderRequest =
     requests.find((request) => request.id === quoteBuilderRequestId) ?? null;
   const filtered = useMemo(
@@ -1857,20 +2115,31 @@ export default function Home() {
     ? publicDetailsFor(publicProfileProvider)
     : null;
   const currentProviderName = providerProfile?.displayName ?? session?.name ?? "";
-  const workRequests = requests.filter((request) =>
+  const participantRequests = requests.filter((request) =>
     session?.role === "provider"
       ? request.provider === currentProviderName
       : session?.role === "client"
         ? !request.clientEmail || request.clientEmail === session.email
         : true,
   );
+  const workRequests = participantRequests.filter((request) =>
+    session?.role === "client"
+      ? activeRequest(request) && !completedStatuses.has(request.status)
+      : true,
+  );
   const providerPendingRequests = workRequests.filter(
     (request) => request.status === "request_sent" || request.status === "quote_revision_requested",
   );
-  const hiredRequests = workRequests
-    .filter((request) => hiredStatuses.has(request.status))
-    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+  const clientHistory = participantRequests
+    .filter((request) =>
+      completedStatuses.has(request.status) &&
+      new Date(request.completedAt ?? request.createdAt).getTime() >= Date.now() - CLIENT_HISTORY_MS,
+    )
+    .sort((a, b) => new Date(b.completedAt ?? b.createdAt).getTime() - new Date(a.completedAt ?? a.createdAt).getTime())
     .slice(0, 10);
+  const weeklyRequestCount = participantRequests.filter(
+    (request) => new Date(request.createdAt).getTime() >= startOfCurrentWeek() && request.status !== "cancelled",
+  ).length;
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -2125,13 +2394,32 @@ export default function Home() {
               </View>
             )}
           </>
-        ) : tab === "Trabajos" ? (
+        ) : tab === "Trabajos" || tab === "Solicitudes" ? (
           <View style={styles.sectionPage}>
-            <Text style={styles.pageTitle}>Mis trabajos</Text>
-            <Text style={styles.pageCopy}>
-              Seguí en un solo lugar tus solicitudes, presupuestos y trabajos
-              activos.
+            <Text style={styles.pageTitle}>
+              {session?.role === "client" ? "Mis solicitudes" : "Mis trabajos"}
             </Text>
+            <Text style={styles.pageCopy}>
+              {session?.role === "client"
+                ? "Acá recibís los presupuestos de los profesionales y seguís cada solicitud."
+                : "Respondé solicitudes y administrá los trabajos activos."}
+            </Text>
+            {session?.role === "client" && (
+              <View style={styles.requestQuotaCard}>
+                <View>
+                  <Text style={styles.panelEyebrow}>PLAN GRATIS</Text>
+                  <Text style={styles.requestQuotaTitle}>Presupuestos de esta semana</Text>
+                  {clientPlan === "free" && weeklyRequestCount >= FREE_WEEKLY_REQUEST_LIMIT && (
+                    <TouchableOpacity accessibilityRole="button" onPress={() => setRequested("Cliente Plus habilitará solicitudes adicionales. La contratación de la membresía se conectará con el módulo de pagos.")}>
+                      <Text style={styles.upgradeLink}>Ver Cliente Plus</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+                <Text style={styles.requestQuotaCount}>
+                  {Math.min(weeklyRequestCount, FREE_WEEKLY_REQUEST_LIMIT)} / {FREE_WEEKLY_REQUEST_LIMIT}
+                </Text>
+              </View>
+            )}
             {session?.role === "provider" && (
               <View style={styles.notificationsPanel}>
                 <View style={styles.notificationHeading}>
@@ -2178,7 +2466,7 @@ export default function Home() {
                 )}
               </View>
             )}
-            <View style={styles.simulatorBanner}>
+            {session?.role === "provider" && isDemoSession && <View style={styles.simulatorBanner}>
               <View style={styles.simulatorCopy}>
                 <Text style={styles.simulatorTitle}>Simulador del PMV</Text>
                 <Text style={styles.simulatorText}>
@@ -2193,7 +2481,7 @@ export default function Home() {
               >
                 <Text style={styles.simulatorButtonText}>Cargar 3 casos</Text>
               </TouchableOpacity>
-            </View>
+            </View>}
             {workRequests.length === 0 ? (
               <View style={styles.emptyPanel}>
                 <Text style={styles.emptyIcon}>🧰</Text>
@@ -2245,6 +2533,11 @@ export default function Home() {
                     {!!request.desiredAt && (
                       <Text style={styles.workMeta}>
                         Cuándo: {request.desiredAt}
+                      </Text>
+                    )}
+                    {session?.role === "client" && !hiredStatuses.has(request.status) && request.status !== "cancelled" && (
+                      <Text style={styles.expiryText}>
+                        La solicitud vence el {new Date(requestExpiresAt(request)).toLocaleDateString("es-AR")}.
                       </Text>
                     )}
                     {request.quote && (
@@ -2321,42 +2614,33 @@ export default function Home() {
                         Próximo paso: {presentation.next}
                       </Text>
                     </View>
-                    {request.status === "quote_sent" && (
+                    {session?.role === "client" && request.status === "quote_sent" && (
                       <View style={styles.actionRow}>
                         <TouchableOpacity
                           accessibilityRole="button"
                           style={styles.outlineAction}
-                          onPress={() =>
-                            runDemoAction(request.id, "request_revision")
-                          }
+                          onPress={() => openRevisionChat(request)}
                         >
                           <Text style={styles.outlineActionText}>
-                            Pedir cambios
+                            Solicitar cambios
                           </Text>
                         </TouchableOpacity>
                         <TouchableOpacity
                           accessibilityRole="button"
                           style={styles.primaryAction}
-                          onPress={() =>
-                            runDemoAction(request.id, "accept_quote")
-                          }
+                          onPress={() => setAcceptQuoteRequestId(request.id)}
                         >
                           <Text style={styles.primaryActionText}>
-                            Aceptar presupuesto
+                            Acepto el presupuesto
                           </Text>
                         </TouchableOpacity>
                       </View>
                     )}
-                    {primary && (
+                    {session?.role === "provider" && primary && (primary.action === "provider_quote" || primary.action === "revised_quote") && (
                       <TouchableOpacity
                         accessibilityRole="button"
                         style={styles.primaryActionFull}
-                        onPress={() =>
-                          primary.action === "provider_quote" ||
-                          primary.action === "revised_quote"
-                            ? setQuoteBuilderRequestId(request.id)
-                            : runDemoAction(request.id, primary.action)
-                        }
+                        onPress={() => setQuoteBuilderRequestId(request.id)}
                       >
                         <Text style={styles.primaryActionText}>
                           {primary.action === "provider_quote"
@@ -2367,7 +2651,7 @@ export default function Home() {
                         </Text>
                       </TouchableOpacity>
                     )}
-                    {request.status === "funds_released" && !request.review && (
+                    {session?.role === "client" && !!request.completionVerifiedAt && completedStatuses.has(request.status) && !request.review && (
                       <TouchableOpacity
                         accessibilityRole="button"
                         style={styles.primaryActionFull}
@@ -2381,6 +2665,16 @@ export default function Home() {
                         </Text>
                       </TouchableOpacity>
                     )}
+                    {session?.role === "provider" && request.jobId && hiredStatuses.has(request.status) && !completedStatuses.has(request.status) && (
+                      <TouchableOpacity
+                        accessibilityRole="button"
+                        disabled={qrBusy}
+                        style={styles.primaryActionFull}
+                        onPress={() => void issueCompletionQr(request)}
+                      >
+                        <Text style={styles.primaryActionText}>{qrBusy ? "Generando QR…" : "Trabajo terminado · Mostrar QR"}</Text>
+                      </TouchableOpacity>
+                    )}
                     {request.review && (
                       <View style={styles.reviewPublished}>
                         <Text style={styles.reviewStars}>
@@ -2390,6 +2684,9 @@ export default function Home() {
                         <Text style={styles.reviewPublishedText}>
                           “{request.review.comment}”
                         </Text>
+                        {!!request.review.qualities?.length && (
+                          <Text style={styles.reviewQualitiesText}>{request.review.qualities.join(" · ")}</Text>
+                        )}
                         <Text style={styles.verifiedReview}>
                           ✓ Reseña de un trabajo pagado en LaburApp
                         </Text>
@@ -2411,10 +2708,10 @@ export default function Home() {
                           )
                         </Text>
                       </TouchableOpacity>
-                      {request.status === "request_sent" && (
+                      {session?.role === "client" && cancellableStatuses.has(request.status) && (
                         <TouchableOpacity
                           accessibilityRole="button"
-                          onPress={() => runDemoAction(request.id, "cancel")}
+                          onPress={() => void cancelRequest(request)}
                         >
                           <Text style={styles.cancelLink}>
                             Cancelar solicitud
@@ -2427,13 +2724,60 @@ export default function Home() {
               })
             )}
           </View>
+        ) : tab === "QR" ? (
+          <View style={styles.sectionPage}>
+            <Text style={styles.pageTitle}>Confirmar trabajo</Text>
+            <Text style={styles.pageCopy}>
+              Escaneá el QR que muestra el profesional cuando termina. No contiene tu nombre, teléfono ni información del presupuesto.
+            </Text>
+            <View style={styles.qrScannerCard}>
+              {!cameraPermission ? (
+                <Text style={styles.centerCopy}>Preparando la cámara…</Text>
+              ) : !cameraPermission.granted ? (
+                <View style={styles.qrPermissionBox}>
+                  <Text style={styles.emptyIcon}>▣</Text>
+                  <Text style={styles.emptyTitle}>Necesitamos acceso a la cámara</Text>
+                  <Text style={styles.centerCopy}>La cámara se usa únicamente para leer el QR de finalización.</Text>
+                  <TouchableOpacity accessibilityRole="button" style={styles.modalPrimary} onPress={() => void requestCameraPermission()}>
+                    <Text style={styles.modalPrimaryText}>Habilitar cámara</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.cameraFrame}>
+                  <CameraView
+                    active={tab === "QR"}
+                    facing="back"
+                    barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+                    onBarcodeScanned={qrScanned ? undefined : ({ data }) => void confirmCompletionCode(data)}
+                    style={styles.camera}
+                  />
+                  <View pointerEvents="none" style={styles.cameraGuide} />
+                </View>
+              )}
+            </View>
+            <View style={styles.manualQrCard}>
+              <Text style={styles.panelEyebrow}>¿NO PODÉS USAR LA CÁMARA?</Text>
+              <Text style={styles.reviewText}>Ingresá el código corto que aparece debajo del QR.</Text>
+              <TextInput
+                autoCapitalize="characters"
+                value={manualQrCode}
+                onChangeText={setManualQrCode}
+                placeholder="Código de finalización"
+                placeholderTextColor="#71818B"
+                style={styles.modalInput}
+              />
+              <TouchableOpacity accessibilityRole="button" disabled={qrBusy || !manualQrCode.trim()} style={[styles.secondaryButton, (qrBusy || !manualQrCode.trim()) && styles.buttonDisabled]} onPress={() => void confirmCompletionCode(manualQrCode)}>
+                <Text style={styles.secondaryText}>{qrBusy ? "Verificando…" : "Confirmar código"}</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
         ) : tab === "Contratados" ? (
           <View style={styles.sectionPage}>
             <Text style={styles.pageTitle}>Contratados</Text>
             <Text style={styles.pageCopy}>
               Tus últimos 10 trabajos contratados, con el profesional y el estado de cada servicio.
             </Text>
-            {hiredRequests.length === 0 ? (
+            {clientHistory.length === 0 ? (
               <View style={styles.emptyPanel}>
                 <Text style={styles.emptyIcon}>🤝</Text>
                 <Text style={styles.emptyTitle}>Todavía no contrataste trabajos</Text>
@@ -2444,7 +2788,7 @@ export default function Home() {
                   <Text style={styles.secondaryText}>Buscar profesionales</Text>
                 </TouchableOpacity>
               </View>
-            ) : hiredRequests.map((request) => {
+            ) : clientHistory.map((request) => {
               const presentation = statusPresentation[request.status];
               return (
                 <View key={`hired-${request.id}`} style={styles.workCard}>
@@ -2462,9 +2806,14 @@ export default function Home() {
                   {!!request.zone && <Text style={styles.workMeta}>Zona: {request.zone}</Text>}
                   {!!request.desiredAt && <Text style={styles.workMeta}>Disponibilidad: {request.desiredAt}</Text>}
                   {!!request.quote && <Text style={styles.hiredAmount}>Presupuesto: ${request.quote.amount.toLocaleString("es-AR")}</Text>}
-                  <TouchableOpacity accessibilityRole="button" onPress={() => setChatRequestId(request.id)}>
-                    <Text style={styles.cardLink}>Abrir conversación</Text>
-                  </TouchableOpacity>
+                  <Text style={styles.completedVerified}>✓ Finalización confirmada por QR</Text>
+                  {!request.review ? (
+                    <TouchableOpacity accessibilityRole="button" style={styles.primaryActionFull} onPress={() => { setReviewRequestId(request.id); setReviewError(""); }}>
+                      <Text style={styles.primaryActionText}>Dejar reseña</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <Text style={styles.verifiedReview}>✓ Reseña publicada</Text>
+                  )}
                 </View>
               );
             })}
@@ -2541,9 +2890,9 @@ export default function Home() {
             ) : (
               <>
                 <View style={styles.accountCard}>
-                  {session.role === "provider" && providerProfile?.photoUri ? (
+                  {(session.role === "provider" ? providerProfile?.photoUri : session.photoUri) ? (
                     <Image
-                      source={{ uri: providerProfile.photoUri }}
+                      source={{ uri: session.role === "provider" ? providerProfile?.photoUri : session.photoUri }}
                       style={styles.profilePhoto}
                     />
                   ) : (
@@ -2573,15 +2922,26 @@ export default function Home() {
                         </Text>
                       )}
                     </View>
-                    <Text style={styles.accountEmail}>{session.email}</Text>
-                    <Text style={styles.localBadge}>
-                      {isDemoSession
-                        ? "Cuenta de demostración"
-                        : backendMode === "supabase"
-                          ? "Conectado a Supabase"
-                          : "Guardado en este dispositivo"}
-                    </Text>
+                    {session.role === "client" ? (
+                      <Text style={styles.clientJobsCount}>{clientHistory.length} trabajos contratados en los últimos 6 meses</Text>
+                    ) : (
+                      <>
+                        <Text style={styles.accountEmail}>{session.email}</Text>
+                        <Text style={styles.localBadge}>
+                          {isDemoSession
+                            ? "Cuenta de demostración"
+                            : backendMode === "supabase"
+                              ? "Conectado a Supabase"
+                              : "Guardado en este dispositivo"}
+                        </Text>
+                      </>
+                    )}
                   </View>
+                  {session.role === "client" && (
+                    <TouchableOpacity accessibilityRole="button" disabled={clientPhotoBusy} style={styles.editProfileButton} onPress={() => void pickClientPhoto()}>
+                      <Text style={styles.editProfileButtonText}>{clientPhotoBusy ? "CARGANDO…" : session.photoUri ? "CAMBIAR FOTO" : "AGREGAR FOTO"}</Text>
+                    </TouchableOpacity>
+                  )}
                   {session.role === "provider" && providerProfile?.published && (
                     <TouchableOpacity
                       accessibilityRole="button"
@@ -3295,6 +3655,41 @@ export default function Home() {
           </View>
         </View>
       </AppModal>
+      <AppModal visible={acceptQuoteRequest !== null} onRequestClose={() => setAcceptQuoteRequestId(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.confirmCard}>
+            <Text style={styles.confirmIcon}>✓</Text>
+            <Text style={styles.modalTitle}>¿Seguro que aceptás?</Text>
+            <Text style={styles.modalCopy}>
+              {acceptQuoteRequest?.provider} recibirá la confirmación y el presupuesto quedará asociado al trabajo.
+            </Text>
+            {!!acceptQuoteRequest?.quote && (
+              <Text style={styles.confirmAmount}>${acceptQuoteRequest.quote.amount.toLocaleString("es-AR")}</Text>
+            )}
+            <TouchableOpacity accessibilityRole="button" style={styles.modalPrimary} onPress={() => acceptQuoteRequest && void acceptQuote(acceptQuoteRequest)}>
+              <Text style={styles.modalPrimaryText}>Sí, acepto</Text>
+            </TouchableOpacity>
+            <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => setAcceptQuoteRequestId(null)}>
+              <Text style={styles.secondaryText}>Volver</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </AppModal>
+      <AppModal visible={completionQr !== null} onRequestClose={() => setCompletionQr(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.completionQrCard}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar QR" style={styles.modalClose} onPress={() => setCompletionQr(null)}>
+              <Text style={styles.modalCloseText}>×</Text>
+            </TouchableOpacity>
+            <Text style={styles.panelEyebrow}>TRABAJO TERMINADO</Text>
+            <Text style={styles.modalTitle}>Mostrale este QR al cliente</Text>
+            <Text style={styles.modalCopy}>El cliente debe abrir el botón QR de su menú y escanearlo. Vence en 15 minutos y sólo puede usarse una vez.</Text>
+            {completionQr && <View style={styles.qrCodeSurface}><QRCode value={completionQr.value} size={220} backgroundColor="#FFFFFF" color="#063C78" /></View>}
+            <Text style={styles.qrShortCode}>{completionQr?.value.match(/[?&]token=([^&]+)/)?.[1] ?? ""}</Text>
+            <Text style={styles.privacyHint}>El código no contiene datos personales ni precios.</Text>
+          </View>
+        </View>
+      </AppModal>
       <AppModal
         visible={chatRequest !== null}
         onRequestClose={() => setChatRequestId(null)}
@@ -3422,11 +3817,27 @@ export default function Home() {
               placeholderTextColor="#71818B"
               style={[styles.modalInput, styles.multiline]}
             />
+            <Text style={styles.modalLabel}>Elegí hasta 3 cualidades</Text>
+            <View style={styles.qualityChoices}>
+              {reviewQualitySuggestions.map((quality) => {
+                const selected = reviewQualities.includes(quality);
+                return (
+                  <TouchableOpacity
+                    key={quality}
+                    accessibilityRole="checkbox"
+                    accessibilityState={{ checked: selected }}
+                    style={[styles.qualityChoice, selected && styles.qualityChoiceActive]}
+                    onPress={() => setReviewQualities((current) => selected ? current.filter((item) => item !== quality) : current.length < 3 ? [...current, quality] : current)}
+                  >
+                    <Text style={[styles.qualityChoiceText, selected && styles.qualityChoiceTextActive]}>{quality}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
             <View style={styles.reviewBox}>
               <Text style={styles.reviewTitle}>Reseña verificada</Text>
               <Text style={styles.reviewText}>
-                Solo se publica porque el trabajo fue pagado y finalizado dentro
-                de la simulación de LaburApp.
+                Se habilita únicamente porque el cliente confirmó la finalización escaneando el QR del profesional.
               </Text>
             </View>
             {!!reviewError && (
@@ -3435,7 +3846,7 @@ export default function Home() {
             <TouchableOpacity
               accessibilityRole="button"
               style={styles.modalPrimary}
-              onPress={submitReview}
+              onPress={() => void submitReview()}
             >
               <Text style={styles.modalPrimaryText}>Publicar reseña</Text>
             </TouchableOpacity>
@@ -3465,11 +3876,13 @@ export default function Home() {
             accessibilityLabel={item}
             key={item}
             onPress={() => setTab(item)}
-            style={styles.navItem}
+            style={[styles.navItem, item === "QR" && styles.qrNavItem]}
           >
-            <Text style={[styles.navText, tab === item && styles.navActive]}>
-              {item}
-            </Text>
+            {item === "QR" ? (
+              <><Text style={styles.qrNavIcon}>▣</Text><Text style={[styles.qrNavText, tab === item && styles.navActive]}>QR</Text></>
+            ) : (
+              <Text style={[styles.navText, tab === item && styles.navActive]}>{item}</Text>
+            )}
           </TouchableOpacity>
         ))}
       </View>
@@ -4706,5 +5119,64 @@ function createStyles(colors: ThemeColors) {
     },
     starChoice: { color: colors.line, fontSize: 38 },
     starChoiceActive: { color: colors.orange },
+    requestQuotaCard: {
+      minHeight: 72,
+      borderRadius: 15,
+      borderWidth: 1,
+      borderColor: colors.line,
+      backgroundColor: colors.surface,
+      paddingHorizontal: 15,
+      paddingVertical: 12,
+      marginBottom: 13,
+      flexDirection: "row",
+      alignItems: "center",
+      justifyContent: "space-between",
+    },
+    requestQuotaTitle: { color: colors.navy, fontSize: 14, fontWeight: "900", marginTop: 3 },
+    upgradeLink: { color: colors.blue, fontSize: 10, fontWeight: "900", marginTop: 5 },
+    requestQuotaCount: { color: colors.orange, fontSize: 22, fontWeight: "900" },
+    expiryText: { color: colors.orange, fontSize: 10, fontWeight: "800", marginTop: 9 },
+    completedVerified: { color: colors.green, fontSize: 12, fontWeight: "900", marginTop: 11 },
+    clientJobsCount: { color: colors.stone, fontSize: 12, marginTop: 5 },
+    confirmCard: {
+      width: "92%",
+      maxWidth: 430,
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: colors.line,
+      backgroundColor: colors.surface,
+      padding: 24,
+      alignSelf: "center",
+      alignItems: "stretch",
+    },
+    confirmIcon: { color: colors.green, fontSize: 42, fontWeight: "900", textAlign: "center", marginBottom: 8 },
+    confirmAmount: { color: colors.navy, fontSize: 30, fontWeight: "900", textAlign: "center", marginVertical: 15 },
+    completionQrCard: {
+      width: "94%",
+      maxWidth: 480,
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: colors.line,
+      backgroundColor: colors.surface,
+      padding: 22,
+      alignSelf: "center",
+    },
+    qrCodeSurface: { backgroundColor: "white", borderRadius: 18, padding: 18, alignSelf: "center", marginVertical: 16 },
+    qrShortCode: { color: colors.navy, fontSize: 16, fontWeight: "900", letterSpacing: 2, textAlign: "center", marginBottom: 12 },
+    qrScannerCard: { borderRadius: 18, overflow: "hidden", borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, marginBottom: 14 },
+    qrPermissionBox: { minHeight: 330, padding: 24, alignItems: "center", justifyContent: "center" },
+    cameraFrame: { height: 390, backgroundColor: "#000", position: "relative" },
+    camera: { width: "100%", height: "100%" },
+    cameraGuide: { position: "absolute", width: 220, height: 220, top: 85, alignSelf: "center", borderWidth: 3, borderColor: colors.orange, borderRadius: 22 },
+    manualQrCard: { borderRadius: 15, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, padding: 15 },
+    qualityChoices: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 13 },
+    qualityChoice: { borderRadius: 999, borderWidth: 1, borderColor: colors.line, paddingHorizontal: 11, paddingVertical: 8, backgroundColor: colors.surfaceSoft },
+    qualityChoiceActive: { borderColor: colors.green, backgroundColor: colors.successSurface },
+    qualityChoiceText: { color: colors.stone, fontSize: 11, fontWeight: "800" },
+    qualityChoiceTextActive: { color: colors.green },
+    reviewQualitiesText: { color: colors.green, fontSize: 10, fontWeight: "900", marginTop: 6 },
+    qrNavItem: { marginTop: -16 },
+    qrNavIcon: { width: 48, height: 48, borderRadius: 24, color: "white", backgroundColor: colors.orange, textAlign: "center", lineHeight: 48, fontSize: 24, fontWeight: "900", overflow: "hidden" },
+    qrNavText: { color: colors.stone, fontSize: 9, fontWeight: "900", marginTop: 2 },
   });
 }
