@@ -508,6 +508,33 @@ const providers = [
     badge: "Matrícula verificada",
     skills: "Calefones · Cañerías · Instalaciones",
   },
+  {
+    name: "Valentina Rossi",
+    trade: "Guía turístico/a y excursiones",
+    city: "Ushuaia",
+    rating: "4,9",
+    jobs: 37,
+    badge: "Identidad verificada",
+    skills: "Senderismo · Excursiones · Circuitos locales",
+  },
+  {
+    name: "Camila Soto",
+    trade: "Candy",
+    city: "Río Grande",
+    rating: "4,8",
+    jobs: 24,
+    badge: "Identidad verificada",
+    skills: "Candy bar · Mesas dulces · Cumpleaños",
+  },
+  {
+    name: "Julieta Navarro",
+    trade: "Wedding planner",
+    city: "Ushuaia",
+    rating: "5,0",
+    jobs: 18,
+    badge: "Identidad verificada",
+    skills: "Planificación · Proveedores · Coordinación",
+  },
 ];
 
 const quickSearches = [
@@ -581,6 +608,9 @@ const featuredWorks: Record<string, FeaturedWork> = {
   "Kevin Almirón": { title: "Preparación de materiales", description: "Asistencia de obra, preparación de mezcla y orden del espacio de trabajo.", photoUri: "https://images.unsplash.com/photo-1541888946425-d81bb19240f5?auto=format&fit=crop&w=900&q=75" },
   "Julia Ferreyra": { title: "Pintura interior", description: "Preparación de paredes, enduido y terminación uniforme en dos manos.", photoUri: "https://images.unsplash.com/photo-1562259949-e8e7689d7828?auto=format&fit=crop&w=900&q=75" },
   "Profesional Demo": { title: "Revisión integral de calefón", description: "Diagnóstico, limpieza, recambio de componentes y prueba final de funcionamiento.", photoUri: "https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=900&q=75" },
+  "Valentina Rossi": { title: "Senderismo guiado en Ushuaia", description: "Recorrido personalizado con orientación, interpretación del paisaje y paradas fotográficas.", photoUri: "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=900&q=75" },
+  "Camila Soto": { title: "Candy bar para cumpleaños", description: "Diseño y armado de una mesa dulce personalizada para la celebración.", photoUri: "https://images.unsplash.com/photo-1551024601-bec78aea704b?auto=format&fit=crop&w=900&q=75" },
+  "Julieta Navarro": { title: "Coordinación integral de boda", description: "Planificación de proveedores, tiempos y acompañamiento durante todo el evento.", photoUri: "https://images.unsplash.com/photo-1519741497674-611481863552?auto=format&fit=crop&w=900&q=75" },
 };
 
 const portfolioPhotoPool = [

@@ -26,10 +26,12 @@ export const providerServiceCatalog: ServiceFamily[] = [
   { name: "Ropa y arreglos", description: "Confección, ajustes y reparación de prendas y calzado.", specialties: ["Costura", "Arreglo de pantalones", "Cambio de cierres", "Ajuste de prendas", "Confección de ropa", "Reparación de calzado"] },
   { name: "Servicios creativos", description: "Producción visual, contenido y comunicación para personas y negocios.", specialties: ["Fotografía", "Video", "Edición de fotos", "Diseño de flyers", "Diseño de logos", "Manejo de redes sociales"] },
   { name: "Servicios educativos", description: "Clases y acompañamiento para aprender o preparar exámenes.", specialties: ["Apoyo escolar", "Clases particulares", "Clases de computación", "Clases de idiomas", "Clases de música", "Preparación para exámenes"] },
+  { name: "Turismo y excursiones", description: "Experiencias locales y recorridos personalizados guiados por una persona.", specialties: ["Guía turístico/a local", "Senderismo guiado", "Excursiones personalizadas", "Circuitos históricos y culturales", "Avistaje de aves y fauna", "Caminatas fotográficas", "Acompañamiento de viajeros", "Armado de itinerarios"] },
+  { name: "Organización de eventos", description: "Planificación, ambientación y coordinación personal de celebraciones.", specialties: ["Wedding planner", "Candy", "Candy bar", "Mesa dulce", "Planificación de cumpleaños", "Coordinación del día del evento", "Coordinación de proveedores", "Ambientación de eventos"] },
 ];
 
 export const professionalSuggestions = [
-  "Gasista", "Electricista domiciliario", "Plomero", "Técnico en calefacción", "Técnico en refrigeración", "Albañil", "Instalador de aberturas", "Pintor", "Carpintero", "Herrero", "Técnico en reparación de electrodomésticos", "Técnico en informática", "Mecánico", "Fletero", "Personal de limpieza", "Jardinero", "Cerrajero", "Cuidador de adultos mayores", "Niñera", "Peluquero", "Costurero", "Fotógrafo", "Profesor particular",
+  "Gasista", "Electricista domiciliario", "Plomero", "Técnico en calefacción", "Técnico en refrigeración", "Albañil", "Instalador de aberturas", "Pintor", "Carpintero", "Herrero", "Técnico en reparación de electrodomésticos", "Técnico en informática", "Mecánico", "Fletero", "Personal de limpieza", "Jardinero", "Cerrajero", "Cuidador de adultos mayores", "Niñera", "Peluquero", "Costurero", "Fotógrafo", "Profesor particular", "Guía turístico/a y excursiones", "Guía de senderismo", "Organizador/a de experiencias turísticas", "Planificador/a de itinerarios", "Candy", "Especialista en candy bar", "Wedding planner", "Coordinador/a de eventos",
 ];
 
 export const certificationSuggestions = [
