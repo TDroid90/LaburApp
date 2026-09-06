@@ -520,6 +520,32 @@ const quickSearches = [
 ];
 type Provider = (typeof providers)[number];
 type ProviderSort = "recent" | "jobs" | "rating";
+type FeaturedWork = {
+  title: string;
+  description: string;
+  photoUri: string;
+};
+
+const featuredWorks: Record<string, FeaturedWork> = {
+  "Martín Gómez": { title: "Reparación de calefón", description: "Diagnóstico, cambio de componentes y prueba final de funcionamiento seguro.", photoUri: "https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=900&q=75" },
+  "Laura Torres": { title: "Armado de tablero eléctrico", description: "Reordenamiento del tablero, protecciones nuevas y rotulado completo de circuitos.", photoUri: "https://images.unsplash.com/photo-1621905252507-b35492cc74b4?auto=format&fit=crop&w=900&q=75" },
+  "Nicolás Vera": { title: "Cambio de grifería", description: "Retiro de la grifería anterior, colocación y control de pérdidas.", photoUri: "https://images.unsplash.com/photo-1607472586893-edb57bdc0e39?auto=format&fit=crop&w=900&q=75" },
+  "Carla Ruiz": { title: "Limpieza final de obra", description: "Limpieza profunda de ambientes, aberturas, pisos y superficies delicadas.", photoUri: "https://images.unsplash.com/photo-1581578731548-c64695cc6952?auto=format&fit=crop&w=900&q=75" },
+  "Ana Pereyra": { title: "Acompañamiento domiciliario", description: "Organización de rutina diaria y acompañamiento personalizado en el hogar.", photoUri: "https://images.unsplash.com/photo-1559839734-2b71ea197ec2?auto=format&fit=crop&w=900&q=75" },
+  "Diego Mansilla": { title: "Gestión de importación", description: "Preparación documental y seguimiento integral hasta la liberación de la carga.", photoUri: "https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?auto=format&fit=crop&w=900&q=75" },
+  "Ezequiel Quispe": { title: "Organización de depósito", description: "Descarga, clasificación y ubicación segura de mercadería pesada.", photoUri: "https://images.unsplash.com/photo-1586864387967-d02ef85d93e8?auto=format&fit=crop&w=900&q=75" },
+  "Tomás Roldán": { title: "Entrega de paquetería", description: "Ruta urbana optimizada y entrega confirmada dentro de la franja acordada.", photoUri: "https://images.unsplash.com/photo-1526367790999-0150786686a2?auto=format&fit=crop&w=900&q=75" },
+  "Kevin Almirón": { title: "Preparación de materiales", description: "Asistencia de obra, preparación de mezcla y orden del espacio de trabajo.", photoUri: "https://images.unsplash.com/photo-1541888946425-d81bb19240f5?auto=format&fit=crop&w=900&q=75" },
+  "Julia Ferreyra": { title: "Pintura interior", description: "Preparación de paredes, enduido y terminación uniforme en dos manos.", photoUri: "https://images.unsplash.com/photo-1562259949-e8e7689d7828?auto=format&fit=crop&w=900&q=75" },
+};
+
+function featuredWorkFor(provider: Provider): FeaturedWork {
+  return featuredWorks[provider.name] ?? {
+    title: `Trabajo de ${provider.trade}`,
+    description: `Trabajo finalizado en ${provider.city}, seleccionado por el profesional como muestra destacada.`,
+    photoUri: "https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=900&q=75",
+  };
+}
 
 const demoAccounts: Array<SavedSession & { label: string }> = [
   {
@@ -639,6 +665,9 @@ export default function Home() {
   const [providerSort, setProviderSort] = useState<ProviderSort>("recent");
   const [cityFilter, setCityFilter] = useState("Todas");
   const [openFilter, setOpenFilter] = useState<"sort" | "city" | null>(null);
+  const [expandedProviderName, setExpandedProviderName] = useState<string | null>(null);
+  const [publicProfileProvider, setPublicProfileProvider] = useState<Provider | null>(null);
+  const [workPhoto, setWorkPhoto] = useState<{ provider: Provider; work: FeaturedWork } | null>(null);
   const [tab, setTab] = useState("Inicio");
   const [requested, setRequested] = useState<string | null>(null);
   const [authMode, setAuthMode] = useState<
@@ -1731,38 +1760,35 @@ export default function Home() {
                 </View>
               </View>
             </View>
-            {filtered.map((provider) => (
-              <View key={provider.name} style={styles.card}>
-                <View style={styles.avatar}>
-                  <Text style={styles.avatarText}>
-                    {provider.name
-                      .split(" ")
-                      .map((part) => part[0])
-                      .join("")}
-                  </Text>
-                </View>
+            {filtered.map((provider) => {
+              const featuredWork = featuredWorkFor(provider);
+              const expanded = expandedProviderName === provider.name;
+              const initials = provider.name.split(" ").map((part) => part[0]).join("");
+              return <View key={provider.name} style={[styles.card, expanded && styles.cardExpanded]}>
+                <TouchableOpacity accessibilityRole="link" accessibilityLabel={`Ver perfil de ${provider.name}`} style={styles.avatar} onPress={() => setPublicProfileProvider(provider)}>
+                  <Text style={styles.avatarText}>{initials}</Text>
+                </TouchableOpacity>
                 <View style={styles.cardBody}>
                   <View style={styles.row}>
-                    <Text style={styles.name}>{provider.name}</Text>
+                    <TouchableOpacity accessibilityRole="link" accessibilityLabel={`Abrir perfil profesional de ${provider.name}`} style={styles.nameButton} onPress={() => setPublicProfileProvider(provider)}><Text style={styles.nameLink}>{provider.name}</Text></TouchableOpacity>
                     <Text style={styles.rating}>★ {provider.rating}</Text>
                   </View>
-                  <Text style={styles.trade}>
-                    {provider.trade} · {provider.city}
-                  </Text>
-                  <Text style={styles.skills}>{provider.skills}</Text>
-                  <Text style={styles.badge}>
-                    ✓ {provider.badge} · {provider.jobs} trabajos
-                  </Text>
-                  <TouchableOpacity
-                    accessibilityRole="button"
-                    style={styles.button}
-                    onPress={() => startQuote(provider)}
-                  >
-                    <Text style={styles.buttonText}>Solicitar presupuesto</Text>
+                  <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded }} accessibilityLabel={`${expanded ? "Ocultar" : "Ver"} trabajo destacado de ${provider.name}`} style={styles.cardInfoButton} onPress={() => setExpandedProviderName(expanded ? null : provider.name)}>
+                    <Text style={styles.trade}>{provider.trade} · {provider.city}</Text>
+                    <Text style={styles.skills}>{provider.skills}</Text>
+                    <Text style={styles.badge}>✓ {provider.badge} · {provider.jobs} trabajos</Text>
+                    <Text style={styles.featuredToggle}>{expanded ? "Ocultar trabajo destacado ︿" : "Ver trabajo destacado ﹀"}</Text>
                   </TouchableOpacity>
+                  {expanded && <View style={styles.featuredWork}>
+                    <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Ampliar foto de ${featuredWork.title}`} style={styles.featuredPhotoButton} onPress={() => setWorkPhoto({ provider, work: featuredWork })}>
+                      <Image source={{ uri: featuredWork.photoUri }} resizeMode="cover" style={styles.featuredPhoto} />
+                    </TouchableOpacity>
+                    <View style={styles.featuredWorkCopy}><Text style={styles.favoriteLabel}>★ DESTACADO</Text><Text style={styles.featuredWorkTitle}>{featuredWork.title}</Text><Text numberOfLines={3} style={styles.featuredWorkDescription}>{featuredWork.description}</Text><TouchableOpacity accessibilityRole="link" onPress={() => setPublicProfileProvider(provider)}><Text style={styles.viewProfileLink}>Ver perfil completo</Text></TouchableOpacity></View>
+                  </View>}
+                  <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => startQuote(provider)}><Text style={styles.buttonText}>Solicitar presupuesto</Text></TouchableOpacity>
                 </View>
-              </View>
-            ))}
+              </View>;
+            })}
             {filtered.length === 0 && (
               <View style={styles.empty}>
                 <Text style={styles.emptyTitle}>
@@ -2479,6 +2505,26 @@ export default function Home() {
           </TouchableOpacity>
         </View>
       )}
+      <AppModal visible={publicProfileProvider !== null} onRequestClose={() => setPublicProfileProvider(null)}>
+        <View style={styles.modalBackdrop}>
+          {publicProfileProvider && <ScrollView style={styles.publicProfileCard} contentContainerStyle={styles.publicProfileContent}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar perfil profesional" style={styles.modalClose} onPress={() => setPublicProfileProvider(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+            <View style={styles.publicProfileHeader}>
+              <View style={styles.publicProfileAvatar}><Text style={styles.publicProfileAvatarText}>{publicProfileProvider.name.split(" ").map((part) => part[0]).join("")}</Text></View>
+              <View style={styles.publicProfileIdentity}><View style={styles.verifiedNameRow}><Text style={styles.publicProfileName}>{publicProfileProvider.name}</Text><Text accessibilityLabel="Perfil verificado" style={styles.verifiedIcon}>✓</Text></View><Text style={styles.publicProfileTrade}>{publicProfileProvider.trade} · {publicProfileProvider.city}</Text><Text style={styles.publicProfileSkills}>{publicProfileProvider.skills}</Text></View>
+            </View>
+            <View style={styles.publicProfileStats}><View style={styles.publicProfileStat}><Text style={styles.publicProfileStatValue}>★ {publicProfileProvider.rating}</Text><Text style={styles.publicProfileStatLabel}>calificación</Text></View><View style={styles.publicProfileStat}><Text style={styles.publicProfileStatValue}>{publicProfileProvider.jobs}</Text><Text style={styles.publicProfileStatLabel}>trabajos</Text></View><View style={styles.publicProfileStat}><Text style={styles.publicProfileStatValue}>✓</Text><Text style={styles.publicProfileStatLabel}>{publicProfileProvider.badge}</Text></View></View>
+            <View style={styles.publicProfileSection}><View style={styles.workCardTop}><Text style={styles.panelEyebrow}>TRABAJO DESTACADO</Text><Text style={styles.favoriteLabel}>★ FAVORITO</Text></View><TouchableOpacity accessibilityRole="button" accessibilityLabel={`Ampliar foto del trabajo de ${publicProfileProvider.name}`} onPress={() => setWorkPhoto({ provider: publicProfileProvider, work: featuredWorkFor(publicProfileProvider) })}><Image source={{ uri: featuredWorkFor(publicProfileProvider).photoUri }} resizeMode="cover" style={styles.publicProfileWorkPhoto} /></TouchableOpacity><Text style={styles.publicProfileWorkTitle}>{featuredWorkFor(publicProfileProvider).title}</Text><Text style={styles.publicProfileWorkDescription}>{featuredWorkFor(publicProfileProvider).description}</Text></View>
+            <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => { const provider = publicProfileProvider; setPublicProfileProvider(null); startQuote(provider); }}><Text style={styles.buttonText}>Solicitar presupuesto</Text></TouchableOpacity>
+          </ScrollView>}
+        </View>
+      </AppModal>
+      <AppModal visible={workPhoto !== null} onRequestClose={() => setWorkPhoto(null)}>
+        <View style={styles.lightboxBackdrop}>
+          {workPhoto && <><Image source={{ uri: workPhoto.work.photoUri }} resizeMode="contain" style={styles.lightboxImage} /><Text style={styles.lightboxTitle}>{workPhoto.work.title}</Text><Text style={styles.lightboxCaption}>{workPhoto.provider.name} · {workPhoto.provider.city}</Text></>}
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar imagen ampliada" style={styles.lightboxClose} onPress={() => setWorkPhoto(null)}><Text style={styles.lightboxCloseText}>×</Text></TouchableOpacity>
+        </View>
+      </AppModal>
       <AppModal
         visible={authMode !== null}
         onRequestClose={() => setAuthMode(null)}
@@ -3142,6 +3188,7 @@ function createStyles(colors: ThemeColors) {
       marginBottom: 12,
       flexDirection: "row",
     },
+    cardExpanded: { borderColor: colors.blue },
     avatar: {
       width: 52,
       height: 52,
@@ -3155,7 +3202,10 @@ function createStyles(colors: ThemeColors) {
     cardBody: { flex: 1 },
     row: { flexDirection: "row", justifyContent: "space-between", gap: 8 },
     name: { color: colors.navy, fontSize: 17, fontWeight: "800", flex: 1 },
+    nameButton: { flex: 1 },
+    nameLink: { color: colors.blue, fontSize: 17, fontWeight: "900" },
     rating: { color: colors.navy, fontWeight: "700" },
+    cardInfoButton: { alignItems: "stretch" },
     trade: { color: colors.blue, fontWeight: "700", marginTop: 2 },
     skills: { color: colors.stone, marginTop: 6 },
     badge: {
@@ -3172,6 +3222,15 @@ function createStyles(colors: ThemeColors) {
       marginTop: 12,
     },
     buttonText: { color: "white", fontWeight: "800" },
+    featuredToggle: { color: colors.blue, fontSize: 10, fontWeight: "900", marginTop: 9 },
+    featuredWork: { flexDirection: "row", gap: 11, marginTop: 11, paddingTop: 11, borderTopWidth: 1, borderTopColor: colors.line },
+    featuredPhotoButton: { width: 108, height: 108, borderRadius: 11, overflow: "hidden", backgroundColor: colors.raised },
+    featuredPhoto: { width: 108, height: 108 },
+    featuredWorkCopy: { flex: 1, minWidth: 0 },
+    favoriteLabel: { color: colors.orange, fontSize: 9, fontWeight: "900", letterSpacing: 0.4 },
+    featuredWorkTitle: { color: colors.navy, fontSize: 13, fontWeight: "900", marginTop: 4 },
+    featuredWorkDescription: { color: colors.stone, fontSize: 10, lineHeight: 14, marginTop: 4 },
+    viewProfileLink: { color: colors.blue, fontSize: 10, fontWeight: "900", marginTop: 7 },
     empty: {
       minHeight: 360,
       justifyContent: "center",
@@ -3857,6 +3916,29 @@ function createStyles(colors: ThemeColors) {
     navItem: { flex: 1, alignItems: "center", justifyContent: "center" },
     navText: { color: colors.stone, fontWeight: "700" },
     navActive: { color: colors.orange },
+    publicProfileCard: { width: "100%", maxWidth: 680, maxHeight: "92%", alignSelf: "center", backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
+    publicProfileContent: { padding: 22, paddingBottom: 30 },
+    publicProfileHeader: { flexDirection: "row", alignItems: "center", paddingRight: 38 },
+    publicProfileAvatar: { width: 64, height: 64, borderRadius: 20, backgroundColor: colors.brandNavy, alignItems: "center", justifyContent: "center", marginRight: 13 },
+    publicProfileAvatarText: { color: "white", fontSize: 20, fontWeight: "900" },
+    publicProfileIdentity: { flex: 1 },
+    publicProfileName: { color: colors.navy, fontSize: 20, fontWeight: "900" },
+    publicProfileTrade: { color: colors.blue, fontSize: 13, fontWeight: "800", marginTop: 4 },
+    publicProfileSkills: { color: colors.stone, fontSize: 11, marginTop: 4 },
+    publicProfileStats: { flexDirection: "row", gap: 8, marginTop: 16 },
+    publicProfileStat: { flex: 1, minHeight: 68, borderRadius: 12, backgroundColor: colors.raised, alignItems: "center", justifyContent: "center", padding: 7 },
+    publicProfileStatValue: { color: colors.navy, fontSize: 15, fontWeight: "900" },
+    publicProfileStatLabel: { color: colors.stone, fontSize: 8, fontWeight: "700", textAlign: "center", marginTop: 3 },
+    publicProfileSection: { marginTop: 17, paddingTop: 14, borderTopWidth: 1, borderTopColor: colors.line },
+    publicProfileWorkPhoto: { width: "100%", aspectRatio: 1.65, borderRadius: 14, backgroundColor: colors.raised, marginTop: 10 },
+    publicProfileWorkTitle: { color: colors.navy, fontSize: 17, fontWeight: "900", marginTop: 10 },
+    publicProfileWorkDescription: { color: colors.stone, fontSize: 12, lineHeight: 18, marginTop: 5 },
+    lightboxBackdrop: { position: Platform.OS === "web" ? ("fixed" as "absolute") : "absolute", top: 0, right: 0, bottom: 0, left: 0, zIndex: 1200, elevation: 30, backgroundColor: "rgba(0,6,12,0.96)", alignItems: "center", justifyContent: "center", paddingTop: 28, paddingBottom: 18 },
+    lightboxImage: { width: "92%", maxWidth: 920, height: "72%" },
+    lightboxTitle: { color: "white", fontSize: 16, fontWeight: "900", textAlign: "center", marginTop: 10 },
+    lightboxCaption: { color: "#AFC2D2", fontSize: 11, textAlign: "center", marginTop: 4 },
+    lightboxClose: { minWidth: 48, minHeight: 48, alignItems: "center", justifyContent: "center", marginTop: 8 },
+    lightboxCloseText: { color: "white", fontSize: 34, lineHeight: 38, fontWeight: "900" },
     modalBackdrop: {
       position: Platform.OS === "web" ? ("fixed" as "absolute") : "absolute",
       top: 0,
