@@ -182,12 +182,25 @@ export async function loadLocalState(): Promise<LocalAppState> {
       portfolioWorks: rawProfile.portfolioWorks ?? [],
     } : null;
     const now = Date.now();
-    const requests = (Array.isArray(parsed.requests) ? parsed.requests : [])
+    const activeRequests = (Array.isArray(parsed.requests) ? parsed.requests : [])
       .filter((request) => durableRequestStatuses.has(request.status) || new Date(request.expiresAt ?? new Date(new Date(request.createdAt).getTime() + FIVE_DAYS_MS).toISOString()).getTime() > now)
       .map((request) => ({
         ...request,
         messages: request.messages?.filter((message) => new Date(message.expiresAt ?? new Date(new Date(message.createdAt).getTime() + FIVE_DAYS_MS).toISOString()).getTime() > now),
       }));
+    const latestDemoByKind = new Map<string, SavedRequest>();
+    for (const request of activeRequests) {
+      const demoKind = request.id.match(/^scenario-\d+-(waiting|quote|active)$/)?.[1];
+      if (!demoKind) continue;
+      const current = latestDemoByKind.get(demoKind);
+      if (!current || new Date(request.createdAt).getTime() > new Date(current.createdAt).getTime()) {
+        latestDemoByKind.set(demoKind, request);
+      }
+    }
+    const requests = activeRequests.filter((request) => {
+      const demoKind = request.id.match(/^scenario-\d+-(waiting|quote|active)$/)?.[1];
+      return !demoKind || latestDemoByKind.get(demoKind)?.id === request.id;
+    });
     return {
       session: parsed.session ?? null,
       requests,

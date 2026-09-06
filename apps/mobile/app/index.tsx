@@ -1893,7 +1893,10 @@ export default function Home() {
   }
 
   function loadSimulations() {
-    setRequests((current) => [...createDemoScenarios(), ...current]);
+    setRequests((current) => [
+      ...createDemoScenarios(),
+      ...current.filter((request) => !request.id.startsWith("scenario-")),
+    ]);
     setRequested(
       "Se cargaron tres casos para probar presupuestos, pagos y estados.",
     );
