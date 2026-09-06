@@ -9,11 +9,15 @@ export type SavedSession = {
 
 export type SavedRequest = {
   id: string;
+  clientEmail?: string;
+  providerId?: string;
   provider: string;
   trade: string;
   description: string;
   zone: string;
   desiredAt: string;
+  preferredStartTime?: string;
+  preferredEndTime?: string;
   createdAt: string;
   status: JobStatus;
   quote?: SavedQuote;

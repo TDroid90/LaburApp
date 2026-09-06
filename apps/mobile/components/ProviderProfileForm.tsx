@@ -71,14 +71,15 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
   }));
   const [cityOpen, setCityOpen] = useState(false);
   const [coverageOpen, setCoverageOpen] = useState(false);
-  const [tradeFocused, setTradeFocused] = useState(false);
+  const [activeTradeField, setActiveTradeField] = useState<"primary" | "secondary" | null>(null);
   const [certificationInput, setCertificationInput] = useState("");
   const [openFamilyId, setOpenFamilyId] = useState<string | null>(null);
   const [openSpecialtyId, setOpenSpecialtyId] = useState<string | null>(null);
   const [membershipNotice, setMembershipNotice] = useState(false);
   const [localError, setLocalError] = useState("");
   const services = draft.services ?? [];
-  const filteredTrades = professionalSuggestions.filter((item) => item.toLocaleLowerCase("es-AR").includes(draft.trade.trim().toLocaleLowerCase("es-AR"))).slice(0, 6);
+  const activeTradeValue = activeTradeField === "secondary" ? draft.secondaryTrade ?? "" : draft.trade;
+  const filteredTrades = professionalSuggestions.filter((item) => item.toLocaleLowerCase("es-AR").includes(activeTradeValue.trim().toLocaleLowerCase("es-AR"))).slice(0, 6);
   const filteredCertifications = certificationSuggestions.filter((item) => !draft.certifications?.includes(item) && item.toLocaleLowerCase("es-AR").includes(certificationInput.trim().toLocaleLowerCase("es-AR"))).slice(0, 6);
 
   function updateService(id: string, patch: Partial<SavedServiceOffer>) {
@@ -139,13 +140,14 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
     if (!cities.includes(draft.city)) return setLocalError("Elegí tu ciudad.");
     if ((draft.diagnosticPrice ?? 0) <= 0) return setLocalError("Indicá el valor inicial del diagnóstico o visita.");
     if (draft.trade.trim().length < 3) return setLocalError("Indicá cómo querés presentarte profesionalmente.");
+    if (draft.secondaryTrade !== undefined && draft.secondaryTrade.trim().length < 3) return setLocalError("Completá o quitá la segunda profesión.");
     if (draft.bio.trim().length < 20) return setLocalError("Escribí una presentación de al menos 20 caracteres.");
     if (containsContactAttempt(draft.bio)) return setLocalError("No incluyas teléfonos, correos, redes ni enlaces en tu presentación.");
     if (!draft.coverageAreas?.length || draft.coverageAreas.some((area) => !coverageChoices.includes(area))) return setLocalError("Elegí al menos una localidad o zona de cobertura.");
     if (!services.length || services.some((item) => !serviceSpecialtiesAreValid(item.family, item.specialties?.length ? item.specialties : item.service ? [item.service] : []))) return setLocalError("Elegí una familia y hasta dos especialidades válidas para cada servicio.");
     if (services.some((item) => (item.description?.trim().length ?? 0) < 10 || (item.description?.trim().length ?? 0) > 240)) return setLocalError("Describí cada servicio con entre 10 y 240 caracteres.");
     if (services.some((item) => containsContactAttempt(item.description ?? ""))) return setLocalError("No incluyas teléfonos, correos, redes ni enlaces en la descripción del servicio.");
-    onSubmit({ ...draft, zones: coverageLabel(draft.coverageAreas), availability: coverageLabel(draft.coverageAreas), skills: services.flatMap((item) => item.specialties ?? [item.service]).join(", "), secondaryTrade: undefined, services });
+    onSubmit({ ...draft, trade: draft.trade.trim().replace(/ matriculad[oa]$/i, ""), secondaryTrade: draft.secondaryTrade?.trim().replace(/ matriculad[oa]$/i, "") || undefined, zones: coverageLabel(draft.coverageAreas), availability: coverageLabel(draft.coverageAreas), skills: services.flatMap((item) => item.specialties ?? [item.service]).join(", "), services });
   }
 
   return <View style={styles.card}>
@@ -165,23 +167,28 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
       <Text style={styles.help}>Es una tarifa inicial de visita o diagnóstico; no cuenta como servicio.</Text>
 
       <Text style={styles.label}>Ciudad</Text>
-      <TouchableOpacity accessibilityRole="button" accessibilityLabel="Elegir ciudad" style={styles.selector} onPress={() => { setCityOpen((current) => !current); setCoverageOpen(false); setTradeFocused(false); setOpenFamilyId(null); setOpenSpecialtyId(null); }}><Text style={[styles.selectorText, !draft.city && styles.placeholder]}>{draft.city || "Seleccioná tu ciudad"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
+      <TouchableOpacity accessibilityRole="button" accessibilityLabel="Elegir ciudad" style={styles.selector} onPress={() => { setCityOpen((current) => !current); setCoverageOpen(false); setActiveTradeField(null); setOpenFamilyId(null); setOpenSpecialtyId(null); }}><Text style={[styles.selectorText, !draft.city && styles.placeholder]}>{draft.city || "Seleccioná tu ciudad"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
       {cityOpen && <View style={styles.options}>{cities.map((city) => <TouchableOpacity key={city} style={[styles.option, draft.city === city && styles.optionActive]} onPress={() => selectCity(city)}><Text style={[styles.optionText, draft.city === city && styles.optionTextActive]}>{city}</Text></TouchableOpacity>)}</View>}
 
-      <Text style={styles.label}>Profesional</Text>
-      <TextInput value={draft.trade} onFocus={() => { setTradeFocused(true); setCityOpen(false); setCoverageOpen(false); }} onChangeText={(trade) => { setDraft({ ...draft, trade }); setTradeFocused(true); }} placeholder="Ej. Gasista matriculado" placeholderTextColor="#71818B" style={styles.input} />
-      {tradeFocused && filteredTrades.length > 0 && <View style={styles.suggestions}>{filteredTrades.map((trade) => <TouchableOpacity key={trade} style={styles.suggestion} onPress={() => { setDraft({ ...draft, trade }); setTradeFocused(false); }}><Text style={styles.suggestionHash}>+</Text><Text style={styles.suggestionText}>{trade}</Text></TouchableOpacity>)}</View>}
-      <Text style={styles.help}>Escribí y elegí una sugerencia, o usá una presentación propia.</Text>
+      <Text style={styles.label}>Profesional · hasta 2 en el plan gratis</Text>
+      <TextInput value={draft.trade} onFocus={() => { setActiveTradeField("primary"); setCityOpen(false); setCoverageOpen(false); }} onChangeText={(trade) => { setDraft({ ...draft, trade }); setActiveTradeField("primary"); }} placeholder="Ej. Gasista" placeholderTextColor="#71818B" style={styles.input} />
+      {activeTradeField === "primary" && filteredTrades.length > 0 && <View style={styles.suggestions}>{filteredTrades.map((trade) => <TouchableOpacity key={trade} style={styles.suggestion} onPress={() => { setDraft({ ...draft, trade }); setActiveTradeField(null); }}><Text style={styles.suggestionHash}>+</Text><Text style={styles.suggestionText}>{trade}</Text></TouchableOpacity>)}</View>}
+      {draft.secondaryTrade !== undefined ? <>
+        <View style={styles.serviceTop}><Text style={styles.miniLabel}>SEGUNDA PROFESIÓN</Text><TouchableOpacity onPress={() => { setDraft({ ...draft, secondaryTrade: undefined }); setActiveTradeField(null); }}><Text style={styles.remove}>Quitar</Text></TouchableOpacity></View>
+        <TextInput value={draft.secondaryTrade} onFocus={() => { setActiveTradeField("secondary"); setCityOpen(false); setCoverageOpen(false); }} onChangeText={(secondaryTrade) => { setDraft({ ...draft, secondaryTrade }); setActiveTradeField("secondary"); }} placeholder="Ej. Plomero" placeholderTextColor="#71818B" style={styles.input} />
+        {activeTradeField === "secondary" && filteredTrades.length > 0 && <View style={styles.suggestions}>{filteredTrades.map((trade) => <TouchableOpacity key={trade} style={styles.suggestion} onPress={() => { setDraft({ ...draft, secondaryTrade: trade }); setActiveTradeField(null); }}><Text style={styles.suggestionHash}>+</Text><Text style={styles.suggestionText}>{trade}</Text></TouchableOpacity>)}</View>}
+      </> : <TouchableOpacity accessibilityRole="button" style={styles.addService} onPress={() => { setDraft({ ...draft, secondaryTrade: "" }); setActiveTradeField("secondary"); }}><Text style={styles.addServiceText}>+ Agregar segunda profesión</Text></TouchableOpacity>}
+      <Text style={styles.help}>Podés mostrar hasta dos profesiones sin costo. Una tercera requiere membresía.</Text>
       <TextInput multiline value={draft.bio} onChangeText={(bio) => setDraft({ ...draft, bio })} placeholder="Breve presentación: qué hacés y cómo trabajás" placeholderTextColor="#71818B" maxLength={600} style={[styles.input, styles.multiline]} />
       <TextInput multiline value={draft.training ?? ""} onChangeText={(training) => setDraft({ ...draft, training })} placeholder="Formación y experiencia" placeholderTextColor="#71818B" maxLength={1200} style={[styles.input, styles.multilineSmall]} />
 
       <Text style={styles.label}>Certificaciones</Text>
       {!!draft.certifications?.length && <View style={styles.chipList}>{draft.certifications.map((certification) => <View key={certification} style={styles.chip}><Text style={styles.chipText}>#{certification.replace(/\s+/g, "_")}</Text><TouchableOpacity accessibilityRole="button" accessibilityLabel={`Quitar ${certification}`} onPress={() => setDraft((current) => ({ ...current, certifications: current.certifications?.filter((item) => item !== certification) }))}><Text style={styles.chipRemove}>×</Text></TouchableOpacity></View>)}</View>}
-      <TextInput value={certificationInput} onFocus={() => { setTradeFocused(false); setCityOpen(false); setCoverageOpen(false); }} onChangeText={setCertificationInput} onSubmitEditing={() => addCertification(certificationInput)} placeholder="Escribí para agregar una certificación" placeholderTextColor="#71818B" style={styles.input} />
+      <TextInput value={certificationInput} onFocus={() => { setActiveTradeField(null); setCityOpen(false); setCoverageOpen(false); }} onChangeText={setCertificationInput} onSubmitEditing={() => addCertification(certificationInput)} placeholder="Escribí para agregar una certificación" placeholderTextColor="#71818B" style={styles.input} />
       {certificationInput.trim().length > 0 && <View style={styles.suggestions}>{filteredCertifications.map((certification) => <TouchableOpacity key={certification} style={styles.suggestion} onPress={() => addCertification(certification)}><Text style={styles.suggestionHash}>#</Text><Text style={styles.suggestionText}>{certification}</Text></TouchableOpacity>)}<TouchableOpacity style={styles.suggestion} onPress={() => addCertification(certificationInput)}><Text style={styles.suggestionHash}>+</Text><Text style={styles.suggestionText}>Agregar “{certificationInput.trim()}”</Text></TouchableOpacity></View>}
 
       <Text style={styles.label}>Dónde trabajás</Text>
-      <TouchableOpacity accessibilityRole="button" accessibilityLabel="Elegir alcance de trabajo" style={styles.selector} onPress={() => { setCoverageOpen((current) => !current); setCityOpen(false); setTradeFocused(false); setOpenFamilyId(null); setOpenSpecialtyId(null); }}><Text style={styles.selectorText}>{draft.zones}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
+      <TouchableOpacity accessibilityRole="button" accessibilityLabel="Elegir alcance de trabajo" style={styles.selector} onPress={() => { setCoverageOpen((current) => !current); setCityOpen(false); setActiveTradeField(null); setOpenFamilyId(null); setOpenSpecialtyId(null); }}><Text style={styles.selectorText}>{draft.zones}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
       {coverageOpen && <View style={styles.options}>
         <TouchableOpacity style={[styles.coverageOption, draft.zones === "Toda la provincia" && styles.optionActive]} onPress={toggleAllCoverage}><Text style={styles.optionCheck}>{draft.zones === "Toda la provincia" ? "☑" : "☐"}</Text><Text style={[styles.optionText, draft.zones === "Toda la provincia" && styles.optionTextActive]}>Toda la provincia</Text></TouchableOpacity>
         {coverageChoices.map((coverage) => {
@@ -197,7 +204,7 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
         return <View key={item.id} style={styles.serviceCard}>
           <View style={styles.serviceTop}><Text style={styles.serviceNumber}>SERVICIO {index + 1}</Text>{services.length > 1 && <TouchableOpacity onPress={() => setDraft({ ...draft, services: services.filter((service) => service.id !== item.id) })}><Text style={styles.remove}>Quitar</Text></TouchableOpacity>}</View>
           <Text style={styles.miniLabel}>FAMILIA</Text>
-          <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Elegir familia del servicio ${index + 1}`} style={styles.selector} onPress={() => { setOpenFamilyId(openFamilyId === item.id ? null : item.id); setOpenSpecialtyId(null); setCityOpen(false); setCoverageOpen(false); setTradeFocused(false); }}><Text style={[styles.selectorText, !item.family && styles.placeholder]}>{item.family || "Elegí un rubro"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Elegir familia del servicio ${index + 1}`} style={styles.selector} onPress={() => { setOpenFamilyId(openFamilyId === item.id ? null : item.id); setOpenSpecialtyId(null); setCityOpen(false); setCoverageOpen(false); setActiveTradeField(null); }}><Text style={[styles.selectorText, !item.family && styles.placeholder]}>{item.family || "Elegí un rubro"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
           {openFamilyId === item.id && <ScrollView nestedScrollEnabled style={styles.catalogOptions}>{providerServiceCatalog.map((option) => <TouchableOpacity key={option.name} style={[styles.familyOption, item.family === option.name && styles.optionActive]} onPress={() => { updateService(item.id, { family: option.name, service: "", specialties: [], description: "" }); setOpenFamilyId(null); setOpenSpecialtyId(item.id); }}><Text style={[styles.optionText, item.family === option.name && styles.optionTextActive]}>{option.name}</Text><Text style={styles.optionDescription}>{option.description}</Text></TouchableOpacity>)}</ScrollView>}
           <Text style={styles.miniLabel}>ESPECIALIDADES · ELEGÍ HASTA 2</Text>
           <TouchableOpacity accessibilityRole="button" disabled={!family} accessibilityLabel={`Elegir especialidades del servicio ${index + 1}`} style={[styles.selector, !family && styles.disabledSelector]} onPress={() => family && setOpenSpecialtyId(openSpecialtyId === item.id ? null : item.id)}><Text style={[styles.selectorText, !item.specialties?.length && styles.placeholder]}>{item.specialties?.length ? item.specialties.join(" · ") : family ? "Elegí hasta 2 especialidades" : "Primero elegí una familia"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>

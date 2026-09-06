@@ -501,7 +501,7 @@ const providers = [
   },
   {
     name: "Profesional Demo",
-    trade: "Gasista matriculado",
+    trade: "Gasista",
     city: "Río Grande",
     rating: "5,0",
     jobs: 3,
@@ -527,7 +527,7 @@ const quickSearches = [
   "Costura",
   "Informática",
 ];
-type Provider = (typeof providers)[number];
+type Provider = (typeof providers)[number] & { providerId?: string; publicId?: string };
 type ProviderSort = "recent" | "jobs" | "rating";
 type FeaturedWork = {
   title: string;
@@ -547,6 +547,27 @@ type PublicProfileDetails = {
   reviews: Array<{ author: string; comment: string; rating: number }>;
 };
 type InfoPageKey = "terms" | "privacy" | "about" | "usage" | "certifications";
+
+const CONTACT_WARNING = "No está permitido compartir teléfonos de contacto o emails.";
+const timeOptions = Array.from({ length: 48 }, (_, index) => {
+  const hour = Math.floor(index / 2).toString().padStart(2, "0");
+  const minutes = index % 2 === 0 ? "00" : "30";
+  return `${hour}:${minutes}`;
+});
+const hiredStatuses = new Set([
+  "quote_accepted",
+  "payment_pending",
+  "payment_authorized",
+  "funds_held",
+  "scheduled",
+  "in_progress",
+  "completion_proposed",
+  "client_confirmation_pending",
+  "completed",
+  "funds_released",
+  "disputed",
+  "refunded",
+]);
 
 const featuredWorks: Record<string, FeaturedWork> = {
   "Martín Gómez": { title: "Reparación de calefón", description: "Diagnóstico, cambio de componentes y prueba final de funcionamiento seguro.", photoUri: "https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=900&q=75" },
@@ -678,15 +699,15 @@ function createDemoProviderProfile(displayName = "Profesional Demo"): SavedProvi
       specialties: ["Gasista"],
       description: "Reviso instalaciones domiciliarias, detecto fallas y explico las opciones de reparación antes de comenzar.",
       price: 0,
-      startTime: "",
-      endTime: "",
+      startTime: "08:00",
+      endTime: "18:00",
     },
   ];
   return {
     publicId: "LP000001",
     displayName,
     city: "Río Grande",
-    trade: "Gasista matriculado",
+    trade: "Gasista",
     diagnosticPrice: 35000,
     bio: "Mantenimiento, diagnóstico y reparaciones domiciliarias con atención clara y ordenada.",
     training: "Formación técnica en instalaciones domiciliarias. Más de seis años de experiencia en mantenimiento y detección de pérdidas.",
@@ -703,7 +724,7 @@ function createDemoProviderProfile(displayName = "Profesional Demo"): SavedProvi
     skills: services.map((item) => item.service).join(", "),
     zones: "Solo localidad",
     availability: "Solo localidad",
-    tariffItems: [{ id: "diagnostic-fee", trade: "Gasista matriculado", label: "Diagnóstico / visita técnica", unit: "visita", unitPrice: 35000, enabled: true }],
+    tariffItems: [{ id: "diagnostic-fee", trade: "Gasista", label: "Diagnóstico / visita técnica", unit: "visita", unitPrice: 35000, enabled: true }],
     published: true,
   };
 }
@@ -833,6 +854,9 @@ export default function Home() {
   const [quoteDescription, setQuoteDescription] = useState("");
   const [quoteZone, setQuoteZone] = useState("");
   const [quoteDate, setQuoteDate] = useState("");
+  const [quoteStartTime, setQuoteStartTime] = useState("08:00");
+  const [quoteEndTime, setQuoteEndTime] = useState("18:00");
+  const [quoteTimePicker, setQuoteTimePicker] = useState<"start" | "end" | null>(null);
   const [profileModal, setProfileModal] = useState(false);
   const [profileDraft, setProfileDraft] = useState<SavedProviderProfile>({
     displayName: "",
@@ -867,7 +891,9 @@ export default function Home() {
   const navigationItems =
     session?.role === "admin"
       ? ["Inicio", "Panel", "Perfil"]
-      : ["Inicio", "Trabajos", "Perfil"];
+      : session?.role === "client"
+        ? ["Inicio", "Trabajos", "Contratados", "Perfil"]
+        : ["Inicio", "Trabajos", "Perfil"];
   const isDemoSession = session?.email.endsWith("@laburapp.demo") ?? false;
 
   useEffect(() => {
@@ -915,6 +941,49 @@ export default function Home() {
       setRequested("No pudimos guardar los cambios en este dispositivo."),
     );
   }, [hydrated, session, requests, providerProfile]);
+
+  useEffect(() => {
+    if (!hydrated || !session || !supabase || isDemoSession) return;
+    let cancelled = false;
+    void (async () => {
+      const result = await supabase
+        .from("service_requests")
+        .select("id, provider_id, description, approximate_zone, desired_at, preferred_start_time, preferred_end_time, status, created_at, profiles!service_requests_provider_id_fkey(full_name), quotes(total, scope, eta, version, pricing_mode, items, notes, valid_days)")
+        .order("created_at", { ascending: false });
+      if (result.error || cancelled) return;
+      const providerIds = Array.from(new Set((result.data ?? []).map((row: any) => row.provider_id)));
+      const tradesResult = providerIds.length
+        ? await supabase.from("provider_services").select("provider_id, trade_name, position").in("provider_id", providerIds).order("position")
+        : { data: [] };
+      const trades = new Map<string, string>();
+      for (const row of tradesResult.data ?? []) if (!trades.has(row.provider_id)) trades.set(row.provider_id, row.trade_name);
+      const remoteRequests: SavedRequest[] = (result.data ?? []).map((row: any) => {
+        const profile = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
+        const quoteRows = Array.isArray(row.quotes) ? [...row.quotes].sort((a, b) => b.version - a.version) : [];
+        const quote = quoteRows[0];
+        return {
+          id: row.id,
+          providerId: row.provider_id,
+          clientEmail: session.role === "client" ? session.email : undefined,
+          provider: profile?.full_name ?? providerProfile?.displayName ?? "Profesional",
+          trade: trades.get(row.provider_id) ?? "Servicio profesional",
+          description: row.description,
+          zone: row.approximate_zone ?? "",
+          desiredAt: [row.desired_at ? new Date(row.desired_at).toLocaleDateString("es-AR") : "", row.preferred_start_time && row.preferred_end_time ? `${String(row.preferred_start_time).slice(0, 5)} a ${String(row.preferred_end_time).slice(0, 5)}` : ""].filter(Boolean).join(" · "),
+          preferredStartTime: row.preferred_start_time?.slice(0, 5),
+          preferredEndTime: row.preferred_end_time?.slice(0, 5),
+          createdAt: row.created_at,
+          status: row.status,
+          quote: quote ? {
+            amount: Number(quote.total), scope: quote.scope, eta: quote.eta ?? "", version: quote.version,
+            pricingMode: quote.pricing_mode, items: quote.items ?? [], notes: quote.notes ?? "", validDays: quote.valid_days,
+          } : undefined,
+        };
+      });
+      if (!cancelled) setRequests((current) => [...remoteRequests, ...current.filter((local) => !remoteRequests.some((remote) => remote.id === local.id))]);
+    })();
+    return () => { cancelled = true; };
+  }, [hydrated, session?.email, session?.role, isDemoSession, providerProfile?.displayName, providerProfile?.publicId]);
 
   async function submitAuth() {
     setAuthError("");
@@ -1046,22 +1115,74 @@ export default function Home() {
     }
   }
 
-  function submitQuote() {
+  async function submitQuote() {
     if (!quoteProvider) return;
     if (quoteDescription.trim().length < 10)
       return setRequested("Contanos un poco más (mínimo 10 caracteres)");
+    if (containsContactAttempt(`${quoteDescription} ${quoteZone}`))
+      return setRequested(CONTACT_WARNING);
+    if (quoteStartTime >= quoteEndTime)
+      return setRequested("El horario hasta debe ser posterior al horario desde.");
+    let requestId = `${Date.now()}`;
+    let providerId = quoteProvider.providerId;
+    let storedInDatabase = false;
+    if (supabase && !isDemoSession) {
+      const { data: userData } = await supabase.auth.getUser();
+      if (!userData.user) return setRequested("Volvé a ingresar para enviar la solicitud.");
+      if (!providerId) {
+        const providerResult = await supabase
+          .from("profiles")
+          .select("id")
+          .eq("full_name", quoteProvider.name)
+          .limit(1)
+          .maybeSingle();
+        providerId = providerResult.data?.id;
+      }
+      if (providerId) {
+        const desiredAt = /^\d{4}-\d{2}-\d{2}$/.test(quoteDate.trim())
+          ? `${quoteDate.trim()}T${quoteStartTime}:00-03:00`
+          : null;
+        const requestPayload = {
+          client_id: userData.user.id,
+          provider_id: providerId,
+          description: quoteDescription.trim(),
+          approximate_zone: quoteZone.trim() || null,
+          desired_at: desiredAt,
+          preferred_start_time: quoteStartTime,
+          preferred_end_time: quoteEndTime,
+          status: "request_sent",
+        };
+        let result = await supabase
+          .from("service_requests")
+          .insert(requestPayload)
+          .select("id")
+          .single();
+        if (result.error?.code === "PGRST204") {
+          const { preferred_start_time: _start, preferred_end_time: _end, ...compatiblePayload } = requestPayload;
+          result = await supabase.from("service_requests").insert(compatiblePayload).select("id").single();
+        }
+        if (result.error)
+          return setRequested(`No pudimos guardar la solicitud: ${result.error.message}`);
+        requestId = result.data.id;
+        storedInDatabase = true;
+      }
+    }
     const nextRequest: SavedRequest = {
-      id: `${Date.now()}`,
+      id: requestId,
+      clientEmail: session?.email,
+      providerId,
       provider: quoteProvider.name,
       trade: quoteProvider.trade,
       description: quoteDescription.trim(),
       zone: quoteZone.trim(),
-      desiredAt: quoteDate.trim(),
+      desiredAt: [quoteDate.trim(), `${quoteStartTime} a ${quoteEndTime}`].filter(Boolean).join(" · "),
+      preferredStartTime: quoteStartTime,
+      preferredEndTime: quoteEndTime,
       createdAt: new Date().toISOString(),
       status: "request_sent",
     };
     setRequests((current) => [nextRequest, ...current]);
-    void enqueueMirrorEvent("Contactos", {
+    if (!storedInDatabase) void enqueueMirrorEvent("Contactos", {
       request_id: nextRequest.id,
       client_name: session?.name ?? "",
       client_email: session?.email ?? "",
@@ -1070,12 +1191,18 @@ export default function Home() {
       channel: "solicitud_presupuesto",
       status: nextRequest.status,
       description: nextRequest.description,
+      availability_from: quoteStartTime,
+      availability_to: quoteEndTime,
+      source: "directorio_demo",
     });
     setRequested(`Solicitud creada para ${quoteProvider.name}`);
     setQuoteProvider(null);
     setQuoteDescription("");
     setQuoteZone("");
     setQuoteDate("");
+    setQuoteStartTime("08:00");
+    setQuoteEndTime("18:00");
+    setQuoteTimePicker(null);
   }
 
   function startQuote(provider: Provider) {
@@ -1083,6 +1210,13 @@ export default function Home() {
       setAuthMode("register");
       setRequested("Creá una cuenta o ingresá para solicitar un presupuesto.");
       return;
+    }
+    if (provider.name === providerProfile?.displayName) {
+      const availability = providerProfile.services?.find((service) => service.startTime && service.endTime);
+      if (availability) {
+        setQuoteStartTime(availability.startTime);
+        setQuoteEndTime(availability.endTime);
+      }
     }
     setQuoteProvider(provider);
   }
@@ -1166,7 +1300,7 @@ export default function Home() {
         .from("provider_profiles")
         .upsert({
           user_id: user.id,
-          trade_title: nextDraft.trade.trim(),
+          trade_title: [nextDraft.trade.trim(), nextDraft.secondaryTrade?.trim()].filter(Boolean).join(" · "),
           diagnostic_price: diagnosticPrice,
           bio: nextDraft.bio.trim(),
           skills_text: nextDraft.skills.trim(),
@@ -1193,13 +1327,16 @@ export default function Home() {
         .from("provider_services")
         .delete()
         .eq("provider_id", user.id);
+      const professionalItems = [nextDraft.trade.trim(), nextDraft.secondaryTrade?.trim()]
+        .filter((item): item is string => !!item)
+        .slice(0, 2);
       const { error: tradesError } = await supabase
         .from("provider_services")
-        .insert({
+        .insert(professionalItems.map((tradeName, index) => ({
           provider_id: user.id,
-          trade_name: nextDraft.trade.trim(),
-          position: 1,
-        });
+          trade_name: tradeName,
+          position: index + 1,
+        })));
       if (tradesError) {
         setProfileBusy(false);
         return setProfileError(tradesError.message);
@@ -1267,7 +1404,7 @@ export default function Home() {
     void enqueueMirrorEvent("Profesionales", {
       public_id: publishedProfile.publicId ?? "",
       user_name: publishedProfile.displayName,
-      trade: publishedProfile.trade,
+      trade: [publishedProfile.trade, publishedProfile.secondaryTrade].filter(Boolean).join(" · "),
       city: publishedProfile.city,
       coverage:
         publishedProfile.coverageAreas?.join(", ") || publishedProfile.zones,
@@ -1539,14 +1676,34 @@ export default function Home() {
     );
   }
 
-  function sendModularQuote(draft: Omit<SavedQuote, "version">) {
+  async function sendModularQuote(draft: Omit<SavedQuote, "version">) {
     if (!quoteBuilderRequestId) return;
     const request = requests.find((item) => item.id === quoteBuilderRequestId);
     try {
+      let storedInDatabase = false;
+      if (request && supabase && !isDemoSession && /^[0-9a-f-]{36}$/i.test(request.id)) {
+        const nextVersion = (request.quote?.version ?? 0) + 1;
+        const quoteResult = await supabase.from("quotes").insert({
+          request_id: request.id,
+          version: nextVersion,
+          total: draft.amount,
+          scope: draft.scope,
+          pricing_mode: draft.pricingMode ?? "itemized",
+          items: draft.items ?? [],
+          eta: draft.eta,
+          notes: draft.notes ?? "",
+          valid_days: draft.validDays ?? 7,
+          expires_at: new Date(Date.now() + (draft.validDays ?? 7) * 86400000).toISOString(),
+        });
+        if (quoteResult.error) throw quoteResult.error;
+        const statusResult = await supabase.from("service_requests").update({ status: "quote_sent" }).eq("id", request.id);
+        if (statusResult.error) throw statusResult.error;
+        storedInDatabase = true;
+      }
       updateRequest(quoteBuilderRequestId, (request) =>
         submitCustomQuote(request, draft),
       );
-      if (request)
+      if (request && !storedInDatabase)
         void enqueueMirrorEvent("Presupuestos", {
           request_id: request.id,
           provider_name: request.provider,
@@ -1669,6 +1826,21 @@ export default function Home() {
   const selectedPublicDetails = publicProfileProvider
     ? publicDetailsFor(publicProfileProvider)
     : null;
+  const currentProviderName = providerProfile?.displayName ?? session?.name ?? "";
+  const workRequests = requests.filter((request) =>
+    session?.role === "provider"
+      ? request.provider === currentProviderName
+      : session?.role === "client"
+        ? !request.clientEmail || request.clientEmail === session.email
+        : true,
+  );
+  const providerPendingRequests = workRequests.filter(
+    (request) => request.status === "request_sent" || request.status === "quote_revision_requested",
+  );
+  const hiredRequests = workRequests
+    .filter((request) => hiredStatuses.has(request.status))
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, 10);
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -1940,21 +2112,10 @@ export default function Home() {
                     </Text>
                   </View>
                   <Text style={styles.notificationCount}>
-                    {
-                      requests.filter(
-                        (request) =>
-                          request.status === "request_sent" ||
-                          request.status === "quote_revision_requested",
-                      ).length
-                    }
+                    {providerPendingRequests.length}
                   </Text>
                 </View>
-                {requests
-                  .filter(
-                    (request) =>
-                      request.status === "request_sent" ||
-                      request.status === "quote_revision_requested",
-                  )
+                {providerPendingRequests
                   .slice(0, 3)
                   .map((request) => (
                     <View
@@ -1980,11 +2141,7 @@ export default function Home() {
                       </TouchableOpacity>
                     </View>
                   ))}
-                {!requests.some(
-                  (request) =>
-                    request.status === "request_sent" ||
-                    request.status === "quote_revision_requested",
-                ) && (
+                {providerPendingRequests.length === 0 && (
                   <Text style={styles.notificationEmpty}>
                     No tenés presupuestos pendientes.
                   </Text>
@@ -2007,7 +2164,7 @@ export default function Home() {
                 <Text style={styles.simulatorButtonText}>Cargar 3 casos</Text>
               </TouchableOpacity>
             </View>
-            {requests.length === 0 ? (
+            {workRequests.length === 0 ? (
               <View style={styles.emptyPanel}>
                 <Text style={styles.emptyIcon}>🧰</Text>
                 <Text style={styles.emptyTitle}>
@@ -2025,7 +2182,7 @@ export default function Home() {
                 </TouchableOpacity>
               </View>
             ) : (
-              requests.map((request) => {
+              workRequests.map((request) => {
                 const presentation = statusPresentation[request.status];
                 const primary = primaryActionFor(request.status);
                 return (
@@ -2240,6 +2397,48 @@ export default function Home() {
               })
             )}
           </View>
+        ) : tab === "Contratados" ? (
+          <View style={styles.sectionPage}>
+            <Text style={styles.pageTitle}>Contratados</Text>
+            <Text style={styles.pageCopy}>
+              Tus últimos 10 trabajos contratados, con el profesional y el estado de cada servicio.
+            </Text>
+            {hiredRequests.length === 0 ? (
+              <View style={styles.emptyPanel}>
+                <Text style={styles.emptyIcon}>🤝</Text>
+                <Text style={styles.emptyTitle}>Todavía no contrataste trabajos</Text>
+                <Text style={styles.centerCopy}>
+                  Cuando aceptes un presupuesto, vas a encontrarlo en esta sección.
+                </Text>
+                <TouchableOpacity style={styles.secondaryButton} onPress={() => setTab("Inicio")}>
+                  <Text style={styles.secondaryText}>Buscar profesionales</Text>
+                </TouchableOpacity>
+              </View>
+            ) : hiredRequests.map((request) => {
+              const presentation = statusPresentation[request.status];
+              return (
+                <View key={`hired-${request.id}`} style={styles.workCard}>
+                  <View style={styles.workCardTop}>
+                    <View>
+                      <Text style={styles.workProvider}>{request.provider}</Text>
+                      <Text style={styles.jobId}>Trabajo #{request.id.slice(-10).toUpperCase()}</Text>
+                    </View>
+                    <Text style={[styles.workStatus, presentation.tone === "green" && styles.statusGreen, presentation.tone === "blue" && styles.statusBlue, presentation.tone === "red" && styles.statusRed]}>
+                      ● {presentation.label}
+                    </Text>
+                  </View>
+                  <Text style={styles.trade}>{request.trade}</Text>
+                  <Text style={styles.workDescription}>{request.description}</Text>
+                  {!!request.zone && <Text style={styles.workMeta}>Zona: {request.zone}</Text>}
+                  {!!request.desiredAt && <Text style={styles.workMeta}>Disponibilidad: {request.desiredAt}</Text>}
+                  {!!request.quote && <Text style={styles.hiredAmount}>Presupuesto: ${request.quote.amount.toLocaleString("es-AR")}</Text>}
+                  <TouchableOpacity accessibilityRole="button" onPress={() => setChatRequestId(request.id)}>
+                    <Text style={styles.cardLink}>Abrir conversación</Text>
+                  </TouchableOpacity>
+                </View>
+              );
+            })}
+          </View>
         ) : tab === "Panel" ? (
           <View style={styles.sectionPage}>
             <Text style={styles.pageTitle}>Panel de administración</Text>
@@ -2312,7 +2511,7 @@ export default function Home() {
             ) : (
               <>
                 <View style={styles.accountCard}>
-                  {providerProfile?.photoUri ? (
+                  {session.role === "provider" && providerProfile?.photoUri ? (
                     <Image
                       source={{ uri: providerProfile.photoUri }}
                       style={styles.profilePhoto}
@@ -2327,7 +2526,7 @@ export default function Home() {
                   <View style={styles.accountBody}>
                     <View style={styles.verifiedNameRow}>
                       <Text style={styles.accountName}>{session.name}</Text>
-                      {providerProfile?.verified && (
+                      {session.role === "provider" && providerProfile?.verified && (
                         <Text
                           accessibilityLabel="Perfil verificado"
                           style={styles.verifiedIcon}
@@ -2335,7 +2534,7 @@ export default function Home() {
                           ✓
                         </Text>
                       )}
-                      {!!providerProfile?.diagnosticPrice && (
+                      {session.role === "provider" && !!providerProfile?.diagnosticPrice && (
                         <Text style={styles.diagnosticBadge}>
                           Diagnóstico desde $
                           {providerProfile.diagnosticPrice.toLocaleString(
@@ -2353,7 +2552,7 @@ export default function Home() {
                           : "Guardado en este dispositivo"}
                     </Text>
                   </View>
-                  {providerProfile?.published && (
+                  {session.role === "provider" && providerProfile?.published && (
                     <TouchableOpacity
                       accessibilityRole="button"
                       style={styles.followersButton}
@@ -2366,7 +2565,7 @@ export default function Home() {
                     </TouchableOpacity>
                   )}
                 </View>
-                {followersVisible && providerProfile?.published && (
+                {session.role === "provider" && followersVisible && providerProfile?.published && (
                   <View style={styles.followersPanel}>
                     <View style={styles.workCardTop}>
                       <Text style={styles.panelEyebrow}>SEGUIDORES</Text>
@@ -2415,7 +2614,7 @@ export default function Home() {
                       </View>
                     </View>
                     <Text style={styles.providerTrade}>
-                      {providerProfile.trade}
+                      {[providerProfile.trade, providerProfile.secondaryTrade].filter(Boolean).join(" · ")}
                     </Text>
                     <Text style={styles.workDescription}>
                       {providerProfile.bio}
@@ -2537,7 +2736,12 @@ export default function Home() {
                         <Text style={styles.panelEyebrow}>
                           TRABAJOS REALIZADOS
                         </Text>
-                        <Text style={styles.servicePlanBadge}>3 GRATIS</Text>
+                        <View style={styles.providerHeaderActions}>
+                          <Text style={styles.servicePlanBadge}>3 GRATIS</Text>
+                          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Editar trabajos realizados" style={styles.editProfileButton} onPress={openPortfolioEditor}>
+                            <Text style={styles.editProfileButtonText}>EDITAR</Text>
+                          </TouchableOpacity>
+                        </View>
                       </View>
                       {providerProfile.portfolioWorks?.length ? (
                         providerProfile.portfolioWorks.map((work) => (
@@ -2570,17 +2774,6 @@ export default function Home() {
                           </Text>
                         </View>
                       )}
-                      <TouchableOpacity
-                        accessibilityRole="button"
-                        style={styles.portfolioEditButton}
-                        onPress={openPortfolioEditor}
-                      >
-                        <Text style={styles.portfolioEditButtonText}>
-                          {providerProfile.portfolioWorks?.length
-                            ? "Editar trabajos realizados"
-                            : "Agregar trabajos realizados"}
-                        </Text>
-                      </TouchableOpacity>
                     </View>
                   </View>
                 ) : session.role === "client" || session.role === "provider" ? (
@@ -3038,18 +3231,34 @@ export default function Home() {
             <TextInput
               value={quoteDate}
               onChangeText={setQuoteDate}
-              placeholder="Fecha o franja horaria (opcional)"
+              placeholder="Fecha estimada: AAAA-MM-DD (opcional)"
               placeholderTextColor="#71818B"
               style={styles.modalInput}
             />
+            <Text style={styles.modalFieldLabel}>Disponibilidad horaria del prestador</Text>
+            <View style={styles.quoteTimeRow}>
+              {(["start", "end"] as const).map((field) => {
+                const value = field === "start" ? quoteStartTime : quoteEndTime;
+                return <View key={field} style={styles.quoteTimeField}>
+                  <Text style={styles.quoteTimeLabel}>{field === "start" ? "Desde" : "Hasta"}</Text>
+                  <TouchableOpacity accessibilityRole="button" style={styles.quoteTimeButton} onPress={() => setQuoteTimePicker(quoteTimePicker === field ? null : field)}>
+                    <Text style={styles.quoteTimeValue}>{value}</Text><Text style={styles.dropdownChevron}>⌄</Text>
+                  </TouchableOpacity>
+                  {quoteTimePicker === field && <ScrollView nestedScrollEnabled style={styles.quoteTimeOptions}>
+                    {timeOptions.map((time) => <TouchableOpacity key={`${field}-${time}`} style={[styles.quoteTimeOption, value === time && styles.dropdownOptionActive]} onPress={() => { field === "start" ? setQuoteStartTime(time) : setQuoteEndTime(time); setQuoteTimePicker(null); }}>
+                      <Text style={[styles.dropdownOptionText, value === time && styles.dropdownOptionTextActive]}>{time}</Text>
+                    </TouchableOpacity>)}
+                  </ScrollView>}
+                </View>;
+              })}
+            </View>
             <Text style={styles.privacyHint}>
-              No compartas teléfono, correo ni dirección exacta antes de
-              contratar.
+              {CONTACT_WARNING}
             </Text>
             <TouchableOpacity
               accessibilityRole="button"
               style={styles.modalPrimary}
-              onPress={submitQuote}
+              onPress={() => void submitQuote()}
             >
               <Text style={styles.modalPrimaryText}>Enviar solicitud</Text>
             </TouchableOpacity>
@@ -3123,8 +3332,7 @@ export default function Home() {
               style={[styles.modalInput, styles.chatInput]}
             />
             <Text style={styles.privacyHint}>
-              LaburApp bloquea teléfonos, correos, redes y enlaces para proteger
-              la contratación.
+              {CONTACT_WARNING}
             </Text>
             {!!chatError && <Text style={styles.modalError}>{chatError}</Text>}
             <TouchableOpacity
@@ -3623,6 +3831,8 @@ function createStyles(colors: ThemeColors) {
       fontWeight: "900",
       marginTop: 12,
     },
+    jobId: { color: colors.stone, fontSize: 9, marginTop: 3, letterSpacing: 0.35 },
+    hiredAmount: { color: colors.green, fontSize: 13, fontWeight: "900", marginTop: 10, marginBottom: 10 },
     workDescription: { color: colors.stone, lineHeight: 20, marginTop: 10 },
     workMeta: { color: colors.navy, fontSize: 13, marginTop: 7 },
     nextStep: {
@@ -4279,6 +4489,14 @@ function createStyles(colors: ThemeColors) {
       marginBottom: 10,
       backgroundColor: colors.input,
     },
+    modalFieldLabel: { color: colors.navy, fontSize: 12, fontWeight: "900", marginBottom: 7 },
+    quoteTimeRow: { flexDirection: "row", gap: 9, marginBottom: 10, zIndex: 4 },
+    quoteTimeField: { flex: 1 },
+    quoteTimeLabel: { color: colors.stone, fontSize: 10, fontWeight: "800", marginBottom: 5 },
+    quoteTimeButton: { minHeight: 46, borderWidth: 1, borderColor: colors.line, borderRadius: 11, paddingHorizontal: 12, backgroundColor: colors.input, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+    quoteTimeValue: { color: colors.navy, fontSize: 14, fontWeight: "900" },
+    quoteTimeOptions: { maxHeight: 160, borderWidth: 1, borderColor: colors.line, borderRadius: 10, backgroundColor: colors.surface, marginTop: 4 },
+    quoteTimeOption: { minHeight: 37, justifyContent: "center", paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: colors.line },
     multiline: { minHeight: 88, paddingTop: 13, textAlignVertical: "top" },
     modalLabel: {
       color: colors.navy,
