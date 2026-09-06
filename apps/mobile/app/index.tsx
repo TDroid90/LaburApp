@@ -16,6 +16,7 @@ import {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
+import * as ImageManipulator from "expo-image-manipulator";
 import QRCode from "react-native-qrcode-svg";
 import { containsContactAttempt, containsPriceAttempt, reviewIsEligible } from "@laburapp/shared";
 import { PortfolioEditor } from "../components/PortfolioEditor";
@@ -37,6 +38,7 @@ import {
   SavedProviderProfile,
   SavedQuote,
   SavedRequest,
+  SavedRequestPhoto,
   SavedSession,
 } from "../lib/local-store";
 import { enqueueMirrorEvent, flushMirrorEvents } from "../lib/mirror-events";
@@ -577,6 +579,14 @@ type PublicProfileDetails = {
   reviews: Array<{ author: string; comment: string; rating: number }>;
 };
 type InfoPageKey = "terms" | "privacy" | "about" | "usage" | "certifications";
+type RequestReceipt = {
+  id: string;
+  provider: string;
+  photoCount: number;
+  sheetSynced: boolean;
+  driveSynced: boolean;
+  demo: boolean;
+};
 
 const CONTACT_WARNING = "No está permitido compartir teléfonos de contacto o emails.";
 const FREE_WEEKLY_REQUEST_LIMIT = 3;
@@ -790,6 +800,8 @@ function createDemoProviderProfile(displayName = "Profesional Demo"): SavedProvi
     skills: services.map((item) => item.service).join(", "),
     zones: "Solo localidad",
     availability: "Solo localidad",
+    availabilityStart: "08:00",
+    availabilityEnd: "18:00",
     tariffItems: [{ id: "diagnostic-fee", trade: "Gasista", label: "Diagnóstico / visita técnica", unit: "visita", unitPrice: 35000, enabled: true }],
     published: true,
   };
@@ -849,6 +861,7 @@ const cityChoices = [
   "Ushuaia",
 ];
 const driveProfessionalsFolderId = "1YyLePscAWsVX8O9aIKaQTaMHSPpMq3ZD";
+const driveProjectRootFolderId = "1Y8lNj4zpDXRA_ASUn0GCRmbtI9TE2QfI";
 
 function safeFolderPart(value: string) {
   return (
@@ -922,7 +935,13 @@ export default function Home() {
   const [quoteDate, setQuoteDate] = useState("");
   const [quoteStartTime, setQuoteStartTime] = useState("08:00");
   const [quoteEndTime, setQuoteEndTime] = useState("18:00");
+  const [quoteAvailabilityStart, setQuoteAvailabilityStart] = useState("08:00");
+  const [quoteAvailabilityEnd, setQuoteAvailabilityEnd] = useState("18:00");
   const [quoteTimePicker, setQuoteTimePicker] = useState<"start" | "end" | null>(null);
+  const [quotePhotos, setQuotePhotos] = useState<SavedRequestPhoto[]>([]);
+  const [quoteBusy, setQuoteBusy] = useState(false);
+  const [quoteError, setQuoteError] = useState("");
+  const [requestReceipt, setRequestReceipt] = useState<RequestReceipt | null>(null);
   const [profileModal, setProfileModal] = useState(false);
   const [profileDraft, setProfileDraft] = useState<SavedProviderProfile>({
     displayName: "",
@@ -1036,7 +1055,7 @@ export default function Home() {
       }
       const result = await supabase
         .from("service_requests")
-        .select("id, provider_id, description, approximate_zone, desired_at, preferred_start_time, preferred_end_time, status, created_at, expires_at, completion_verified_at, profiles!service_requests_provider_id_fkey(full_name), quotes(total, scope, eta, version, pricing_mode, items, notes, valid_days, expires_at), jobs(id, completion_verified_at, updated_at), messages(id, sender_id, body, created_at, expires_at)")
+        .select("id, provider_id, description, approximate_zone, desired_at, preferred_start_time, preferred_end_time, status, created_at, expires_at, completion_verified_at, profiles!service_requests_provider_id_fkey(full_name), quotes(total, scope, eta, version, pricing_mode, items, notes, valid_days, expires_at), jobs(id, completion_verified_at, updated_at), messages(id, sender_id, body, created_at, expires_at), client_request_attachments(id, storage_path, position, drive_sync_status)")
         .gte("created_at", new Date(Date.now() - CLIENT_HISTORY_MS).toISOString())
         .order("created_at", { ascending: false });
       if (result.error || cancelled) return;
@@ -1046,7 +1065,7 @@ export default function Home() {
         : { data: [] };
       const trades = new Map<string, string>();
       for (const row of tradesResult.data ?? []) if (!trades.has(row.provider_id)) trades.set(row.provider_id, row.trade_name);
-      const remoteRequests: SavedRequest[] = (result.data ?? []).map((row: any) => {
+      const remoteRequests: SavedRequest[] = await Promise.all((result.data ?? []).map(async (row: any) => {
         const profile = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
         const quoteRows = Array.isArray(row.quotes) ? [...row.quotes].sort((a, b) => b.version - a.version) : [];
         const quote = quoteRows[0];
@@ -1062,6 +1081,19 @@ export default function Home() {
             createdAt: message.created_at,
             expiresAt: message.expires_at,
           }));
+        const attachmentRows = Array.isArray(row.client_request_attachments)
+          ? [...row.client_request_attachments].sort((a, b) => a.position - b.position)
+          : [];
+        const attachments: SavedRequestPhoto[] = [];
+        for (const attachment of attachmentRows) {
+          const signed = await supabase!.storage.from("request-photos").createSignedUrl(attachment.storage_path, 5 * 24 * 60 * 60);
+          if (signed.data?.signedUrl) attachments.push({
+            id: attachment.id,
+            uri: signed.data.signedUrl,
+            storagePath: attachment.storage_path,
+            driveSyncStatus: attachment.drive_sync_status,
+          });
+        }
         return {
           id: row.id,
           jobId: job?.id,
@@ -1079,13 +1111,14 @@ export default function Home() {
           completedAt: job?.updated_at,
           completionVerifiedAt: row.completion_verified_at ?? job?.completion_verified_at,
           status: row.status,
+          attachments,
           messages: activeMessages,
           quote: quote ? {
             amount: Number(quote.total), scope: quote.scope, eta: quote.eta ?? "", version: quote.version,
             pricingMode: quote.pricing_mode, items: quote.items ?? [], notes: quote.notes ?? "", validDays: quote.valid_days, expiresAt: quote.expires_at,
           } : undefined,
         };
-      });
+      }));
       if (!cancelled) setRequests((current) => [...remoteRequests, ...current.filter((local) => !remoteRequests.some((remote) => remote.id === local.id))]);
     })();
     return () => { cancelled = true; };
@@ -1230,8 +1263,44 @@ export default function Home() {
     }
   }
 
+  async function pickQuotePhotos() {
+    const remaining = 3 - quotePhotos.length;
+    if (remaining <= 0) return setQuoteError("Podés adjuntar hasta 3 fotos.");
+    setQuoteError("");
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsMultipleSelection: true,
+        selectionLimit: remaining,
+        quality: 0.82,
+      });
+      if (result.canceled) return;
+      const optimizedPhotos: SavedRequestPhoto[] = [];
+      for (const asset of result.assets.slice(0, remaining)) {
+        const resize = asset.width >= asset.height
+          ? { width: Math.min(asset.width, 1280) }
+          : { height: Math.min(asset.height, 1280) };
+        const optimized = await ImageManipulator.manipulateAsync(
+          asset.uri,
+          [{ resize }],
+          { compress: 0.62, format: ImageManipulator.SaveFormat.JPEG },
+        );
+        optimizedPhotos.push({
+          id: `request-photo-${Date.now()}-${optimizedPhotos.length}`,
+          uri: optimized.uri,
+          width: optimized.width,
+          height: optimized.height,
+        });
+      }
+      setQuotePhotos((current) => [...current, ...optimizedPhotos].slice(0, 3));
+    } catch {
+      setQuoteError("No pudimos preparar las fotos. Probá nuevamente con imágenes JPG o PNG.");
+    }
+  }
+
   async function submitQuote() {
     if (!quoteProvider) return;
+    setQuoteError("");
     const weeklyRequests = requests.filter(
       (request) =>
         (!request.clientEmail || request.clientEmail === session?.email) &&
@@ -1239,31 +1308,38 @@ export default function Home() {
         request.status !== "cancelled",
     ).length;
     if (clientPlan === "free" && weeklyRequests >= FREE_WEEKLY_REQUEST_LIMIT)
-      return setRequested(
+      return setQuoteError(
         "Ya usaste tus 3 solicitudes gratuitas de esta semana. Para pedir más necesitás la suscripción Cliente Plus.",
       );
     if (quoteDescription.trim().length < 10)
-      return setRequested("Contanos un poco más (mínimo 10 caracteres)");
+      return setQuoteError("Contanos un poco más (mínimo 10 caracteres).");
     if (containsContactAttempt(`${quoteDescription} ${quoteZone}`))
-      return setRequested(CONTACT_WARNING);
+      return setQuoteError(CONTACT_WARNING);
     if (quoteStartTime >= quoteEndTime)
-      return setRequested("El horario hasta debe ser posterior al horario desde.");
+      return setQuoteError("El horario hasta debe ser posterior al horario desde.");
+    if (quoteStartTime < quoteAvailabilityStart || quoteEndTime > quoteAvailabilityEnd)
+      return setQuoteError(`Elegí un horario dentro de la disponibilidad de ${quoteAvailabilityStart} a ${quoteAvailabilityEnd}.`);
+    setQuoteBusy(true);
     let requestId = `${Date.now()}`;
     let providerId = quoteProvider.providerId;
     let storedInDatabase = false;
-    if (supabase && !isDemoSession) {
-      const { data: userData } = await supabase.auth.getUser();
-      if (!userData.user) return setRequested("Volvé a ingresar para enviar la solicitud.");
-      if (!providerId) {
-        const providerResult = await supabase
-          .from("profiles")
-          .select("id")
-          .eq("full_name", quoteProvider.name)
-          .limit(1)
-          .maybeSingle();
-        providerId = providerResult.data?.id;
-      }
-      if (providerId) {
+    let storedPhotos = [...quotePhotos];
+    let driveSynced = quotePhotos.length === 0;
+    let sheetSynced = false;
+    try {
+      if (supabase && !isDemoSession) {
+        const { data: userData } = await supabase.auth.getUser();
+        if (!userData.user) throw new Error("Volvé a ingresar para enviar la solicitud.");
+        if (!providerId) {
+          const providerResult = await supabase
+            .from("profiles")
+            .select("id")
+            .eq("full_name", quoteProvider.name)
+            .limit(1)
+            .maybeSingle();
+          providerId = providerResult.data?.id;
+        }
+        if (!providerId) throw new Error("No encontramos el perfil publicado de este profesional.");
         const desiredAt = /^\d{4}-\d{2}-\d{2}$/.test(quoteDate.trim())
           ? `${quoteDate.trim()}T${quoteStartTime}:00-03:00`
           : null;
@@ -1286,69 +1362,173 @@ export default function Home() {
           const { preferred_start_time: _start, preferred_end_time: _end, ...compatiblePayload } = requestPayload;
           result = await supabase.from("service_requests").insert(compatiblePayload).select("id").single();
         }
-        if (result.error)
-          return setRequested(
-            result.error.message.includes("FREE_WEEKLY_REQUEST_LIMIT")
-              ? "Ya usaste tus 3 solicitudes gratuitas de esta semana. Para pedir más necesitás Cliente Plus."
-              : `No pudimos guardar la solicitud: ${result.error.message}`,
-          );
+        if (result.error) throw new Error(
+          result.error.message.includes("FREE_WEEKLY_REQUEST_LIMIT")
+            ? "Ya usaste tus 3 solicitudes gratuitas de esta semana. Para pedir más necesitás Cliente Plus."
+            : `No pudimos guardar la solicitud: ${result.error.message}`,
+        );
         requestId = result.data.id;
         storedInDatabase = true;
+
+        if (quotePhotos.length) {
+          const clientProfile = await supabase
+            .from("profiles")
+            .select("public_id, full_name")
+            .eq("id", userData.user.id)
+            .single();
+          const clientFolder = `${safeFolderPart(String(clientProfile.data?.public_id ?? userData.user.id.slice(0, 8)))}_${safeFolderPart(clientProfile.data?.full_name ?? session?.name ?? "Cliente")}`;
+          const requestFolder = `Clientes/${clientFolder}/Solicitudes/SOL_${requestId.slice(0, 8).toUpperCase()}`;
+          const uploadedPhotos: SavedRequestPhoto[] = [];
+          for (let index = 0; index < quotePhotos.length; index += 1) {
+            const photo = quotePhotos[index];
+            try {
+              const response = await fetch(photo.uri);
+              const blob = await response.blob();
+              const storagePath = `${userData.user.id}/${requestId}/foto-${index + 1}.jpg`;
+              const upload = await supabase.storage.from("request-photos").upload(storagePath, blob, {
+                contentType: "image/jpeg",
+                upsert: true,
+              });
+              if (upload.error) throw upload.error;
+              const attachment = await supabase.from("client_request_attachments").insert({
+                request_id: requestId,
+                client_id: userData.user.id,
+                storage_path: storagePath,
+                position: index + 1,
+                image_width: photo.width ?? 1280,
+                image_height: photo.height ?? 1280,
+                size_bytes: blob.size,
+              });
+              if (attachment.error) throw attachment.error;
+              const outbox = await supabase.from("client_drive_media_outbox").insert({
+                client_id: userData.user.id,
+                request_id: requestId,
+                source_storage_path: storagePath,
+                target_root_folder_id: driveProjectRootFolderId,
+                target_relative_path: requestFolder,
+                target_file_name: `SOL_${requestId.slice(0, 8).toUpperCase()}_foto_${index + 1}.jpg`,
+              });
+              if (outbox.error) throw outbox.error;
+              const signed = await supabase.storage.from("request-photos").createSignedUrl(storagePath, 5 * 24 * 60 * 60);
+              uploadedPhotos.push({ ...photo, uri: signed.data?.signedUrl ?? photo.uri, storagePath, driveSyncStatus: "pending" });
+            } catch {
+              // La solicitud queda guardada aunque una foto falle; el recibo lo informa.
+            }
+          }
+          storedPhotos = uploadedPhotos;
+          if (uploadedPhotos.length) {
+            const authState = await supabase.auth.getSession();
+            const accessToken = authState.data.session?.access_token;
+            if (accessToken) {
+              const appUrl = process.env.EXPO_PUBLIC_APP_URL ?? "https://laburapp-iota.vercel.app";
+              const syncResponse = await fetch(Platform.OS === "web" ? "/api/drive-sync" : `${appUrl}/api/drive-sync`, {
+                method: "POST",
+                headers: { authorization: `Bearer ${accessToken}` },
+              });
+              if (syncResponse.ok) {
+                const syncResult = await syncResponse.json();
+                driveSynced = Number(syncResult.failed ?? 0) === 0;
+              }
+            }
+          }
+        }
       }
+
+      const nextRequest: SavedRequest = {
+        id: requestId,
+        clientEmail: session?.email,
+        providerId,
+        provider: quoteProvider.name,
+        trade: quoteProvider.trade,
+        description: quoteDescription.trim(),
+        zone: quoteZone.trim(),
+        desiredAt: [quoteDate.trim(), `${quoteStartTime} a ${quoteEndTime}`].filter(Boolean).join(" · "),
+        preferredStartTime: quoteStartTime,
+        preferredEndTime: quoteEndTime,
+        createdAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + REQUEST_LIFETIME_MS).toISOString(),
+        status: "request_sent",
+        attachments: storedPhotos,
+      };
+      setRequests((current) => [nextRequest, ...current]);
+      if (storedInDatabase) {
+        const mirrorResult = await enqueueMirrorEvent("Contactos", {
+          request_id: nextRequest.id,
+          client_name: session?.name ?? "",
+          client_email: session?.email ?? "",
+          provider_name: nextRequest.provider,
+          trade: nextRequest.trade,
+          channel: "solicitud_presupuesto",
+          status: nextRequest.status,
+          description: nextRequest.description,
+          availability_from: quoteStartTime,
+          availability_to: quoteEndTime,
+          photos: storedPhotos.length,
+          source: "supabase",
+        });
+        sheetSynced = mirrorResult.sent > 0;
+      }
+      setRequestReceipt({
+        id: requestId,
+        provider: quoteProvider.name,
+        photoCount: storedPhotos.length,
+        sheetSynced,
+        driveSynced,
+        demo: !storedInDatabase,
+      });
+      setQuoteProvider(null);
+      setQuoteDescription("");
+      setQuoteZone("");
+      setQuoteDate("");
+      setQuotePhotos([]);
+      setQuoteStartTime("08:00");
+      setQuoteEndTime("18:00");
+      setQuoteTimePicker(null);
+    } catch (error) {
+      setQuoteError(error instanceof Error ? error.message : "No pudimos enviar la solicitud.");
+    } finally {
+      setQuoteBusy(false);
     }
-    const nextRequest: SavedRequest = {
-      id: requestId,
-      clientEmail: session?.email,
-      providerId,
-      provider: quoteProvider.name,
-      trade: quoteProvider.trade,
-      description: quoteDescription.trim(),
-      zone: quoteZone.trim(),
-      desiredAt: [quoteDate.trim(), `${quoteStartTime} a ${quoteEndTime}`].filter(Boolean).join(" · "),
-      preferredStartTime: quoteStartTime,
-      preferredEndTime: quoteEndTime,
-      createdAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + REQUEST_LIFETIME_MS).toISOString(),
-      status: "request_sent",
-    };
-    setRequests((current) => [nextRequest, ...current]);
-    if (!storedInDatabase) void enqueueMirrorEvent("Contactos", {
-      request_id: nextRequest.id,
-      client_name: session?.name ?? "",
-      client_email: session?.email ?? "",
-      provider_name: nextRequest.provider,
-      trade: nextRequest.trade,
-      channel: "solicitud_presupuesto",
-      status: nextRequest.status,
-      description: nextRequest.description,
-      availability_from: quoteStartTime,
-      availability_to: quoteEndTime,
-      source: "directorio_demo",
-    });
-    setRequested(`Solicitud creada para ${quoteProvider.name}`);
-    setQuoteProvider(null);
-    setQuoteDescription("");
-    setQuoteZone("");
-    setQuoteDate("");
-    setQuoteStartTime("08:00");
-    setQuoteEndTime("18:00");
-    setQuoteTimePicker(null);
   }
 
-  function startQuote(provider: Provider) {
+  async function startQuote(provider: Provider) {
     if (!session) {
       setAuthMode("register");
       setRequested("Creá una cuenta o ingresá para solicitar un presupuesto.");
       return;
     }
+    setQuoteError("");
+    setQuotePhotos([]);
+    let availabilityStart = "08:00";
+    let availabilityEnd = "18:00";
     if (provider.name === providerProfile?.displayName) {
       const availability = providerProfile.services?.find((service) => service.startTime && service.endTime);
-      if (availability) {
-        setQuoteStartTime(availability.startTime);
-        setQuoteEndTime(availability.endTime);
+      availabilityStart = providerProfile.availabilityStart ?? availability?.startTime ?? availabilityStart;
+      availabilityEnd = providerProfile.availabilityEnd ?? availability?.endTime ?? availabilityEnd;
+    }
+    let resolvedProvider = provider;
+    if (supabase && !isDemoSession) {
+      let providerId = provider.providerId;
+      if (!providerId) {
+        const profileLookup = await supabase.from("profiles").select("id").eq("full_name", provider.name).limit(1).maybeSingle();
+        providerId = profileLookup.data?.id;
+      }
+      if (providerId) {
+        const availabilityLookup = await supabase
+          .from("provider_profiles")
+          .select("availability_start, availability_end")
+          .eq("user_id", providerId)
+          .maybeSingle();
+        availabilityStart = String(availabilityLookup.data?.availability_start ?? availabilityStart).slice(0, 5);
+        availabilityEnd = String(availabilityLookup.data?.availability_end ?? availabilityEnd).slice(0, 5);
+        resolvedProvider = { ...provider, providerId };
       }
     }
-    setQuoteProvider(provider);
+    setQuoteAvailabilityStart(availabilityStart);
+    setQuoteAvailabilityEnd(availabilityEnd);
+    setQuoteStartTime(availabilityStart);
+    setQuoteEndTime(availabilityEnd);
+    setQuoteProvider(resolvedProvider);
   }
 
   function openProviderProfile() {
@@ -1440,6 +1620,8 @@ export default function Home() {
             ? nextDraft.coverageAreas
             : [nextDraft.city],
           availability: nextDraft.availability.trim(),
+          availability_start: nextDraft.availabilityStart ?? services[0]?.startTime ?? "08:00",
+          availability_end: nextDraft.availabilityEnd ?? services[0]?.endTime ?? "18:00",
           published: true,
         });
       if (profileResult.error || providerResult.error) {
@@ -1483,6 +1665,8 @@ export default function Home() {
           label: "Diagnóstico / visita técnica",
           unit: "visita",
           unit_price: diagnosticPrice,
+          availability_start: nextDraft.availabilityStart ?? services[0]?.startTime ?? "08:00",
+          availability_end: nextDraft.availabilityEnd ?? services[0]?.endTime ?? "18:00",
           slot_position: 1,
           active: true,
         });
@@ -1847,6 +2031,10 @@ export default function Home() {
         if (result.error) throw result.error;
         token = String(result.data);
       }
+      updateRequest(request.id, (current) => ({
+        ...current,
+        status: "client_confirmation_pending",
+      }));
       setCompletionQr({ requestId: request.id, value: `laburapp://complete?token=${encodeURIComponent(token)}` });
     } catch {
       setRequested("No pudimos generar el QR. El trabajo debe estar coordinado o en curso.");
@@ -1958,7 +2146,7 @@ export default function Home() {
     setChatError("");
     if (!chatRequestId || !body)
       return setChatError("Escribí un mensaje para enviarlo.");
-    if (containsContactAttempt(body))
+    if (containsContactAttempt(body, [chatRequestId]))
       return setChatError(
         "Por seguridad, no compartas teléfonos, correos, redes ni enlaces antes de contratar.",
       );
@@ -2183,6 +2371,7 @@ export default function Home() {
               resizeMode="contain"
               style={[
                 styles.wordmarkLogo,
+                compactHeader && styles.wordmarkLogoCompact,
                 !compactHeader && styles.wordmarkLogoWide,
               ]}
             />
@@ -2207,18 +2396,18 @@ export default function Home() {
               signedInName ? setTab("Perfil") : setAuthMode("login")
             }
           >
-            <Text style={styles.loginButtonText}>{authButtonLabel}</Text>
+            <Text numberOfLines={1} style={[styles.loginButtonText, compactHeader && styles.loginButtonTextCompact]}>{authButtonLabel}</Text>
           </TouchableOpacity>
         </View>
       </View>
       <ScrollView
-        contentContainerStyle={styles.content}
+        contentContainerStyle={[styles.content, compactHeader && styles.contentCompact]}
         keyboardShouldPersistTaps="handled"
       >
         {tab === "Inicio" ? (
           <>
-            <View style={styles.hero}>
-              <Text style={styles.heroTitle}>
+            <View style={[styles.hero, compactHeader && styles.heroCompact]}>
+              <Text style={[styles.heroTitle, compactHeader && styles.heroTitleCompact]}>
                 Encontrá a quien sabe hacerlo.
               </Text>
               <Text style={styles.heroCopy}>
@@ -2260,14 +2449,14 @@ export default function Home() {
                 ))}
               </View>
             </View>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>
+            <View style={[styles.sectionHeader, compactHeader && styles.sectionHeaderCompact]}>
+              <Text style={[styles.sectionTitle, compactHeader && styles.sectionTitleCompact]}>
                 {query || cityFilter !== "Todas"
                   ? `Resultados · ${filtered.length}`
                   : `Profesionales cerca tuyo · ${filtered.length}`}
               </Text>
               <View
-                style={styles.compactFilters}
+                style={[styles.compactFilters, compactHeader && styles.compactFiltersMobile]}
                 accessibilityLabel="Filtros de profesionales"
               >
                 <View style={styles.dropdownWrap}>
@@ -2278,7 +2467,7 @@ export default function Home() {
                     onPress={() =>
                       setOpenFilter(openFilter === "sort" ? null : "sort")
                     }
-                    style={styles.dropdownButton}
+                    style={[styles.dropdownButton, compactHeader && styles.dropdownButtonCompact]}
                   >
                     <Text numberOfLines={1} style={styles.dropdownButtonText}>
                       Ordenar
@@ -2330,7 +2519,7 @@ export default function Home() {
                     onPress={() =>
                       setOpenFilter(openFilter === "city" ? null : "city")
                     }
-                    style={styles.dropdownButton}
+                    style={[styles.dropdownButton, compactHeader && styles.dropdownButtonCompact]}
                   >
                     <Text numberOfLines={1} style={styles.dropdownButtonText}>
                       Ciudad
@@ -2373,7 +2562,7 @@ export default function Home() {
               const featuredWork = featuredWorkFor(provider);
               const expanded = expandedProviderName === provider.name;
               const initials = provider.name.split(" ").map((part) => part[0]).join("");
-              return <View key={provider.name} style={[styles.card, expanded && styles.cardExpanded]}>
+              return <View key={provider.name} style={[styles.card, compactHeader && styles.cardCompact, expanded && styles.cardExpanded]}>
                 <TouchableOpacity accessibilityRole="link" accessibilityLabel={`Abrir perfil profesional completo de ${provider.name}`} style={styles.cardOpenArea} onPress={() => setPublicProfileProvider(provider)}>
                   <View style={styles.avatar}>
                     <Text style={styles.avatarText}>{initials}</Text>
@@ -2544,6 +2733,19 @@ export default function Home() {
                     <Text style={styles.workDescription}>
                       {request.description}
                     </Text>
+                    {!!request.attachments?.length && (
+                      <View style={styles.requestAttachmentRow}>
+                        {request.attachments.slice(0, 3).map((photo, index) => (
+                          <Image
+                            key={photo.id}
+                            accessibilityLabel={`Foto ${index + 1} de la solicitud`}
+                            source={{ uri: photo.uri }}
+                            resizeMode="cover"
+                            style={styles.requestAttachmentPhoto}
+                          />
+                        ))}
+                      </View>
+                    )}
                     {!!request.zone && (
                       <Text style={styles.workMeta}>Zona: {request.zone}</Text>
                     )}
@@ -3614,6 +3816,12 @@ export default function Home() {
             >
               <Text style={styles.modalCloseText}>×</Text>
             </TouchableOpacity>
+            <ScrollView
+              style={styles.quoteModalScroll}
+              contentContainerStyle={styles.quoteModalContent}
+              keyboardShouldPersistTaps="handled"
+              nestedScrollEnabled
+            >
             <Text style={styles.modalTitle}>Solicitar presupuesto</Text>
             <Text style={styles.modalCopy}>
               {quoteProvider
@@ -3643,6 +3851,7 @@ export default function Home() {
               style={styles.modalInput}
             />
             <Text style={styles.modalFieldLabel}>Disponibilidad horaria del prestador</Text>
+            <Text style={styles.availabilityHint}>Disponible de {quoteAvailabilityStart} a {quoteAvailabilityEnd}</Text>
             <View style={styles.quoteTimeRow}>
               {(["start", "end"] as const).map((field) => {
                 const value = field === "start" ? quoteStartTime : quoteEndTime;
@@ -3652,23 +3861,57 @@ export default function Home() {
                     <Text style={styles.quoteTimeValue}>{value}</Text><Text style={styles.dropdownChevron}>⌄</Text>
                   </TouchableOpacity>
                   {quoteTimePicker === field && <ScrollView nestedScrollEnabled style={styles.quoteTimeOptions}>
-                    {timeOptions.map((time) => <TouchableOpacity key={`${field}-${time}`} style={[styles.quoteTimeOption, value === time && styles.dropdownOptionActive]} onPress={() => { field === "start" ? setQuoteStartTime(time) : setQuoteEndTime(time); setQuoteTimePicker(null); }}>
+                    {timeOptions.filter((time) => field === "start" ? time >= quoteAvailabilityStart && time < quoteEndTime : time > quoteStartTime && time <= quoteAvailabilityEnd).map((time) => <TouchableOpacity key={`${field}-${time}`} style={[styles.quoteTimeOption, value === time && styles.dropdownOptionActive]} onPress={() => { field === "start" ? setQuoteStartTime(time) : setQuoteEndTime(time); setQuoteTimePicker(null); }}>
                       <Text style={[styles.dropdownOptionText, value === time && styles.dropdownOptionTextActive]}>{time}</Text>
                     </TouchableOpacity>)}
                   </ScrollView>}
                 </View>;
               })}
             </View>
+            <View style={styles.requestPhotosHeading}>
+              <View style={styles.requestPhotosCopy}>
+                <Text style={styles.modalFieldLabel}>Fotos del problema · opcional</Text>
+                <Text style={styles.photoHelp}>Hasta 3. Se reducen antes de subirlas y se guardan con el ID de la solicitud.</Text>
+              </View>
+              <Text style={styles.photoCounter}>{quotePhotos.length}/3</Text>
+            </View>
+            <View style={styles.requestPhotosRow}>
+              {quotePhotos.map((photo) => <View key={photo.id} style={styles.requestPhotoWrap}>
+                <Image source={{ uri: photo.uri }} resizeMode="cover" style={styles.requestPhoto} />
+                <TouchableOpacity accessibilityRole="button" accessibilityLabel="Quitar foto" style={styles.requestPhotoRemove} onPress={() => setQuotePhotos((current) => current.filter((item) => item.id !== photo.id))}><Text style={styles.requestPhotoRemoveText}>×</Text></TouchableOpacity>
+              </View>)}
+              {quotePhotos.length < 3 && <TouchableOpacity accessibilityRole="button" style={styles.addRequestPhoto} onPress={() => void pickQuotePhotos()}><Text style={styles.addRequestPhotoPlus}>＋</Text><Text style={styles.addRequestPhotoText}>Agregar fotos</Text></TouchableOpacity>}
+            </View>
             <Text style={styles.privacyHint}>
               {CONTACT_WARNING}
             </Text>
+            {!!quoteError && <Text style={styles.modalError}>{quoteError}</Text>}
             <TouchableOpacity
               accessibilityRole="button"
-              style={styles.modalPrimary}
+              disabled={quoteBusy}
+              style={[styles.modalPrimary, quoteBusy && styles.buttonDisabled]}
               onPress={() => void submitQuote()}
             >
-              <Text style={styles.modalPrimaryText}>Enviar solicitud</Text>
+              <Text style={styles.modalPrimaryText}>{quoteBusy ? "Enviando y guardando…" : "Enviar solicitud de presupuesto"}</Text>
             </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </View>
+      </AppModal>
+      <AppModal visible={requestReceipt !== null} onRequestClose={() => setRequestReceipt(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={styles.confirmCard}>
+            <Text style={styles.confirmIcon}>✓</Text>
+            <Text style={styles.modalTitle}>Solicitud enviada</Text>
+            <Text style={styles.modalCopy}>{requestReceipt?.provider} ya puede verla y responderte desde su perfil.</Text>
+            <View style={styles.receiptDetails}>
+              <Text style={styles.receiptId}>ID · {requestReceipt?.id}</Text>
+              <Text style={styles.receiptLine}>✓ Guardada en {requestReceipt?.demo ? "esta simulación" : "Supabase"}</Text>
+              <Text style={styles.receiptLine}>{requestReceipt?.sheetSynced ? "✓ Copiada en Google Sheets" : requestReceipt?.demo ? "• La cuenta demo no escribe en la hoja real" : "• Copia en Google Sheets pendiente de reintento"}</Text>
+              {!!requestReceipt?.photoCount && <Text style={styles.receiptLine}>{requestReceipt.driveSynced ? `✓ ${requestReceipt.photoCount} foto(s) optimizadas y copiadas en Drive` : `• ${requestReceipt.photoCount} foto(s) guardadas; copia en Drive pendiente`}</Text>}
+            </View>
+            <TouchableOpacity accessibilityRole="button" style={styles.modalPrimary} onPress={() => { setRequestReceipt(null); setTab("Solicitudes"); }}><Text style={styles.modalPrimaryText}>Ver mis solicitudes</Text></TouchableOpacity>
+            <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => setRequestReceipt(null)}><Text style={styles.secondaryText}>Seguir buscando</Text></TouchableOpacity>
           </View>
         </View>
       </AppModal>
@@ -3904,7 +4147,7 @@ export default function Home() {
           )}
         </View>
       </AppModal>
-      <View style={styles.nav}>
+      <View style={[styles.nav, compactHeader && styles.navCompact]}>
         {navigationItems.map((item) => (
           <TouchableOpacity
             accessibilityRole="button"
@@ -3916,7 +4159,7 @@ export default function Home() {
             {item === "QR" ? (
               <><Text style={styles.qrNavIcon}>▣</Text><Text style={[styles.qrNavText, tab === item && styles.navActive]}>QR</Text></>
             ) : (
-              <Text style={[styles.navText, tab === item && styles.navActive]}>{item}</Text>
+              <Text numberOfLines={1} style={[styles.navText, compactHeader && styles.navTextCompact, tab === item && styles.navActive]}>{item}</Text>
             )}
           </TouchableOpacity>
         ))}
@@ -3940,11 +4183,12 @@ function createStyles(colors: ThemeColors) {
       borderBottomColor: colors.blue,
     },
     headerCompact: {
-      minHeight: 64,
+      minHeight: 62,
+      paddingHorizontal: 10,
       paddingVertical: 6,
       backgroundColor: "#000000",
     },
-    brandRow: { flexDirection: "row", alignItems: "center", gap: 7 },
+    brandRow: { flexDirection: "row", alignItems: "center", gap: 7, flexShrink: 1 },
     menuButton: {
       width: 34,
       height: 34,
@@ -3958,11 +4202,12 @@ function createStyles(colors: ThemeColors) {
     },
     menuLine: { width: 15, height: 2, borderRadius: 2, backgroundColor: "white" },
     wordmarkLogo: { width: 176, height: 48 },
+    wordmarkLogoCompact: { width: 128, height: 38 },
     wordmarkLogoWide: { width: 210, height: 60 },
-    headerActions: { flexDirection: "row", alignItems: "center", gap: 8 },
+    headerActions: { flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 },
     themeButton: {
-      width: 40,
-      height: 40,
+      width: 36,
+      height: 36,
       borderRadius: 12,
       borderWidth: 1,
       borderColor: colors.cyan,
@@ -3975,25 +4220,30 @@ function createStyles(colors: ThemeColors) {
       minHeight: 40,
       justifyContent: "center",
       paddingHorizontal: 15,
+      maxWidth: 126,
       borderRadius: 12,
       borderWidth: 1,
       borderColor: colors.cyan,
       backgroundColor: "#063C78",
     },
     loginButtonText: { color: "white", fontWeight: "800", fontSize: 14 },
+    loginButtonTextCompact: { fontSize: 12 },
     content: { padding: 18, paddingBottom: 110 },
+    contentCompact: { paddingHorizontal: 12, paddingTop: 12, paddingBottom: 104 },
     hero: {
       backgroundColor: colors.brandNavy,
       borderRadius: 24,
       padding: 22,
       marginBottom: 24,
     },
+    heroCompact: { borderRadius: 18, padding: 16, marginBottom: 18 },
     heroTitle: {
       color: "white",
       fontSize: 30,
       lineHeight: 34,
       fontWeight: "900",
     },
+    heroTitleCompact: { fontSize: 25, lineHeight: 29 },
     heroCopy: { color: "#D6E6EE", fontSize: 15, lineHeight: 21, marginTop: 8 },
     search: {
       backgroundColor: colors.surface,
@@ -4042,18 +4292,21 @@ function createStyles(colors: ThemeColors) {
       gap: 10,
       zIndex: 20,
     },
+    sectionHeaderCompact: { minHeight: 38, gap: 6 },
     sectionTitle: {
       flex: 1,
       fontSize: 20,
       fontWeight: "800",
       color: colors.navy,
     },
+    sectionTitleCompact: { fontSize: 17, lineHeight: 21 },
     compactFilters: {
       flexDirection: "row",
       alignItems: "center",
       gap: 7,
       zIndex: 30,
     },
+    compactFiltersMobile: { gap: 4 },
     dropdownWrap: { position: "relative", zIndex: 31 },
     dropdownButton: {
       height: 36,
@@ -4067,6 +4320,7 @@ function createStyles(colors: ThemeColors) {
       justifyContent: "center",
       gap: 5,
     },
+    dropdownButtonCompact: { height: 34, paddingHorizontal: 8 },
     dropdownButtonText: { color: colors.navy, fontSize: 12, fontWeight: "800" },
     dropdownChevron: {
       color: colors.blue,
@@ -4114,6 +4368,7 @@ function createStyles(colors: ThemeColors) {
       marginBottom: 12,
       flexDirection: "column",
     },
+    cardCompact: { padding: 12, borderRadius: 15 },
     cardExpanded: { borderColor: colors.blue },
     cardOpenArea: { flexDirection: "row", alignItems: "flex-start" },
     avatar: {
@@ -4312,6 +4567,8 @@ function createStyles(colors: ThemeColors) {
     jobId: { color: colors.stone, fontSize: 9, marginTop: 3, letterSpacing: 0.35 },
     hiredAmount: { color: colors.green, fontSize: 13, fontWeight: "900", marginTop: 10, marginBottom: 10 },
     workDescription: { color: colors.stone, lineHeight: 20, marginTop: 10 },
+    requestAttachmentRow: { flexDirection: "row", gap: 8, marginTop: 11 },
+    requestAttachmentPhoto: { width: 74, height: 74, borderRadius: 10, backgroundColor: colors.raised },
     workMeta: { color: colors.navy, fontSize: 13, marginTop: 7 },
     nextStep: {
       backgroundColor: colors.warningSurface,
@@ -4840,8 +5097,10 @@ function createStyles(colors: ThemeColors) {
       borderTopColor: colors.line,
       flexDirection: "row",
     },
+    navCompact: { height: 64 },
     navItem: { flex: 1, alignItems: "center", justifyContent: "center" },
     navText: { color: colors.stone, fontWeight: "700" },
+    navTextCompact: { fontSize: 10 },
     navActive: { color: colors.orange },
     drawerBackdrop: {
       position: Platform.OS === "web" ? ("fixed" as "absolute") : "absolute",
@@ -4929,6 +5188,8 @@ function createStyles(colors: ThemeColors) {
       paddingBottom: 30,
       maxHeight: "92%",
     },
+    quoteModalScroll: { maxHeight: "100%" },
+    quoteModalContent: { paddingTop: 2, paddingBottom: 4 },
     modalClose: {
       position: "absolute",
       right: 18,
@@ -4968,6 +5229,7 @@ function createStyles(colors: ThemeColors) {
       backgroundColor: colors.input,
     },
     modalFieldLabel: { color: colors.navy, fontSize: 12, fontWeight: "900", marginBottom: 7 },
+    availabilityHint: { color: colors.green, fontSize: 11, fontWeight: "800", marginTop: -3, marginBottom: 8 },
     quoteTimeRow: { flexDirection: "row", gap: 9, marginBottom: 10, zIndex: 4 },
     quoteTimeField: { flex: 1 },
     quoteTimeLabel: { color: colors.stone, fontSize: 10, fontWeight: "800", marginBottom: 5 },
@@ -4975,6 +5237,18 @@ function createStyles(colors: ThemeColors) {
     quoteTimeValue: { color: colors.navy, fontSize: 14, fontWeight: "900" },
     quoteTimeOptions: { maxHeight: 160, borderWidth: 1, borderColor: colors.line, borderRadius: 10, backgroundColor: colors.surface, marginTop: 4 },
     quoteTimeOption: { minHeight: 37, justifyContent: "center", paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: colors.line },
+    requestPhotosHeading: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 10, marginTop: 3 },
+    requestPhotosCopy: { flex: 1 },
+    photoHelp: { color: colors.stone, fontSize: 10, lineHeight: 14, marginTop: -3 },
+    photoCounter: { color: colors.blue, fontSize: 11, fontWeight: "900" },
+    requestPhotosRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 9, marginBottom: 13 },
+    requestPhotoWrap: { width: 78, height: 78, position: "relative" },
+    requestPhoto: { width: 78, height: 78, borderRadius: 10 },
+    requestPhotoRemove: { position: "absolute", right: 3, top: 3, width: 23, height: 23, borderRadius: 12, backgroundColor: "rgba(0,10,20,0.82)", alignItems: "center", justifyContent: "center" },
+    requestPhotoRemoveText: { color: "white", fontSize: 17, lineHeight: 19, fontWeight: "900" },
+    addRequestPhoto: { width: 92, height: 78, borderRadius: 10, borderWidth: 1, borderStyle: "dashed", borderColor: colors.blue, backgroundColor: colors.input, alignItems: "center", justifyContent: "center" },
+    addRequestPhotoPlus: { color: colors.blue, fontSize: 22, fontWeight: "900" },
+    addRequestPhotoText: { color: colors.blue, fontSize: 9, fontWeight: "900", marginTop: 1 },
     multiline: { minHeight: 88, paddingTop: 13, textAlignVertical: "top" },
     modalLabel: {
       color: colors.navy,
@@ -5186,6 +5460,9 @@ function createStyles(colors: ThemeColors) {
     },
     confirmIcon: { color: colors.green, fontSize: 42, fontWeight: "900", textAlign: "center", marginBottom: 8 },
     confirmAmount: { color: colors.navy, fontSize: 30, fontWeight: "900", textAlign: "center", marginVertical: 15 },
+    receiptDetails: { borderRadius: 13, backgroundColor: colors.raised, padding: 13, marginVertical: 14, gap: 7 },
+    receiptId: { color: colors.navy, fontSize: 10, fontWeight: "900" },
+    receiptLine: { color: colors.stone, fontSize: 11, lineHeight: 16 },
     completionQrCard: {
       width: "94%",
       maxWidth: 480,

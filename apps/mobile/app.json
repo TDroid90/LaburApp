@@ -12,7 +12,7 @@
       [
         "expo-image-picker",
         {
-          "photosPermission": "LaburApp usa la foto que elijas para mostrarla en tu perfil profesional.",
+          "photosPermission": "LaburApp usa las fotos que elijas para tu perfil, trabajos y solicitudes de presupuesto.",
           "cameraPermission": false,
           "microphonePermission": false
         }

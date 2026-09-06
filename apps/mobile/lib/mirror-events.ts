@@ -29,7 +29,7 @@ export async function enqueueMirrorEvent(tab: MirrorTab, payload: MirrorEvent["p
   const event: MirrorEvent = { id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, tab, occurredAt: new Date().toISOString(), payload };
   const pending = [...await readQueue(), event];
   await writeQueue(pending);
-  await flushMirrorEvents();
+  return flushMirrorEvents();
 }
 
 export async function flushMirrorEvents() {

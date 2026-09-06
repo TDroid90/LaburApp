@@ -24,6 +24,7 @@ export type SavedRequest = {
   expiresAt?: string;
   completedAt?: string;
   completionVerifiedAt?: string;
+  attachments?: SavedRequestPhoto[];
   status: JobStatus;
   quote?: SavedQuote;
   payment?: {
@@ -39,6 +40,15 @@ export type SavedRequest = {
     qualities?: string[];
     createdAt: string;
   };
+};
+
+export type SavedRequestPhoto = {
+  id: string;
+  uri: string;
+  width?: number;
+  height?: number;
+  storagePath?: string;
+  driveSyncStatus?: "pending" | "processing" | "synced" | "failed";
 };
 
 export type QuotePricingMode = "itemized" | "fixed" | "starting_at";
@@ -91,6 +101,8 @@ export type SavedProviderProfile = {
   skills: string;
   zones: string;
   availability: string;
+  availabilityStart?: string;
+  availabilityEnd?: string;
   tariffItems?: SavedTariffItem[];
   published: boolean;
 };
@@ -178,6 +190,8 @@ export async function loadLocalState(): Promise<LocalAppState> {
       ...rawProfile,
       diagnosticPrice: rawProfile.diagnosticPrice ?? diagnosticService?.price ?? 35000,
       services: realServices.map((service) => ({ ...service, specialties: service.specialties?.length ? service.specialties : service.service ? [service.service] : [] })),
+      availabilityStart: rawProfile.availabilityStart ?? realServices.find((service) => service.startTime)?.startTime ?? "08:00",
+      availabilityEnd: rawProfile.availabilityEnd ?? realServices.find((service) => service.endTime)?.endTime ?? "18:00",
       coverageAreas: rawProfile.coverageAreas?.length ? rawProfile.coverageAreas : rawProfile.zones === "Toda la provincia" ? ["San Sebastián", "Río Grande", "Tolhuin", "Almanza", "Ushuaia", "Zonas rurales"] : rawProfile.city ? [rawProfile.city] : [],
       portfolioWorks: rawProfile.portfolioWorks ?? [],
     } : null;

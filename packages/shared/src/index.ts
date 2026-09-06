@@ -54,9 +54,13 @@ export function calculateFee(total: number, fiscalVerified: boolean): FeeSnapsho
   return { total, rate, fee, providerNet: Math.round((total - fee) * 100) / 100, currency: "ARS" };
 }
 
-export function containsContactAttempt(input: string) {
-  const normalized = input.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  const compact = normalized.replace(/[\s().+_-]/g, "");
+export function containsContactAttempt(input: string, allowedIdentifiers: string[] = []) {
+  const withoutAllowedIds = allowedIdentifiers.reduce(
+    (text, identifier) => identifier ? text.replaceAll(identifier, " ") : text,
+    input,
+  );
+  const normalized = withoutAllowedIds.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const compact = normalized.replace(/[\s().+_\-\/.,·]/g, "");
   return /\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b/.test(normalized)
     || /(?:https?:\/\/|www\.|\.com\b|\.com\.ar\b)/.test(normalized)
     || /(?:whatsapp|telegram|instagram|facebook|mi celu|escribime afuera|buscame en)/.test(normalized)

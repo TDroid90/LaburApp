@@ -90,33 +90,52 @@ export default async function handler(req, res) {
   if (!googleEmail || !googlePrivateKey) return json(res, 503, { error: "La copia quedó en espera: falta conectar la credencial permanente de Google Drive." });
 
   const token = await googleAccessToken(googleEmail, googlePrivateKey);
-  const rowsUrl = new URL(`${supabaseUrl}/rest/v1/drive_media_outbox`);
-  rowsUrl.searchParams.set("select", "id,provider_id,source_storage_path,target_root_folder_id,target_relative_path,target_file_name,attempts");
-  rowsUrl.searchParams.set("provider_id", `eq.${user.id}`);
-  rowsUrl.searchParams.set("status", "in.(pending,failed)");
-  rowsUrl.searchParams.set("order", "created_at.asc");
-  rowsUrl.searchParams.set("limit", "9");
-  const pendingResponse = await fetch(rowsUrl, { headers: { apikey: serviceKey, authorization: `Bearer ${serviceKey}` } });
-  if (!pendingResponse.ok) return json(res, 502, { error: "No pudimos leer la cola de imágenes." });
-  const rows = await pendingResponse.json();
+  const queueDefinitions = [
+    {
+      table: "drive_media_outbox",
+      ownerColumn: "provider_id",
+      sourceBucket: "portfolio",
+      targetTable: "provider_portfolio_items",
+    },
+    {
+      table: "client_drive_media_outbox",
+      ownerColumn: "client_id",
+      sourceBucket: "request-photos",
+      targetTable: "client_request_attachments",
+    },
+  ];
+  const rows = [];
+  for (const queue of queueDefinitions) {
+    const rowsUrl = new URL(`${supabaseUrl}/rest/v1/${queue.table}`);
+    rowsUrl.searchParams.set("select", `id,${queue.ownerColumn},source_storage_path,target_root_folder_id,target_relative_path,target_file_name,attempts`);
+    rowsUrl.searchParams.set(queue.ownerColumn, `eq.${user.id}`);
+    rowsUrl.searchParams.set("status", "in.(pending,failed)");
+    rowsUrl.searchParams.set("order", "created_at.asc");
+    rowsUrl.searchParams.set("limit", "9");
+    const pendingResponse = await fetch(rowsUrl, { headers: { apikey: serviceKey, authorization: `Bearer ${serviceKey}` } });
+    if (!pendingResponse.ok) return json(res, 502, { error: "No pudimos leer la cola de imágenes." });
+    rows.push(...(await pendingResponse.json()).map((row) => ({ ...row, ...queue })));
+  }
   let synced = 0;
   let failed = 0;
 
   for (const row of rows) {
     try {
-      await supabaseRequest(supabaseUrl, serviceKey, `drive_media_outbox?id=eq.${row.id}`, { method: "PATCH", body: JSON.stringify({ status: "processing", attempts: row.attempts + 1, last_error: null, updated_at: new Date().toISOString() }) });
+      await supabaseRequest(supabaseUrl, serviceKey, `${row.table}?id=eq.${row.id}`, { method: "PATCH", body: JSON.stringify({ status: "processing", attempts: row.attempts + 1, last_error: null, updated_at: new Date().toISOString() }) });
       let folderId = row.target_root_folder_id;
       for (const segment of row.target_relative_path.split("/").filter(Boolean)) folderId = await ensureFolder(token, folderId, segment);
       const sourcePath = row.source_storage_path.split("/").map(encodeURIComponent).join("/");
-      const sourceResponse = await fetch(`${supabaseUrl}/storage/v1/object/public/portfolio/${sourcePath}`);
+      const sourceResponse = await fetch(`${supabaseUrl}/storage/v1/object/${row.sourceBucket}/${sourcePath}`, {
+        headers: { apikey: serviceKey, authorization: `Bearer ${serviceKey}` },
+      });
       if (!sourceResponse.ok) throw new Error("No pudimos recuperar la imagen optimizada.");
       const driveFile = await uploadToDrive(token, folderId, row.target_file_name, sourceResponse);
-      await supabaseRequest(supabaseUrl, serviceKey, `drive_media_outbox?id=eq.${row.id}`, { method: "PATCH", body: JSON.stringify({ status: "synced", drive_file_id: driveFile.id, last_error: null, updated_at: new Date().toISOString() }) });
-      await supabaseRequest(supabaseUrl, serviceKey, `provider_portfolio_items?storage_path=eq.${encodeURIComponent(row.source_storage_path)}`, { method: "PATCH", body: JSON.stringify({ drive_sync_status: "synced", drive_file_id: driveFile.id }) });
+      await supabaseRequest(supabaseUrl, serviceKey, `${row.table}?id=eq.${row.id}`, { method: "PATCH", body: JSON.stringify({ status: "synced", drive_file_id: driveFile.id, last_error: null, updated_at: new Date().toISOString() }) });
+      await supabaseRequest(supabaseUrl, serviceKey, `${row.targetTable}?storage_path=eq.${encodeURIComponent(row.source_storage_path)}`, { method: "PATCH", body: JSON.stringify({ drive_sync_status: "synced", drive_file_id: driveFile.id }) });
       synced += 1;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Error inesperado al copiar la imagen.";
-      await supabaseRequest(supabaseUrl, serviceKey, `drive_media_outbox?id=eq.${row.id}`, { method: "PATCH", body: JSON.stringify({ status: "failed", last_error: message, updated_at: new Date().toISOString() }) });
+      await supabaseRequest(supabaseUrl, serviceKey, `${row.table}?id=eq.${row.id}`, { method: "PATCH", body: JSON.stringify({ status: "failed", last_error: message, updated_at: new Date().toISOString() }) });
       failed += 1;
     }
   }
