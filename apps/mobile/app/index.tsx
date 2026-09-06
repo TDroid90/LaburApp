@@ -947,6 +947,7 @@ export default function Home() {
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewComment, setReviewComment] = useState("");
   const [reviewQualities, setReviewQualities] = useState<string[]>([]);
+  const [customReviewQuality, setCustomReviewQuality] = useState("");
   const [reviewError, setReviewError] = useState("");
   const [acceptQuoteRequestId, setAcceptQuoteRequestId] = useState<string | null>(null);
   const [completionQr, setCompletionQr] = useState<{ requestId: string; value: string } | null>(null);
@@ -2047,7 +2048,20 @@ export default function Home() {
     setReviewComment("");
     setReviewRating(5);
     setReviewQualities([]);
+    setCustomReviewQuality("");
     setRequested("Reseña verificada publicada.");
+  }
+
+  function addCustomReviewQuality() {
+    const quality = customReviewQuality.trim();
+    setReviewError("");
+    if (quality.length < 2) return setReviewError("Escribí una cualidad válida.");
+    if (reviewQualities.length >= 3) return setReviewError("Elegí hasta 3 cualidades.");
+    if (reviewQualities.some((item) => item.toLocaleLowerCase("es") === quality.toLocaleLowerCase("es"))) {
+      return setReviewError("Esa cualidad ya está elegida.");
+    }
+    setReviewQualities((current) => [...current, quality]);
+    setCustomReviewQuality("");
   }
 
   async function pickClientPhoto() {
@@ -3837,6 +3851,24 @@ export default function Home() {
                 );
               })}
             </View>
+            <View style={styles.customQualityRow}>
+              <TextInput
+                value={customReviewQuality}
+                onChangeText={setCustomReviewQuality}
+                placeholder="Otra cualidad"
+                placeholderTextColor="#71818B"
+                maxLength={32}
+                style={[styles.modalInput, styles.customQualityInput]}
+                onSubmitEditing={addCustomReviewQuality}
+              />
+              <TouchableOpacity
+                accessibilityRole="button"
+                style={styles.customQualityButton}
+                onPress={addCustomReviewQuality}
+              >
+                <Text style={styles.customQualityButtonText}>Agregar</Text>
+              </TouchableOpacity>
+            </View>
             <View style={styles.reviewBox}>
               <Text style={styles.reviewTitle}>Reseña verificada</Text>
               <Text style={styles.reviewText}>
@@ -5177,6 +5209,10 @@ function createStyles(colors: ThemeColors) {
     qualityChoiceActive: { borderColor: colors.green, backgroundColor: colors.successSurface },
     qualityChoiceText: { color: colors.stone, fontSize: 11, fontWeight: "800" },
     qualityChoiceTextActive: { color: colors.green },
+    customQualityRow: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 13 },
+    customQualityInput: { flex: 1, marginBottom: 0 },
+    customQualityButton: { borderRadius: 12, borderWidth: 1, borderColor: colors.blue, paddingHorizontal: 13, paddingVertical: 12 },
+    customQualityButtonText: { color: colors.blue, fontSize: 11, fontWeight: "900" },
     reviewQualitiesText: { color: colors.green, fontSize: 10, fontWeight: "900", marginTop: 6 },
     qrNavItem: { marginTop: -16 },
     qrNavIcon: { width: 48, height: 48, borderRadius: 24, color: "white", backgroundColor: colors.orange, textAlign: "center", lineHeight: 48, fontSize: 24, fontWeight: "900", overflow: "hidden" },
