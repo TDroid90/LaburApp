@@ -11,8 +11,11 @@ export type SavedSession = {
 export type SavedRequest = {
   id: string;
   jobId?: string;
+  clientId?: string;
+  clientName?: string;
   clientEmail?: string;
   providerId?: string;
+  viewerRole?: "client" | "provider";
   provider: string;
   trade: string;
   description: string;
@@ -26,6 +29,9 @@ export type SavedRequest = {
   completionVerifiedAt?: string;
   attachments?: SavedRequestPhoto[];
   status: JobStatus;
+  previousStatus?: JobStatus;
+  cancellationReason?: "client_cancelled" | "provider_declined";
+  cancelledAt?: string;
   quote?: SavedQuote;
   payment?: {
     total: number;

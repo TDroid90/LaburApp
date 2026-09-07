@@ -587,6 +587,11 @@ type RequestReceipt = {
   driveSynced: boolean;
   demo: boolean;
 };
+type UndoCancellation = {
+  request: SavedRequest;
+  message: string;
+  expiresAt: number;
+};
 
 const CONTACT_WARNING = "No está permitido compartir teléfonos de contacto o emails.";
 const FREE_WEEKLY_REQUEST_LIMIT = 3;
@@ -912,6 +917,10 @@ export default function Home() {
   const [infoPage, setInfoPage] = useState<InfoPageKey | null>(null);
   const [tab, setTab] = useState("Inicio");
   const [requested, setRequested] = useState<string | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [requestRefresh, setRequestRefresh] = useState(0);
+  const [hiddenRequestIds, setHiddenRequestIds] = useState<string[]>([]);
+  const [undoCancellation, setUndoCancellation] = useState<UndoCancellation | null>(null);
   const [authMode, setAuthMode] = useState<
     "login" | "register" | "recovery" | null
   >(null);
@@ -986,9 +995,7 @@ export default function Home() {
   const navigationItems =
     session?.role === "admin"
       ? ["Inicio", "Panel", "Perfil"]
-      : session?.role === "client"
-        ? ["Inicio", "Solicitudes", "QR", "Contratados", "Perfil"]
-        : ["Inicio", "Trabajos", "Perfil"];
+      : ["Inicio", "Solicitudes", "QR", "Contratados", "Perfil"];
   const isDemoSession = session?.email.endsWith("@laburapp.demo") ?? false;
 
   useEffect(() => {
@@ -1044,6 +1051,7 @@ export default function Home() {
       const userResult = await supabase.auth.getUser();
       const currentUserId = userResult.data.user?.id;
       if (!currentUserId || cancelled) return;
+      setCurrentUserId(currentUserId);
       await supabase.rpc("purge_expired_client_data");
       if (session.role === "client") {
         const membership = await supabase
@@ -1055,7 +1063,7 @@ export default function Home() {
       }
       const result = await supabase
         .from("service_requests")
-        .select("id, provider_id, description, approximate_zone, desired_at, preferred_start_time, preferred_end_time, status, created_at, expires_at, completion_verified_at, profiles!service_requests_provider_id_fkey(full_name), quotes(total, scope, eta, version, pricing_mode, items, notes, valid_days, expires_at), jobs(id, completion_verified_at, updated_at), messages(id, sender_id, body, created_at, expires_at), client_request_attachments(id, storage_path, position, drive_sync_status)")
+        .select("id, client_id, provider_id, description, approximate_zone, desired_at, preferred_start_time, preferred_end_time, status, created_at, expires_at, completion_verified_at, previous_status, cancellation_reason, cancelled_at, profiles!service_requests_provider_id_fkey(full_name), client:profiles!service_requests_client_id_fkey(full_name), quotes(total, scope, eta, version, pricing_mode, items, notes, valid_days, expires_at), jobs(id, completion_verified_at, updated_at), messages(id, sender_id, body, created_at, expires_at), client_request_attachments(id, storage_path, position, drive_sync_status)")
         .gte("created_at", new Date(Date.now() - CLIENT_HISTORY_MS).toISOString())
         .order("created_at", { ascending: false });
       if (result.error || cancelled) return;
@@ -1067,6 +1075,8 @@ export default function Home() {
       for (const row of tradesResult.data ?? []) if (!trades.has(row.provider_id)) trades.set(row.provider_id, row.trade_name);
       const remoteRequests: SavedRequest[] = await Promise.all((result.data ?? []).map(async (row: any) => {
         const profile = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
+        const clientProfile = Array.isArray(row.client) ? row.client[0] : row.client;
+        const viewerRole: "client" | "provider" = row.provider_id === currentUserId ? "provider" : "client";
         const quoteRows = Array.isArray(row.quotes) ? [...row.quotes].sort((a, b) => b.version - a.version) : [];
         const quote = quoteRows[0];
         const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
@@ -1075,8 +1085,8 @@ export default function Home() {
           .map((message: any) => ({
             id: message.id,
             sender: message.sender_id === currentUserId
-              ? session.role === "provider" ? "provider" : "client"
-              : session.role === "client" ? "provider" : "client",
+              ? viewerRole
+              : viewerRole === "client" ? "provider" : "client",
             body: message.body,
             createdAt: message.created_at,
             expiresAt: message.expires_at,
@@ -1097,7 +1107,10 @@ export default function Home() {
         return {
           id: row.id,
           jobId: job?.id,
+          clientId: row.client_id,
+          clientName: clientProfile?.full_name ?? "Cliente",
           providerId: row.provider_id,
+          viewerRole,
           clientEmail: session.role === "client" ? session.email : undefined,
           provider: profile?.full_name ?? providerProfile?.displayName ?? "Profesional",
           trade: trades.get(row.provider_id) ?? "Servicio profesional",
@@ -1111,6 +1124,9 @@ export default function Home() {
           completedAt: job?.updated_at,
           completionVerifiedAt: row.completion_verified_at ?? job?.completion_verified_at,
           status: row.status,
+          previousStatus: row.previous_status ?? undefined,
+          cancellationReason: row.cancellation_reason ?? undefined,
+          cancelledAt: row.cancelled_at ?? undefined,
           attachments,
           messages: activeMessages,
           quote: quote ? {
@@ -1122,7 +1138,19 @@ export default function Home() {
       if (!cancelled) setRequests((current) => [...remoteRequests, ...current.filter((local) => !remoteRequests.some((remote) => remote.id === local.id))]);
     })();
     return () => { cancelled = true; };
-  }, [hydrated, session?.email, session?.role, isDemoSession, providerProfile?.displayName, providerProfile?.publicId]);
+  }, [hydrated, session?.email, session?.role, isDemoSession, providerProfile?.displayName, providerProfile?.publicId, requestRefresh]);
+
+  useEffect(() => {
+    if (!supabase || !session || isDemoSession) return;
+    const realtimeClient = supabase;
+    const channel = realtimeClient
+      .channel(`requests-${session.email}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "service_requests" }, () => setRequestRefresh((current) => current + 1))
+      .on("postgres_changes", { event: "*", schema: "public", table: "quotes" }, () => setRequestRefresh((current) => current + 1))
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, () => setRequestRefresh((current) => current + 1))
+      .subscribe();
+    return () => { void realtimeClient.removeChannel(channel); };
+  }, [session?.email, isDemoSession]);
 
   async function submitAuth() {
     setAuthError("");
@@ -1150,8 +1178,10 @@ export default function Home() {
       );
       return;
     }
-    if (authPassword.length < 6)
-      return setAuthError("La contraseña debe tener al menos 6 caracteres.");
+    if (authPassword.length < 8)
+      return setAuthError("La contraseña debe tener al menos 8 caracteres.");
+    if (!/[A-Za-zÁÉÍÓÚáéíóúÑñ]/.test(authPassword) || !/\d/.test(authPassword))
+      return setAuthError("La contraseña debe incluir al menos una letra y un número.");
     if (authMode === "register" && authName.trim().length < 2)
       return setAuthError("Ingresá tu nombre y apellido.");
     if (authMode === "register" && !acceptedTerms)
@@ -1192,6 +1222,7 @@ export default function Home() {
         return;
       }
       name = String(result.data.user?.user_metadata?.full_name || name);
+      if (result.data.user?.id) setCurrentUserId(result.data.user.id);
       if (authMode === "login" && result.data.user) {
         const { data: roles } = await supabase
           .from("user_roles")
@@ -1632,9 +1663,11 @@ export default function Home() {
             "No pudimos publicar el perfil.",
         );
       }
-      await supabase
-        .from("user_roles")
-        .upsert({ user_id: user.id, role: "provider" });
+      const enableProviderResult = await supabase.rpc("enable_provider_mode");
+      if (enableProviderResult.error) {
+        setProfileBusy(false);
+        return setProfileError("No pudimos habilitar el modo prestador. Intentá nuevamente.");
+      }
       await supabase
         .from("provider_services")
         .delete()
@@ -1954,6 +1987,7 @@ export default function Home() {
   function signOut() {
     if (supabase) void supabase.auth.signOut();
     setSession(null);
+    setCurrentUserId(null);
     setSignedInName(null);
     setTab("Inicio");
     setRequested("Cerraste sesión en este dispositivo.");
@@ -2003,16 +2037,53 @@ export default function Home() {
     }
   }
 
-  async function cancelRequest(request: SavedRequest) {
+  async function cancelRequest(request: SavedRequest, reason?: "client_cancelled" | "provider_declined") {
+    const viewerRole = requestViewerRole(request);
+    const effectiveReason = reason ?? (viewerRole === "provider" ? "provider_declined" : "client_cancelled");
     try {
       if (supabase && !isDemoSession && /^[0-9a-f-]{36}$/i.test(request.id)) {
-        const result = await supabase.rpc("cancel_service_request", { target_request_id: request.id });
+        const result = await supabase.rpc("cancel_service_request", {
+          target_request_id: request.id,
+          cancellation_kind: effectiveReason,
+        });
         if (result.error) throw result.error;
       }
-      updateRequest(request.id, (current) => ({ ...current, status: "cancelled" }));
-      setRequested("Solicitud cancelada.");
+      const cancelledAt = new Date().toISOString();
+      updateRequest(request.id, (current) => ({
+        ...current,
+        previousStatus: current.status,
+        status: "cancelled",
+        cancellationReason: effectiveReason,
+        cancelledAt,
+      }));
+      setQuoteBuilderRequestId(null);
+      setUndoCancellation({
+        request,
+        message: effectiveReason === "provider_declined" ? "Solicitud desestimada. El cliente verá la notificación." : "Solicitud cancelada.",
+        expiresAt: Date.now() + 10000,
+      });
+      setTimeout(() => setHiddenRequestIds((current) => current.includes(request.id) ? current : [...current, request.id]), 5000);
+      setTimeout(() => setUndoCancellation((current) => current?.request.id === request.id ? null : current), 10000);
     } catch {
-      setRequested("Esta solicitud ya no se puede cancelar.");
+      setRequested(viewerRole === "provider" ? "Esta solicitud ya no se puede desestimar." : "Esta solicitud ya no se puede cancelar.");
+    }
+  }
+
+  async function undoRequestCancellation() {
+    const pending = undoCancellation;
+    if (!pending || Date.now() > pending.expiresAt) return setUndoCancellation(null);
+    try {
+      if (supabase && !isDemoSession && /^[0-9a-f-]{36}$/i.test(pending.request.id)) {
+        const result = await supabase.rpc("undo_cancel_service_request", { target_request_id: pending.request.id });
+        if (result.error) throw result.error;
+      }
+      setRequests((current) => current.map((request) => request.id === pending.request.id ? pending.request : request));
+      setHiddenRequestIds((current) => current.filter((id) => id !== pending.request.id));
+      setUndoCancellation(null);
+      setRequested("La solicitud volvió a quedar activa.");
+    } catch {
+      setUndoCancellation(null);
+      setRequested("Ya pasaron los 10 segundos para deshacer.");
     }
   }
 
@@ -2097,7 +2168,6 @@ export default function Home() {
     try {
       const validDays = Math.min(draft.validDays ?? 5, 5);
       const normalizedDraft = { ...draft, validDays };
-      let storedInDatabase = false;
       if (request && supabase && !isDemoSession && /^[0-9a-f-]{36}$/i.test(request.id)) {
         const nextVersion = (request.quote?.version ?? 0) + 1;
         const quoteResult = await supabase.from("quotes").insert({
@@ -2113,14 +2183,13 @@ export default function Home() {
           expires_at: new Date(Date.now() + validDays * 86400000).toISOString(),
         });
         if (quoteResult.error) throw quoteResult.error;
-        const statusResult = await supabase.from("service_requests").update({ status: "quote_sent" }).eq("id", request.id);
+        const statusResult = await supabase.rpc("mark_service_request_quote_sent", { target_request_id: request.id });
         if (statusResult.error) throw statusResult.error;
-        storedInDatabase = true;
       }
       updateRequest(quoteBuilderRequestId, (request) =>
         submitCustomQuote(request, normalizedDraft),
       );
-      if (request && !storedInDatabase)
+      if (request)
         void enqueueMirrorEvent("Presupuestos", {
           request_id: request.id,
           provider_name: request.provider,
@@ -2154,15 +2223,15 @@ export default function Home() {
       return setChatError(
         "Los precios sólo se envían mediante un presupuesto. Usá el chat para consultar el alcance del servicio.",
       );
+    const request = requests.find((item) => item.id === chatRequestId);
     const messageExpiry = new Date(Date.now() + REQUEST_LIFETIME_MS).toISOString();
     const message: SavedMessage = {
       id: `${Date.now()}-${session?.role ?? "client"}`,
-      sender: session?.role === "provider" ? "provider" : "client",
+      sender: request ? requestViewerRole(request) : "client",
       body,
       createdAt: new Date().toISOString(),
       expiresAt: messageExpiry,
     };
-    const request = requests.find((item) => item.id === chatRequestId);
     const isRevision = body.startsWith(`Solicitud de Cambios Presupuesto ${chatRequestId}`);
     if (request && supabase && !isDemoSession && /^[0-9a-f-]{36}$/i.test(request.id)) {
       const userResult = await supabase.auth.getUser();
@@ -2253,7 +2322,7 @@ export default function Home() {
   }
 
   async function pickClientPhoto() {
-    if (!session || session.role !== "client") return;
+    if (!session || session.role === "admin") return;
     setClientPhotoBusy(true);
     try {
       const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: true, aspect: [1, 1], quality: 0.72 });
@@ -2320,30 +2389,35 @@ export default function Home() {
     ? publicDetailsFor(publicProfileProvider)
     : null;
   const currentProviderName = providerProfile?.displayName ?? session?.name ?? "";
-  const participantRequests = requests.filter((request) =>
-    session?.role === "provider"
-      ? request.provider === currentProviderName
-      : session?.role === "client"
-        ? !request.clientEmail || request.clientEmail === session.email
-        : true,
-  );
+  function requestViewerRole(request: SavedRequest): "client" | "provider" {
+    if (request.viewerRole) return request.viewerRole;
+    if (currentUserId && request.providerId === currentUserId) return "provider";
+    if (session?.role === "provider" && request.provider === currentProviderName && (!request.clientEmail || request.clientEmail !== session.email)) return "provider";
+    return "client";
+  }
+  const participantRequests = requests.filter((request) => {
+    if (session?.role === "admin") return true;
+    if (request.viewerRole) return true;
+    return requestViewerRole(request) === "provider" || !request.clientEmail || request.clientEmail === session?.email;
+  });
   const workRequests = participantRequests.filter((request) =>
-    session?.role === "client"
-      ? activeRequest(request) && !completedStatuses.has(request.status)
-      : true,
+    !hiddenRequestIds.includes(request.id) &&
+    activeRequest(request) &&
+    !completedStatuses.has(request.status),
   );
   const providerPendingRequests = workRequests.filter(
-    (request) => request.status === "request_sent" || request.status === "quote_revision_requested",
+    (request) => requestViewerRole(request) === "provider" && (request.status === "request_sent" || request.status === "quote_revision_requested"),
   );
   const clientHistory = participantRequests
     .filter((request) =>
+      requestViewerRole(request) === "client" &&
       completedStatuses.has(request.status) &&
       new Date(request.completedAt ?? request.createdAt).getTime() >= Date.now() - CLIENT_HISTORY_MS,
     )
     .sort((a, b) => new Date(b.completedAt ?? b.createdAt).getTime() - new Date(a.completedAt ?? a.createdAt).getTime())
     .slice(0, 10);
   const weeklyRequestCount = participantRequests.filter(
-    (request) => new Date(request.createdAt).getTime() >= startOfCurrentWeek() && request.status !== "cancelled",
+    (request) => requestViewerRole(request) === "client" && new Date(request.createdAt).getTime() >= startOfCurrentWeek() && request.status !== "cancelled",
   ).length;
 
   return (
@@ -2602,15 +2676,9 @@ export default function Home() {
           </>
         ) : tab === "Trabajos" || tab === "Solicitudes" ? (
           <View style={styles.sectionPage}>
-            <Text style={styles.pageTitle}>
-              {session?.role === "client" ? "Mis solicitudes" : "Mis trabajos"}
-            </Text>
-            <Text style={styles.pageCopy}>
-              {session?.role === "client"
-                ? "Acá recibís los presupuestos de los profesionales y seguís cada solicitud."
-                : "Respondé solicitudes y administrá los trabajos activos."}
-            </Text>
-            {session?.role === "client" && (
+            <Text style={styles.pageTitle}>Solicitudes</Text>
+            <Text style={styles.pageCopy}>Pedí y recibí presupuestos. Si tenés el modo prestador activo, también respondés desde acá.</Text>
+            {session?.role !== "admin" && (
               <View style={styles.requestQuotaCard}>
                 <View>
                   <Text style={styles.panelEyebrow}>PLAN GRATIS</Text>
@@ -2626,7 +2694,7 @@ export default function Home() {
                 </Text>
               </View>
             )}
-            {session?.role === "provider" && (
+            {(session?.role === "provider" || providerProfile?.published) && (
               <View style={styles.notificationsPanel}>
                 <View style={styles.notificationHeading}>
                   <View>
@@ -2672,7 +2740,7 @@ export default function Home() {
                 )}
               </View>
             )}
-            {session?.role === "provider" && isDemoSession && <View style={styles.simulatorBanner}>
+            {(session?.role === "provider" || providerProfile?.published) && isDemoSession && <View style={styles.simulatorBanner}>
               <View style={styles.simulatorCopy}>
                 <Text style={styles.simulatorTitle}>Simulador del PMV</Text>
                 <Text style={styles.simulatorText}>
@@ -2730,6 +2798,13 @@ export default function Home() {
                     </View>
                     <Text style={styles.workProvider}>{request.provider}</Text>
                     <Text style={styles.trade}>{request.trade}</Text>
+                    {request.status === "cancelled" && (
+                      <Text style={styles.cancellationNotice}>
+                        {request.cancellationReason === "provider_declined"
+                          ? "El profesional desestimó esta solicitud."
+                          : "El cliente canceló esta solicitud."}
+                      </Text>
+                    )}
                     <Text style={styles.workDescription}>
                       {request.description}
                     </Text>
@@ -2754,7 +2829,7 @@ export default function Home() {
                         Cuándo: {request.desiredAt}
                       </Text>
                     )}
-                    {session?.role === "client" && !hiredStatuses.has(request.status) && request.status !== "cancelled" && (
+                    {requestViewerRole(request) === "client" && !hiredStatuses.has(request.status) && request.status !== "cancelled" && (
                       <Text style={styles.expiryText}>
                         La solicitud vence el {new Date(requestExpiresAt(request)).toLocaleDateString("es-AR")}.
                       </Text>
@@ -2833,7 +2908,7 @@ export default function Home() {
                         Próximo paso: {presentation.next}
                       </Text>
                     </View>
-                    {session?.role === "client" && request.status === "quote_sent" && (
+                    {requestViewerRole(request) === "client" && request.status === "quote_sent" && (
                       <View style={styles.actionRow}>
                         <TouchableOpacity
                           accessibilityRole="button"
@@ -2855,7 +2930,7 @@ export default function Home() {
                         </TouchableOpacity>
                       </View>
                     )}
-                    {session?.role === "provider" && primary && (primary.action === "provider_quote" || primary.action === "revised_quote") && (
+                    {requestViewerRole(request) === "provider" && primary && (primary.action === "provider_quote" || primary.action === "revised_quote") && (
                       <TouchableOpacity
                         accessibilityRole="button"
                         style={styles.primaryActionFull}
@@ -2870,7 +2945,7 @@ export default function Home() {
                         </Text>
                       </TouchableOpacity>
                     )}
-                    {session?.role === "client" && !!request.completionVerifiedAt && completedStatuses.has(request.status) && !request.review && (
+                    {requestViewerRole(request) === "client" && !!request.completionVerifiedAt && completedStatuses.has(request.status) && !request.review && (
                       <TouchableOpacity
                         accessibilityRole="button"
                         style={styles.primaryActionFull}
@@ -2884,7 +2959,7 @@ export default function Home() {
                         </Text>
                       </TouchableOpacity>
                     )}
-                    {session?.role === "provider" && request.jobId && hiredStatuses.has(request.status) && !completedStatuses.has(request.status) && (
+                    {requestViewerRole(request) === "provider" && request.jobId && hiredStatuses.has(request.status) && !completedStatuses.has(request.status) && (
                       <TouchableOpacity
                         accessibilityRole="button"
                         disabled={qrBusy}
@@ -2927,13 +3002,13 @@ export default function Home() {
                           )
                         </Text>
                       </TouchableOpacity>
-                      {session?.role === "client" && cancellableStatuses.has(request.status) && (
+                      {cancellableStatuses.has(request.status) && (
                         <TouchableOpacity
                           accessibilityRole="button"
-                          onPress={() => void cancelRequest(request)}
+                          onPress={() => void cancelRequest(request, requestViewerRole(request) === "provider" ? "provider_declined" : "client_cancelled")}
                         >
                           <Text style={styles.cancelLink}>
-                            Cancelar solicitud
+                            {requestViewerRole(request) === "provider" ? "Desestimar solicitud" : "Cancelar solicitud"}
                           </Text>
                         </TouchableOpacity>
                       )}
@@ -3427,6 +3502,14 @@ export default function Home() {
           <Text style={styles.toastText}>{requested}</Text>
           <TouchableOpacity onPress={() => setRequested(null)}>
             <Text style={styles.toastClose}>Cerrar</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+      {undoCancellation && (
+        <View style={styles.undoToast}>
+          <Text style={styles.undoToastText}>{undoCancellation.message}</Text>
+          <TouchableOpacity accessibilityRole="button" onPress={() => void undoRequestCancellation()}>
+            <Text style={styles.undoToastAction}>Deshacer</Text>
           </TouchableOpacity>
         </View>
       )}
@@ -4142,6 +4225,7 @@ export default function Home() {
               request={quoteBuilderRequest}
               tariffItems={providerProfile?.tariffItems}
               onCancel={() => setQuoteBuilderRequestId(null)}
+              onDismiss={() => void cancelRequest(quoteBuilderRequest, "provider_declined")}
               onSubmit={sendModularQuote}
             />
           )}
@@ -4567,6 +4651,7 @@ function createStyles(colors: ThemeColors) {
     jobId: { color: colors.stone, fontSize: 9, marginTop: 3, letterSpacing: 0.35 },
     hiredAmount: { color: colors.green, fontSize: 13, fontWeight: "900", marginTop: 10, marginBottom: 10 },
     workDescription: { color: colors.stone, lineHeight: 20, marginTop: 10 },
+    cancellationNotice: { color: colors.danger, fontSize: 12, fontWeight: "900", marginTop: 8 },
     requestAttachmentRow: { flexDirection: "row", gap: 8, marginTop: 11 },
     requestAttachmentPhoto: { width: 74, height: 74, borderRadius: 10, backgroundColor: colors.raised },
     workMeta: { color: colors.navy, fontSize: 13, marginTop: 7 },
@@ -5086,6 +5171,22 @@ function createStyles(colors: ThemeColors) {
       textDecorationLine: "underline",
       marginLeft: 12,
     },
+    undoToast: {
+      position: "absolute",
+      bottom: 72,
+      left: 18,
+      right: 18,
+      backgroundColor: colors.navy,
+      borderWidth: 1,
+      borderColor: colors.orange,
+      borderRadius: 14,
+      padding: 14,
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+    },
+    undoToastText: { color: colors.snow, fontWeight: "800", flex: 1 },
+    undoToastAction: { color: colors.orange, fontWeight: "900", marginLeft: 14, textDecorationLine: "underline" },
     nav: {
       position: "absolute",
       bottom: 0,
