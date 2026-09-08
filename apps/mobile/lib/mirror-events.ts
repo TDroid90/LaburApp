@@ -37,9 +37,30 @@ export async function flushMirrorEvents() {
   const pending = await readQueue();
   const remaining: MirrorEvent[] = [];
   let sent = 0;
+  const configuredUrl = process.env.EXPO_PUBLIC_SHEETS_MIRROR_URL;
+  const mirrorUrl = configuredUrl || (typeof window !== "undefined" ? "/api/sheets-mirror" : "");
+  const { data: sessionData } = await supabase.auth.getSession();
+  const accessToken = sessionData.session?.access_token;
   for (const event of pending) {
-    const { error } = await supabase.functions.invoke("sheets-mirror", { body: event });
-    if (error) remaining.push(event); else sent += 1;
+    try {
+      if (mirrorUrl && accessToken) {
+        const response = await fetch(mirrorUrl, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${accessToken}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(event),
+        });
+        if (!response.ok) throw new Error("mirror_failed");
+      } else {
+        const { error } = await supabase.functions.invoke("sheets-mirror", { body: event });
+        if (error) throw error;
+      }
+      sent += 1;
+    } catch {
+      remaining.push(event);
+    }
   }
   await writeQueue(remaining);
   return { sent, pending: remaining.length };

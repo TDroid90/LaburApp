@@ -5,7 +5,8 @@
   "installCommand": "npm ci",
   "framework": null,
   "functions": {
-    "api/drive-sync.mjs": { "maxDuration": 60 }
+    "api/drive-sync.mjs": { "maxDuration": 60 },
+    "api/sheets-mirror.mjs": { "maxDuration": 30 }
   },
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
