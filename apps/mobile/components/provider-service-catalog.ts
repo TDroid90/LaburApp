@@ -34,9 +34,28 @@ export const professionalSuggestions = [
   "Gasista", "Electricista domiciliario", "Plomero", "Técnico en calefacción", "Técnico en refrigeración", "Albañil", "Instalador de aberturas", "Pintor", "Carpintero", "Herrero", "Técnico en reparación de electrodomésticos", "Técnico en informática", "Mecánico", "Fletero", "Personal de limpieza", "Jardinero", "Cerrajero", "Cuidador de adultos mayores", "Niñera", "Peluquero", "Costurero", "Fotógrafo", "Profesor particular", "Guía turístico/a y excursiones", "Guía de senderismo", "Organizador/a de experiencias turísticas", "Planificador/a de itinerarios", "Candy", "Especialista en candy bar", "Wedding planner", "Coordinador/a de eventos",
 ];
 
-export const certificationSuggestions = [
-  "Matrícula vigente", "Identidad verificada", "Certificado de formación", "Curso de especialización", "Seguro de responsabilidad civil", "Primeros auxilios", "Manipulación de alimentos", "Antecedentes verificados", "Registro de conducir profesional", "Habilitación municipal",
+export type CertificationRule = {
+  label: string;
+  requiresNumber: boolean;
+  numberLabel?: string;
+};
+
+// Réplica de respaldo del diccionario administrado en base de datos y documentado
+// en la pestaña DICCIONARIO de la hoja operativa.
+export const certificationRules: CertificationRule[] = [
+  { label: "Matrícula vigente", requiresNumber: true, numberLabel: "Número de matrícula" },
+  { label: "Identidad verificada", requiresNumber: false },
+  { label: "Certificado de formación", requiresNumber: false },
+  { label: "Curso de especialización", requiresNumber: false },
+  { label: "Seguro de responsabilidad civil", requiresNumber: true, numberLabel: "Número de póliza" },
+  { label: "Primeros auxilios", requiresNumber: false },
+  { label: "Manipulación de alimentos", requiresNumber: true, numberLabel: "Número de certificado" },
+  { label: "Antecedentes verificados", requiresNumber: false },
+  { label: "Registro de conducir profesional", requiresNumber: true, numberLabel: "Número de licencia" },
+  { label: "Habilitación municipal", requiresNumber: true, numberLabel: "Número de habilitación" },
 ];
+
+export const certificationSuggestions = certificationRules.map((item) => item.label);
 
 export function specialtyDescription(familyName: string, specialty: string) {
   const family = providerServiceCatalog.find((item) => item.name === familyName);

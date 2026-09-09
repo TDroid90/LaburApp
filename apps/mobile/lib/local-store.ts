@@ -100,6 +100,7 @@ export type SavedProviderProfile = {
   bio: string;
   training?: string;
   certifications?: string[];
+  credentials?: SavedCredentialEvidence[];
   services?: SavedServiceOffer[];
   coverageAreas?: string[];
   portfolioWorks?: SavedPortfolioWork[];
@@ -111,6 +112,19 @@ export type SavedProviderProfile = {
   availabilityEnd?: string;
   tariffItems?: SavedTariffItem[];
   published: boolean;
+};
+
+export type CredentialReviewStatus = "missing" | "pending" | "verified" | "rejected";
+
+export type SavedCredentialEvidence = {
+  id?: string;
+  certification: string;
+  number?: string;
+  numberLabel?: string;
+  imageUri?: string;
+  privatePath?: string;
+  status: CredentialReviewStatus;
+  updatedAt?: string;
 };
 
 export type SavedServiceOffer = {

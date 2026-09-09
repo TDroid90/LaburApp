@@ -33,6 +33,7 @@ import {
 import {
   loadLocalState,
   saveLocalState,
+  SavedCredentialEvidence,
   SavedMessage,
   SavedPortfolioWork,
   SavedProviderProfile,
@@ -1601,6 +1602,7 @@ export default function Home() {
       },
     ];
     let photoUri = nextDraft.photoUri;
+    let savedCredentials = nextDraft.credentials ?? [];
     if (supabase && !isDemoSession) {
       const {
         data: { user },
@@ -1668,6 +1670,86 @@ export default function Home() {
         setProfileBusy(false);
         return setProfileError("No pudimos habilitar el modo prestador. Intentá nuevamente.");
       }
+      const existingCredentialsResult = await supabase
+        .from("credentials")
+        .select("id, kind, private_path")
+        .eq("provider_id", user.id);
+      if (existingCredentialsResult.error) {
+        setProfileBusy(false);
+        return setProfileError(existingCredentialsResult.error.message);
+      }
+      const selectedCertifications = new Set(nextDraft.certifications ?? []);
+      const staleCredentials = (existingCredentialsResult.data ?? []).filter(
+        (credential) => !selectedCertifications.has(String(credential.kind)),
+      );
+      if (staleCredentials.length) {
+        const stalePaths = staleCredentials.map((credential) => String(credential.private_path)).filter(Boolean);
+        const deleteRows = await supabase
+          .from("credentials")
+          .delete()
+          .in("id", staleCredentials.map((credential) => credential.id));
+        if (deleteRows.error) {
+          setProfileBusy(false);
+          return setProfileError(deleteRows.error.message);
+        }
+        if (stalePaths.length) await supabase.storage.from("provider-credentials").remove(stalePaths);
+      }
+      const processedCredentials: SavedCredentialEvidence[] = [];
+      for (const credential of nextDraft.credentials ?? []) {
+        if (!selectedCertifications.has(credential.certification)) continue;
+        if (!credential.imageUri && !credential.privatePath) {
+          processedCredentials.push(credential);
+          continue;
+        }
+        let privatePath = credential.privatePath;
+        if (credential.imageUri && (!privatePath || credential.imageUri.startsWith("data:") || credential.imageUri.startsWith("file:") || credential.imageUri.startsWith("blob:"))) {
+          const photoResponse = await fetch(credential.imageUri);
+          const photoBlob = await photoResponse.blob();
+          const safeCertification = credential.certification
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .toLocaleLowerCase("es-AR")
+            .replace(/[^a-z0-9]+/g, "-")
+            .replace(/^-|-$/g, "")
+            .slice(0, 48) || "comprobante";
+          privatePath = `${user.id}/${Date.now()}-${safeCertification}.jpg`;
+          const uploadResult = await supabase.storage
+            .from("provider-credentials")
+            .upload(privatePath, photoBlob, {
+              contentType: "image/jpeg",
+              upsert: false,
+            });
+          if (uploadResult.error) {
+            setProfileBusy(false);
+            return setProfileError(`No pudimos guardar el comprobante de ${credential.certification}: ${uploadResult.error.message}`);
+          }
+        }
+        if (!privatePath) continue;
+        const credentialNumber = credential.number?.trim() || null;
+        const row = {
+          provider_id: user.id,
+          kind: credential.certification,
+          credential_number: credentialNumber,
+          number_masked: credentialNumber ? `••••${credentialNumber.slice(-4)}` : null,
+          private_path: privatePath,
+        };
+        const savedRow = credential.id
+          ? await supabase.from("credentials").update(row).eq("id", credential.id).select("id, status, updated_at").single()
+          : await supabase.from("credentials").insert(row).select("id, status, updated_at").single();
+        if (savedRow.error) {
+          setProfileBusy(false);
+          return setProfileError(savedRow.error.message);
+        }
+        processedCredentials.push({
+          ...credential,
+          id: String(savedRow.data.id),
+          imageUri: undefined,
+          privatePath,
+          status: savedRow.data.status as SavedCredentialEvidence["status"],
+          updatedAt: String(savedRow.data.updated_at),
+        });
+      }
+      savedCredentials = processedCredentials;
       await supabase
         .from("provider_services")
         .delete()
@@ -1740,6 +1822,7 @@ export default function Home() {
     const publishedProfile = {
       ...nextDraft,
       photoUri,
+      credentials: savedCredentials,
       tariffItems,
       services,
       published: true,
@@ -3325,17 +3408,21 @@ export default function Home() {
                         <Text style={styles.panelEyebrow}>CERTIFICACIONES</Text>
                         <View style={styles.certificationList}>
                           {providerProfile.certifications.map(
-                            (certification) => (
+                            (certification) => {
+                              const reviewStatus = providerProfile.credentials?.find((credential) => credential.certification === certification)?.status ?? "missing";
+                              const isVerified = reviewStatus === "verified";
+                              return (
                               <View
                                 key={certification}
-                                style={styles.certificationBadge}
+                                style={[styles.certificationBadge, !isVerified && styles.certificationPendingBadge]}
                               >
-                                <Text style={styles.certificationIcon}>✓</Text>
-                                <Text style={styles.certificationText}>
-                                  {certification}
+                                <Text style={[styles.certificationIcon, !isVerified && styles.certificationPendingIcon]}>{isVerified ? "✓" : "…"}</Text>
+                                <Text style={[styles.certificationText, !isVerified && styles.certificationPendingText]}>
+                                  {certification}{isVerified ? "" : reviewStatus === "pending" ? " · en revisión" : reviewStatus === "rejected" ? " · observada" : " · sin validar"}
                                 </Text>
                               </View>
-                            ),
+                              );
+                            },
                           )}
                         </View>
                       </View>
@@ -4975,6 +5062,16 @@ function createStyles(colors: ThemeColors) {
       color: colors.successText,
       fontSize: 10,
       fontWeight: "900",
+    },
+    certificationPendingBadge: {
+      backgroundColor: colors.surfaceSoft,
+      borderColor: colors.orange,
+    },
+    certificationPendingIcon: {
+      backgroundColor: colors.orange,
+    },
+    certificationPendingText: {
+      color: colors.stone,
     },
     servicePlanBadge: { color: colors.green, fontSize: 9, fontWeight: "900" },
     profileServiceCard: {

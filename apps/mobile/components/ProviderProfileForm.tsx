@@ -1,9 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import * as ImagePicker from "expo-image-picker";
+import * as ImageManipulator from "expo-image-manipulator";
 import { Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from "react-native";
 import { containsContactAttempt } from "@laburapp/shared";
-import type { SavedProviderProfile, SavedServiceOffer } from "../lib/local-store";
-import { certificationSuggestions, professionalSuggestions, providerServiceCatalog, serviceSpecialtiesAreValid, specialtyDescription } from "./provider-service-catalog";
+import type { SavedCredentialEvidence, SavedProviderProfile, SavedServiceOffer } from "../lib/local-store";
+import { supabase } from "../lib/supabase";
+import { certificationRules as fallbackCertificationRules, professionalSuggestions, providerServiceCatalog, serviceSpecialtiesAreValid, specialtyDescription, type CertificationRule } from "./provider-service-catalog";
 
 const cities = ["San Sebastián", "Río Grande", "Tolhuin", "Almanza", "Ushuaia"];
 const coverageChoices = [...cities, "Zonas rurales"];
@@ -67,6 +69,7 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
     diagnosticPrice: initialProfile.diagnosticPrice ?? legacyDiagnostic?.price ?? 35000,
     services: normalizeServices(initialProfile),
     certifications: initialProfile.certifications ?? [],
+    credentials: initialProfile.credentials ?? [],
     coverageAreas: initialCoverage,
     zones: coverageLabel(initialCoverage),
     availabilityStart: initialProfile.availabilityStart ?? initialProfile.services?.find((item) => item.startTime)?.startTime ?? "08:00",
@@ -76,6 +79,7 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
   const [coverageOpen, setCoverageOpen] = useState(false);
   const [activeTradeField, setActiveTradeField] = useState<"primary" | "secondary" | null>(null);
   const [certificationInput, setCertificationInput] = useState("");
+  const [certificationRules, setCertificationRules] = useState<CertificationRule[]>(fallbackCertificationRules);
   const [openFamilyId, setOpenFamilyId] = useState<string | null>(null);
   const [openSpecialtyId, setOpenSpecialtyId] = useState<string | null>(null);
   const [membershipNotice, setMembershipNotice] = useState(false);
@@ -84,7 +88,27 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
   const services = draft.services ?? [];
   const activeTradeValue = activeTradeField === "secondary" ? draft.secondaryTrade ?? "" : draft.trade;
   const filteredTrades = professionalSuggestions.filter((item) => item.toLocaleLowerCase("es-AR").includes(activeTradeValue.trim().toLocaleLowerCase("es-AR"))).slice(0, 6);
+  const certificationSuggestions = certificationRules.map((item) => item.label);
   const filteredCertifications = certificationSuggestions.filter((item) => !draft.certifications?.includes(item) && item.toLocaleLowerCase("es-AR").includes(certificationInput.trim().toLocaleLowerCase("es-AR"))).slice(0, 6);
+
+  useEffect(() => {
+    if (!supabase) return;
+    let active = true;
+    void supabase
+      .from("certification_types")
+      .select("label, requires_number, number_label")
+      .eq("active", true)
+      .order("position")
+      .then(({ data }) => {
+        if (!active || !data?.length) return;
+        setCertificationRules(data.map((item) => ({
+          label: String(item.label),
+          requiresNumber: Boolean(item.requires_number),
+          numberLabel: item.number_label ? String(item.number_label) : undefined,
+        })));
+      });
+    return () => { active = false; };
+  }, []);
 
   function updateService(id: string, patch: Partial<SavedServiceOffer>) {
     setDraft((current) => ({ ...current, services: (current.services ?? []).map((item) => item.id === id ? { ...item, ...patch } : item) }));
@@ -130,6 +154,59 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
     setCertificationInput("");
   }
 
+  function removeCertification(certification: string) {
+    setDraft((current) => ({
+      ...current,
+      certifications: current.certifications?.filter((item) => item !== certification),
+      credentials: current.credentials?.filter((item) => item.certification !== certification),
+    }));
+  }
+
+  function updateCredential(certification: string, patch: Partial<SavedCredentialEvidence>) {
+    setDraft((current) => {
+      const credentials = current.credentials ?? [];
+      const existing = credentials.find((item) => item.certification === certification);
+      const next: SavedCredentialEvidence = {
+        certification,
+        status: existing?.status ?? "missing",
+        ...existing,
+        ...patch,
+        updatedAt: new Date().toISOString(),
+      };
+      return {
+        ...current,
+        credentials: existing
+          ? credentials.map((item) => item.certification === certification ? next : item)
+          : [...credentials, next],
+      };
+    });
+  }
+
+  async function pickCredentialPhoto(certification: string) {
+    setLocalError("");
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ["images"],
+      allowsEditing: false,
+      quality: 0.9,
+    });
+    if (result.canceled || !result.assets[0]) return;
+    const asset = result.assets[0];
+    const longestSide = Math.max(asset.width ?? 0, asset.height ?? 0);
+    const resize = longestSide > 1600
+      ? asset.width >= asset.height ? [{ resize: { width: 1600 } }] : [{ resize: { height: 1600 } }]
+      : [];
+    const optimized = await ImageManipulator.manipulateAsync(
+      asset.uri,
+      resize,
+      { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true },
+    );
+    updateCredential(certification, {
+      imageUri: optimized.base64 ? `data:image/jpeg;base64,${optimized.base64}` : optimized.uri,
+      privatePath: undefined,
+      status: "pending",
+    });
+  }
+
   async function pickPhoto() {
     const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: true, aspect: [1, 1], quality: 0.7, base64: true });
     if (result.canceled || !result.assets[0]) return;
@@ -152,6 +229,15 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
     if (!services.length || services.some((item) => !serviceSpecialtiesAreValid(item.family, item.specialties?.length ? item.specialties : item.service ? [item.service] : []))) return setLocalError("Elegí una familia y hasta dos especialidades válidas para cada servicio.");
     if (services.some((item) => (item.description?.trim().length ?? 0) < 10 || (item.description?.trim().length ?? 0) > 240)) return setLocalError("Describí cada servicio con entre 10 y 240 caracteres.");
     if (services.some((item) => containsContactAttempt(item.description ?? ""))) return setLocalError("No incluyas teléfonos, correos, redes ni enlaces en la descripción del servicio.");
+    const invalidCredential = (draft.credentials ?? []).find((credential) => {
+      if (!credential.imageUri && !credential.privatePath) return false;
+      const rule = certificationRules.find((item) => item.label === credential.certification);
+      return rule?.requiresNumber && (credential.number?.trim().length ?? 0) < 3;
+    });
+    if (invalidCredential) {
+      const rule = certificationRules.find((item) => item.label === invalidCredential.certification);
+      return setLocalError(`Completá ${rule?.numberLabel?.toLocaleLowerCase("es-AR") ?? "el número"} de ${invalidCredential.certification}.`);
+    }
     onSubmit({ ...draft, trade: draft.trade.trim().replace(/ matriculad[oa]$/i, ""), secondaryTrade: draft.secondaryTrade?.trim().replace(/ matriculad[oa]$/i, "") || undefined, zones: coverageLabel(draft.coverageAreas), availability: coverageLabel(draft.coverageAreas), skills: services.flatMap((item) => item.specialties ?? [item.service]).join(", "), services: services.map((item) => ({ ...item, startTime: draft.availabilityStart ?? "08:00", endTime: draft.availabilityEnd ?? "18:00" })) });
   }
 
@@ -188,9 +274,29 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
       <TextInput multiline value={draft.training ?? ""} onChangeText={(training) => setDraft({ ...draft, training })} placeholder="Formación y experiencia" placeholderTextColor="#71818B" maxLength={1200} style={[styles.input, styles.multilineSmall]} />
 
       <Text style={styles.label}>Certificaciones</Text>
-      {!!draft.certifications?.length && <View style={styles.chipList}>{draft.certifications.map((certification) => <View key={certification} style={styles.chip}><Text style={styles.chipText}>#{certification.replace(/\s+/g, "_")}</Text><TouchableOpacity accessibilityRole="button" accessibilityLabel={`Quitar ${certification}`} onPress={() => setDraft((current) => ({ ...current, certifications: current.certifications?.filter((item) => item !== certification) }))}><Text style={styles.chipRemove}>×</Text></TouchableOpacity></View>)}</View>}
+      {!!draft.certifications?.length && <View style={styles.chipList}>{draft.certifications.map((certification) => <View key={certification} style={styles.chip}><Text style={styles.chipText}>#{certification.replace(/\s+/g, "_")}</Text><TouchableOpacity accessibilityRole="button" accessibilityLabel={`Quitar ${certification}`} onPress={() => removeCertification(certification)}><Text style={styles.chipRemove}>×</Text></TouchableOpacity></View>)}</View>}
       <TextInput value={certificationInput} onFocus={() => { setActiveTradeField(null); setCityOpen(false); setCoverageOpen(false); }} onChangeText={setCertificationInput} onSubmitEditing={() => addCertification(certificationInput)} placeholder="Escribí para agregar una certificación" placeholderTextColor="#71818B" style={styles.input} />
       {certificationInput.trim().length > 0 && <View style={styles.suggestions}>{filteredCertifications.map((certification) => <TouchableOpacity key={certification} style={styles.suggestion} onPress={() => addCertification(certification)}><Text style={styles.suggestionHash}>#</Text><Text style={styles.suggestionText}>{certification}</Text></TouchableOpacity>)}<TouchableOpacity style={styles.suggestion} onPress={() => addCertification(certificationInput)}><Text style={styles.suggestionHash}>+</Text><Text style={styles.suggestionText}>Agregar “{certificationInput.trim()}”</Text></TouchableOpacity></View>}
+      {!!draft.certifications?.length && <View style={styles.credentialsList}>
+        {draft.certifications.map((certification) => {
+          const credential = draft.credentials?.find((item) => item.certification === certification);
+          const rule = certificationRules.find((item) => item.label === certification);
+          const status = credential?.status ?? "missing";
+          return <View key={`evidence-${certification}`} style={styles.credentialCard}>
+            <View style={styles.credentialHeader}>
+              <View style={styles.credentialTitleWrap}><Text style={styles.credentialTitle}>{certification}</Text><Text style={styles.credentialPrivacy}>El comprobante sólo lo ven vos y administración.</Text></View>
+              <Text style={[styles.credentialStatus, status === "verified" && styles.credentialVerified, status === "rejected" && styles.credentialRejected]}>{status === "verified" ? "VERIFICADA" : status === "pending" ? "EN REVISIÓN" : status === "rejected" ? "OBSERVADA" : "SIN VALIDAR"}</Text>
+            </View>
+            <View style={[styles.credentialBody, compact && styles.credentialBodyCompact]}>
+              {(credential?.imageUri || credential?.privatePath) ? <View style={styles.credentialPreviewWrap}>{credential?.imageUri ? <Image source={{ uri: credential.imageUri }} resizeMode="contain" style={styles.credentialPreview} /> : <View style={styles.credentialStored}><Text style={styles.credentialStoredIcon}>✓</Text><Text style={styles.credentialStoredText}>Comprobante guardado</Text></View>}</View> : <View style={styles.credentialEmpty}><Text style={styles.credentialEmptyIcon}>▧</Text><Text style={styles.credentialEmptyText}>Foto completa y legible</Text></View>}
+              <View style={styles.credentialFields}>
+                {rule?.requiresNumber && <><Text style={styles.miniLabel}>{(rule.numberLabel ?? "Número de matrícula").toLocaleUpperCase("es-AR")}</Text><TextInput value={credential?.number ?? ""} onChangeText={(number) => updateCredential(certification, { number: number.replace(/\D/g, "").slice(0, 30), numberLabel: rule.numberLabel, status: credential?.imageUri || credential?.privatePath ? "pending" : "missing" })} keyboardType="number-pad" placeholder="Ingresá sólo números" placeholderTextColor="#71818B" style={styles.input} /></>}
+                <TouchableOpacity accessibilityRole="button" style={styles.credentialUpload} onPress={() => void pickCredentialPhoto(certification)}><Text style={styles.credentialUploadText}>{credential?.imageUri || credential?.privatePath ? "Cambiar comprobante" : "Subir foto del comprobante"}</Text></TouchableOpacity>
+              </View>
+            </View>
+          </View>;
+        })}
+      </View>}
 
       <Text style={styles.label}>Dónde trabajás</Text>
       <TouchableOpacity accessibilityRole="button" accessibilityLabel="Elegir alcance de trabajo" style={styles.selector} onPress={() => { setCoverageOpen((current) => !current); setCityOpen(false); setActiveTradeField(null); setOpenFamilyId(null); setOpenSpecialtyId(null); }}><Text style={styles.selectorText}>{draft.zones}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
@@ -257,6 +363,7 @@ function createStyles(darkMode: boolean) {
     fieldsRow: { flexDirection: "row", gap: 10 }, fieldsColumn: { flexDirection: "column" }, flexField: { flex: 1.6 }, diagnosticField: { flex: 1 }, input: { minHeight: 46, borderWidth: 1, borderColor: palette.line, borderRadius: 11, paddingHorizontal: 12, color: palette.text, backgroundColor: palette.input, marginBottom: 8 }, label: { color: palette.text, fontSize: 12, fontWeight: "900", marginTop: 5, marginBottom: 6 }, help: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: -3, marginBottom: 8 }, multiline: { minHeight: 76, paddingTop: 11, textAlignVertical: "top" }, multilineSmall: { minHeight: 62, paddingTop: 11, textAlignVertical: "top" }, money: { minHeight: 46, flexDirection: "row", alignItems: "center", borderWidth: 1, borderColor: palette.line, borderRadius: 11, backgroundColor: palette.input, paddingHorizontal: 10, marginBottom: 8 }, currency: { color: palette.muted, fontSize: 10, fontWeight: "900" }, priceInput: { flex: 1, color: palette.text, fontWeight: "900", paddingHorizontal: 6 }, timeRow: { flexDirection: "row", gap: 10, zIndex: 5 }, timeField: { flex: 1 }, timeOptions: { maxHeight: 180, borderWidth: 1, borderColor: palette.line, borderRadius: 10, backgroundColor: palette.input, marginTop: -3, marginBottom: 8 },
     selector: { minHeight: 46, borderWidth: 1, borderColor: palette.line, backgroundColor: palette.input, borderRadius: 11, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, marginBottom: 7 }, disabledSelector: { opacity: 0.48 }, selectorText: { color: palette.text, fontSize: 12, fontWeight: "800", flex: 1 }, placeholder: { color: palette.muted, fontWeight: "500" }, chevron: { color: "#49B2F5", fontSize: 17, fontWeight: "900" }, options: { borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 8, backgroundColor: palette.input }, catalogOptions: { maxHeight: 265, borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 9, backgroundColor: palette.input }, specialtyOptions: { maxHeight: 280, borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 9, backgroundColor: palette.input }, option: { minHeight: 41, justifyContent: "center", paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: palette.line }, coverageOption: { minHeight: 42, flexDirection: "row", alignItems: "center", gap: 9, paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: palette.line }, optionCheck: { color: "#49B2F5", fontSize: 15, fontWeight: "900" }, familyOption: { minHeight: 57, justifyContent: "center", paddingHorizontal: 11, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: palette.line }, specialtyOption: { minHeight: 66, justifyContent: "center", paddingHorizontal: 11, paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: palette.line }, specialtyOptionActive: { backgroundColor: palette.soft }, unavailableOption: { opacity: 0.38 }, specialtyTitleRow: { flexDirection: "row", alignItems: "center", gap: 8 }, optionActive: { backgroundColor: palette.soft }, optionText: { color: palette.muted, fontSize: 12, fontWeight: "800" }, optionTextActive: { color: palette.text, fontWeight: "900" }, optionDescription: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: 3 }, specialtyTitle: { color: palette.text, fontSize: 12, fontWeight: "900" },
     suggestions: { borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", backgroundColor: palette.surface, marginTop: -5, marginBottom: 9 }, suggestion: { minHeight: 40, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: palette.line }, suggestionHash: { color: "#49B2F5", fontSize: 13, fontWeight: "900" }, suggestionText: { color: palette.text, fontSize: 11, fontWeight: "800" }, chipList: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 8 }, chip: { flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderColor: "#49B2F5", backgroundColor: palette.soft, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 14 }, chipText: { color: "#49B2F5", fontSize: 10, fontWeight: "900" }, chipRemove: { color: palette.danger, fontSize: 16, lineHeight: 16, fontWeight: "900" },
+    credentialsList: { gap: 8, marginBottom: 10 }, credentialCard: { borderWidth: 1, borderColor: palette.line, borderRadius: 13, backgroundColor: palette.surface, padding: 11 }, credentialHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: 9 }, credentialTitleWrap: { flex: 1 }, credentialTitle: { color: palette.text, fontSize: 12, fontWeight: "900" }, credentialPrivacy: { color: palette.muted, fontSize: 9, lineHeight: 13, marginTop: 2 }, credentialStatus: { color: palette.warningText, backgroundColor: palette.warning, borderRadius: 9, paddingHorizontal: 7, paddingVertical: 4, fontSize: 8, fontWeight: "900", overflow: "hidden" }, credentialVerified: { color: "#56D3A1", backgroundColor: palette.soft }, credentialRejected: { color: palette.danger }, credentialBody: { flexDirection: "row", alignItems: "stretch", gap: 10 }, credentialBodyCompact: { flexDirection: "column" }, credentialPreviewWrap: { width: 118, minHeight: 92, borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", backgroundColor: palette.input }, credentialPreview: { width: "100%", height: 92 }, credentialStored: { flex: 1, minHeight: 92, alignItems: "center", justifyContent: "center", padding: 8 }, credentialStoredIcon: { color: "#56D3A1", fontSize: 22, fontWeight: "900" }, credentialStoredText: { color: palette.muted, textAlign: "center", fontSize: 9, fontWeight: "800", marginTop: 4 }, credentialEmpty: { width: 118, minHeight: 92, alignItems: "center", justifyContent: "center", borderWidth: 1, borderStyle: "dashed", borderColor: palette.line, borderRadius: 10, backgroundColor: palette.input, padding: 8 }, credentialEmptyIcon: { color: "#49B2F5", fontSize: 25, fontWeight: "900" }, credentialEmptyText: { color: palette.muted, textAlign: "center", fontSize: 9, fontWeight: "800", marginTop: 4 }, credentialFields: { flex: 1 }, credentialUpload: { minHeight: 42, borderWidth: 1, borderColor: "#49B2F5", borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 10 }, credentialUploadText: { color: "#49B2F5", fontSize: 10, fontWeight: "900", textAlign: "center" },
     servicesHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 2 }, freeBadge: { color: "#56D3A1", backgroundColor: palette.soft, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, fontSize: 10, fontWeight: "900" }, serviceCard: { borderWidth: 1, borderColor: palette.line, backgroundColor: palette.surface, borderRadius: 14, padding: 11, marginTop: 8 }, serviceTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 9 }, serviceNumber: { color: "#49B2F5", fontSize: 10, fontWeight: "900", letterSpacing: 0.4 }, remove: { color: palette.danger, fontSize: 10, fontWeight: "900" }, miniLabel: { color: palette.muted, fontSize: 9, fontWeight: "900", marginTop: 4, marginBottom: 5 }, descriptionHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }, counter: { color: palette.muted, fontSize: 9, fontWeight: "800" }, serviceDescription: { minHeight: 82, paddingTop: 11, textAlignVertical: "top" }, addService: { minHeight: 44, borderWidth: 1, borderStyle: "dashed", borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center", marginTop: 9 }, addServiceText: { color: "#49B2F5", fontSize: 12, fontWeight: "900" }, lockedService: { minHeight: 58, borderRadius: 11, backgroundColor: palette.soft, marginTop: 9, paddingHorizontal: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, opacity: 0.86 }, membershipNotice: { borderWidth: 1, borderColor: palette.warningText, borderRadius: 11, backgroundColor: palette.warning, marginTop: 9, padding: 11 }, lockedTitle: { color: palette.muted, fontSize: 12, fontWeight: "900" }, lockedText: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: 2 }, membershipBadge: { color: palette.warningText, fontSize: 9, fontWeight: "900", backgroundColor: palette.warning, borderRadius: 9, paddingHorizontal: 7, paddingVertical: 4 },
     error: { color: palette.danger, fontSize: 12, fontWeight: "800", marginTop: 7 }, actions: { flexDirection: "row", gap: 8, marginTop: 12 }, cancel: { minHeight: 48, minWidth: 92, borderWidth: 1, borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center" }, cancelText: { color: "#49B2F5", fontWeight: "900" }, save: { flex: 1, minHeight: 48, borderRadius: 11, backgroundColor: "#FF7800", alignItems: "center", justifyContent: "center" }, saveText: { color: "white", fontWeight: "900" }, disabled: { opacity: 0.55 },
   });
