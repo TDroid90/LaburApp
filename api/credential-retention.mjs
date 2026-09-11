@@ -26,12 +26,12 @@ export default async function handler(req, res) {
   if (!cronSecret || supplied !== `Bearer ${cronSecret}`) return respond(res, 401, { error: "No autorizado." });
 
   const supabaseUrl = process.env.SUPABASE_URL || process.env.EXPO_PUBLIC_SUPABASE_URL;
-  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
   if (!supabaseUrl || !serviceKey) return respond(res, 503, { error: "Retención no configurada." });
 
   const now = new Date().toISOString();
   const purgeResponse = await fetch(
-    `${supabaseUrl}/rest/v1/credentials?select=id,private_path&document_purge_at=lte.${encodeURIComponent(now)}&document_deleted_at=is.null&private_path=not.is.null`,
+    `${supabaseUrl}/rest/v1/credentials?select=id,private_path,status&document_purge_at=lte.${encodeURIComponent(now)}&document_deleted_at=is.null&private_path=not.is.null`,
     { headers: serviceHeaders(serviceKey) },
   );
   if (!purgeResponse.ok) return respond(res, 502, { error: "No se pudo consultar la cola de eliminación." });
@@ -51,8 +51,29 @@ export default async function handler(req, res) {
     const updated = await patchCredential(supabaseUrl, serviceKey, credential.id, {
       private_path: null,
       document_deleted_at: now,
+      ...(credential.status === "pending" ? {
+        status: "rejected",
+        review_notes: "El archivo alcanzó el plazo máximo de conservación. Volvé a cargar un comprobante legible.",
+      } : {}),
     });
     if (updated.ok) documentsDeleted += 1;
+    else failures += 1;
+  }
+
+  const ocrPurgeResponse = await fetch(
+    `${supabaseUrl}/rest/v1/credentials?select=id&ocr_purge_at=lte.${encodeURIComponent(now)}&ocr_deleted_at=is.null&ocr_text=not.is.null`,
+    { headers: serviceHeaders(serviceKey) },
+  );
+  if (!ocrPurgeResponse.ok) return respond(res, 502, { error: "No se pudo consultar la cola temporal de lectura." });
+
+  let ocrRecordsDeleted = 0;
+  for (const credential of await ocrPurgeResponse.json()) {
+    const updated = await patchCredential(supabaseUrl, serviceKey, credential.id, {
+      ocr_text: null,
+      ocr_fields: {},
+      ocr_deleted_at: now,
+    });
+    if (updated.ok) ocrRecordsDeleted += 1;
     else failures += 1;
   }
 
@@ -76,7 +97,7 @@ export default async function handler(req, res) {
         user_id: credential.provider_id,
         kind: "credential_renewal",
         title: "Actualizá tu documentación",
-        body: "La verificación cumplió seis meses. Subí un comprobante vigente para renovarla.",
+        body: "La verificación llegó a su fecha de actualización. Subí un comprobante vigente para renovarla.",
         data: { credential_id: credential.id, certification: credential.kind },
       }),
     });
@@ -84,5 +105,5 @@ export default async function handler(req, res) {
     else failures += 1;
   }
 
-  return respond(res, failures ? 207 : 200, { ok: failures === 0, documentsDeleted, renewalsRequested, failures });
+  return respond(res, failures ? 207 : 200, { ok: failures === 0, documentsDeleted, ocrRecordsDeleted, renewalsRequested, failures });
 }

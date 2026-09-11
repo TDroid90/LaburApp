@@ -7,7 +7,8 @@
   "functions": {
     "api/drive-sync.mjs": { "maxDuration": 60 },
     "api/sheets-mirror.mjs": { "maxDuration": 30 },
-    "api/credential-retention.mjs": { "maxDuration": 60 }
+    "api/credential-retention.mjs": { "maxDuration": 60 },
+    "api/registry-lookup.mjs": { "maxDuration": 30 }
   },
   "crons": [
     { "path": "/api/credential-retention", "schedule": "17 3 * * *" }
