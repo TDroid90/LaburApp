@@ -15,8 +15,12 @@ port = 54323
 
 [auth]
 enabled = true
-site_url = "laburapp://auth/callback"
-additional_redirect_urls = ["http://localhost:3000/auth/callback"]
+site_url = "https://laburapp-iota.vercel.app"
+additional_redirect_urls = [
+  "https://laburapp-iota.vercel.app/**",
+  "laburapp://auth/callback",
+  "http://localhost:3000/**"
+]
 
 [storage]
 enabled = true
