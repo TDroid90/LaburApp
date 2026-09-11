@@ -915,6 +915,21 @@ function passwordSecurityError(value: string) {
   return null;
 }
 
+function readableAuthError(message: string) {
+  const normalized = message.toLowerCase();
+  if (normalized.includes("invalid login credentials"))
+    return "El correo o la contraseña no son correctos.";
+  if (normalized.includes("email not confirmed"))
+    return "Confirmá tu correo antes de ingresar.";
+  if (normalized.includes("user already registered"))
+    return "Ya existe una cuenta con ese correo.";
+  if (normalized.includes("rate limit") || normalized.includes("too many requests"))
+    return "Hiciste varios intentos seguidos. Esperá unos minutos y volvé a probar.";
+  if (normalized.includes("password should be") || normalized.includes("weak password"))
+    return "La contraseña no cumple los requisitos de seguridad.";
+  return "No pudimos completar el acceso. Volvé a intentarlo.";
+}
+
 function safeFolderPart(value: string) {
   return (
     value
@@ -1449,7 +1464,7 @@ export default function Home() {
       const result = await supabase.auth.updateUser({ password: authPassword });
       if (!result.error) await supabase.rpc("complete_password_change");
       setAuthBusy(false);
-      if (result.error) return setAuthError(result.error.message);
+      if (result.error) return setAuthError(readableAuthError(result.error.message));
       await supabase.auth.signOut();
       setSession(null);
       setSignedInName(null);
@@ -1476,7 +1491,7 @@ export default function Home() {
           )
         : { error: null };
       setAuthBusy(false);
-      if (error) return setAuthError(error.message);
+      if (error) return setAuthError(readableAuthError(error.message));
       setAuthMode(guestGateLocked ? "login" : null);
       setRequested(
         supabase
@@ -1521,7 +1536,7 @@ export default function Home() {
             });
       if (result.error) {
         setAuthBusy(false);
-        return setAuthError(result.error.message);
+        return setAuthError(readableAuthError(result.error.message));
       }
       if (authMode === "register" && !result.data.session) {
         setAuthBusy(false);
