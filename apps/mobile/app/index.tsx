@@ -4054,6 +4054,7 @@ export default function Home() {
                       onPress={() => setAuthCity(city)}
                       style={[
                         styles.roleChoice,
+                        styles.cityChoice,
                         authCity === city && styles.roleChoiceActive,
                       ]}
                     >
@@ -5724,6 +5725,10 @@ function createStyles(colors: ThemeColors) {
       alignItems: "center",
       justifyContent: "center",
       paddingHorizontal: 8,
+    },
+    cityChoice: {
+      flexBasis: 148,
+      maxWidth: 210,
     },
     roleChoiceActive: {
       borderColor: colors.blue,
