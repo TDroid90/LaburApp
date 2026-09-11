@@ -6,8 +6,12 @@
   "framework": null,
   "functions": {
     "api/drive-sync.mjs": { "maxDuration": 60 },
-    "api/sheets-mirror.mjs": { "maxDuration": 30 }
+    "api/sheets-mirror.mjs": { "maxDuration": 30 },
+    "api/credential-retention.mjs": { "maxDuration": 60 }
   },
+  "crons": [
+    { "path": "/api/credential-retention", "schedule": "17 3 * * *" }
+  ],
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
   ]

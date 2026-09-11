@@ -3,7 +3,7 @@
     "name": "LaburApp",
     "slug": "laburapp",
     "scheme": "laburapp",
-    "version": "1.0.0",
+    "version": "0.9.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -28,19 +28,10 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.alsema.laburapp",
-      "associatedDomains": ["applinks:laburapp.work", "webcredentials:laburapp.work"]
+      "bundleIdentifier": "com.alsema.laburapp"
     },
     "android": {
       "package": "com.alsema.laburapp",
-      "intentFilters": [
-        {
-          "action": "VIEW",
-          "autoVerify": true,
-          "data": [{ "scheme": "https", "host": "laburapp.work", "pathPrefix": "/" }],
-          "category": ["BROWSABLE", "DEFAULT"]
-        }
-      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",

@@ -114,7 +114,7 @@ export type SavedProviderProfile = {
   published: boolean;
 };
 
-export type CredentialReviewStatus = "missing" | "pending" | "verified" | "rejected";
+export type CredentialReviewStatus = "missing" | "pending" | "verified" | "rejected" | "expired";
 
 export type SavedCredentialEvidence = {
   id?: string;

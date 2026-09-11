@@ -1,7 +1,7 @@
-# Limitaciones conocidas
+# Limitaciones conocidas de 0.9
 
-Esta entrega es una foundation ejecutable, no el producto completo descrito en el brief. Hoy funcionan la experiencia demo, registro e ingreso local, recuperación simulada, cierre de sesión, solicitudes persistentes, presupuestos modulares y revisiones, pago protegido ficticio con comisión, estados del trabajo, conversación con bloqueo de contacto, finalización, reseña verificada, creación progresiva del perfil de prestador, el panel visual, las reglas principales, pruebas y el esquema inicial con RLS. La integración de Google Sheets está preparada, pero requiere la hoja definitiva y secretos del servidor para activarse.
+Ya funcionan con Supabase: registro e ingreso, recuperación de contraseña, roles, perfiles, solicitudes, fotos privadas de solicitudes, presupuestos modulares y revisiones, chat en tiempo real con bloqueo de contacto/precios, cancelación, aceptación, QR de finalización, reseñas verificadas y comprobantes privados de certificaciones. Google Sheets actúa como espejo operativo y no como fuente de verdad.
 
-Aún no están conectados a servicios reales: autenticación y recuperación remotas, carga de fotos y documentos, sincronización en tiempo real de presupuestos y chat, QR por cámara, proveedor de pagos, funciones privilegiadas, push, OCR, sanciones, páginas de administración mutables, tests RLS y publicación EAS.
+Antes de considerar 1.0 siguen pendientes: proveedor de pagos y reintegros reales, notificaciones push, revisión documental asistida por OCR, herramientas completas de moderación dentro del panel, sanciones automatizadas, borrado de cuenta desde la app, pruebas físicas iOS/Android y publicación EAS. La verificación documental actual es manual; el sistema sólo gestiona acceso, estado, vencimiento y eliminación.
 
-Pagos, anuncios, SMS y verificaciones oficiales permanecen deliberadamente desactivados. No debe usarse esta versión para operaciones reales ni almacenar documentación personal hasta completar una revisión de seguridad y cumplimiento.
+Pagos, anuncios y SMS permanecen desactivados. La versión 0.9 puede usarse como beta controlada, pero no debe anunciar “pago protegido” como transacción real hasta integrar y auditar al proveedor de cobros.

@@ -17,6 +17,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
+import * as Linking from "expo-linking";
 import QRCode from "react-native-qrcode-svg";
 import { containsContactAttempt, containsPriceAttempt, reviewIsEligible } from "@laburapp/shared";
 import { PortfolioEditor } from "../components/PortfolioEditor";
@@ -858,7 +859,7 @@ const darkColors: typeof lightColors = {
 type ThemeColors = typeof lightColors;
 const THEME_STORAGE_KEY = "laburapp-color-theme";
 const officialWordmark = require("../assets/brand/laburapp-wordmark-clean.png");
-const demoAccessEnabled = process.env.EXPO_PUBLIC_DEMO_ACCESS !== "false";
+const demoAccessEnabled = process.env.EXPO_PUBLIC_DEMO_ACCESS === "true";
 const cityChoices = [
   "San Sebastián",
   "Río Grande",
@@ -868,6 +869,16 @@ const cityChoices = [
 ];
 const driveProfessionalsFolderId = "1YyLePscAWsVX8O9aIKaQTaMHSPpMq3ZD";
 const driveProjectRootFolderId = "1Y8lNj4zpDXRA_ASUn0GCRmbtI9TE2QfI";
+const GUEST_PREVIEW_MS = 15_000;
+
+function passwordSecurityError(value: string) {
+  if (value.length < 12) return "La contraseña debe tener al menos 12 caracteres.";
+  if (!/[a-záéíóúñ]/.test(value) || !/[A-ZÁÉÍÓÚÑ]/.test(value))
+    return "Incluí al menos una mayúscula y una minúscula.";
+  if (!/\d/.test(value) || !/[^A-Za-zÁÉÍÓÚáéíóúÑñ0-9]/.test(value))
+    return "Incluí al menos un número y un símbolo.";
+  return null;
+}
 
 function safeFolderPart(value: string) {
   return (
@@ -904,6 +915,7 @@ function AppModal({
 
 export default function Home() {
   const { width } = useWindowDimensions();
+  const linkingUrl = Linking.useLinkingURL();
   const [darkMode, setDarkMode] = useState(true);
   const colors = darkMode ? darkColors : lightColors;
   const styles = useMemo(() => createStyles(colors), [darkMode]);
@@ -923,8 +935,12 @@ export default function Home() {
   const [hiddenRequestIds, setHiddenRequestIds] = useState<string[]>([]);
   const [undoCancellation, setUndoCancellation] = useState<UndoCancellation | null>(null);
   const [authMode, setAuthMode] = useState<
-    "login" | "register" | "recovery" | null
+    "login" | "register" | "recovery" | "update-password" | null
   >(null);
+  const [guestGateLocked, setGuestGateLocked] = useState(false);
+  const [passwordChangeRequired, setPasswordChangeRequired] = useState(false);
+  const [processedRecoveryUrl, setProcessedRecoveryUrl] = useState<string | null>(null);
+  const [adminPreviewRole, setAdminPreviewRole] = useState<"admin" | "client" | "provider">("admin");
   const [signedInName, setSignedInName] = useState<string | null>(null);
   const [session, setSession] = useState<SavedSession | null>(null);
   const [requests, setRequests] = useState<SavedRequest[]>([]);
@@ -934,6 +950,7 @@ export default function Home() {
   const [authName, setAuthName] = useState("");
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
+  const [authPasswordConfirm, setAuthPasswordConfirm] = useState("");
   const [authRole, setAuthRole] = useState<"client" | "provider">("client");
   const [authCity, setAuthCity] = useState("Río Grande");
   const [authBusy, setAuthBusy] = useState(false);
@@ -993,8 +1010,9 @@ export default function Home() {
   const authButtonLabel = signedInName
     ? `Hola, ${signedInName.split(" ")[0]}`
     : "Ingresar";
+  const effectiveRole = session?.role === "admin" ? adminPreviewRole : session?.role;
   const navigationItems =
-    session?.role === "admin"
+    effectiveRole === "admin"
       ? ["Inicio", "Panel", "Perfil"]
       : ["Inicio", "Solicitudes", "QR", "Contratados", "Perfil"];
   const isDemoSession = session?.email.endsWith("@laburapp.demo") ?? false;
@@ -1005,20 +1023,96 @@ export default function Home() {
       if (savedTheme === "dark") setDarkMode(true);
     });
     void flushMirrorEvents();
-    loadLocalState().then((saved) => {
+    loadLocalState().then(async (saved) => {
+      let restoredSession = saved.session;
+      if (restoredSession?.email.endsWith("@laburapp.demo") && !demoAccessEnabled) {
+        restoredSession = null;
+      } else if (restoredSession && supabase && !restoredSession.email.endsWith("@laburapp.demo")) {
+        const authResult = await supabase.auth.getUser();
+        const user = authResult.data.user;
+        if (!user || user.email?.toLowerCase() !== restoredSession.email.toLowerCase()) {
+          restoredSession = null;
+        } else {
+          const [rolesResult, profileResult] = await Promise.all([
+            supabase.from("user_roles").select("role").eq("user_id", user.id),
+            supabase.from("profiles").select("full_name, avatar_path, must_change_password").eq("id", user.id).maybeSingle(),
+          ]);
+          const role: SavedSession["role"] = rolesResult.data?.some((item) => item.role === "admin")
+            ? "admin"
+            : rolesResult.data?.some((item) => item.role === "provider")
+              ? "provider"
+              : "client";
+          restoredSession = {
+            name: profileResult.data?.full_name ?? restoredSession.name,
+            email: restoredSession.email,
+            role,
+            photoUri: profileResult.data?.avatar_path ?? undefined,
+          };
+          setCurrentUserId(user.id);
+          if (profileResult.data?.must_change_password === true) {
+            setPasswordChangeRequired(true);
+            setAuthMode("update-password");
+          }
+        }
+      }
       const restoredProviderProfile =
-        saved.session?.email === "profesional@laburapp.demo" &&
+        restoredSession?.email === "profesional@laburapp.demo" &&
         (!saved.providerProfile || !saved.providerProfile.portfolioWorks?.length)
-          ? createDemoProviderProfile(saved.session.name)
-          : saved.providerProfile;
-      setSession(saved.session);
-      setSignedInName(saved.session?.name ?? null);
-      setRequests(saved.requests);
+          ? createDemoProviderProfile(restoredSession.name)
+          : restoredSession?.role === "provider" ? saved.providerProfile : null;
+      setSession(restoredSession);
+      setSignedInName(restoredSession?.name ?? null);
+      setRequests(restoredSession ? saved.requests : []);
       setProviderProfile(restoredProviderProfile);
       if (restoredProviderProfile) setProfileDraft(restoredProviderProfile);
       setHydrated(true);
     });
   }, []);
+
+  useEffect(() => {
+    if (!hydrated || session) {
+      setGuestGateLocked(false);
+      return;
+    }
+    setTab("Inicio");
+    const timer = setTimeout(() => {
+      setGuestGateLocked(true);
+      setAuthMode((current) => current ?? "register");
+    }, GUEST_PREVIEW_MS);
+    return () => clearTimeout(timer);
+  }, [hydrated, session?.email]);
+
+  useEffect(() => {
+    if (!supabase) return;
+    const { data } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "PASSWORD_RECOVERY") {
+        setPasswordChangeRequired(true);
+        setAuthPassword("");
+        setAuthPasswordConfirm("");
+        setAuthMode("update-password");
+      }
+    });
+    return () => data.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!supabase || !linkingUrl || Platform.OS === "web" || processedRecoveryUrl === linkingUrl) return;
+    const parsed = Linking.parse(linkingUrl);
+    const code = typeof parsed.queryParams?.code === "string" ? parsed.queryParams.code : null;
+    const isRecovery = parsed.path === "recover-password" || parsed.queryParams?.type === "recovery";
+    if (!code && !isRecovery) return;
+    setProcessedRecoveryUrl(linkingUrl);
+    void (async () => {
+      if (code) {
+        const result = await supabase.auth.exchangeCodeForSession(code);
+        if (result.error) return setAuthError("El enlace venció o ya fue utilizado. Pedí uno nuevo.");
+      }
+      setPasswordChangeRequired(true);
+      setAuthPassword("");
+      setAuthPasswordConfirm("");
+      setAuthMode("update-password");
+    })();
+  }, [linkingUrl, processedRecoveryUrl]);
 
   function toggleTheme() {
     setDarkMode((current) => {
@@ -1040,7 +1134,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!hydrated) return;
-    saveLocalState({ session, requests, providerProfile }).catch(() =>
+    saveLocalState({ session, requests, providerProfile: session?.role === "admin" ? null : providerProfile }).catch(() =>
       setRequested("No pudimos guardar los cambios en este dispositivo."),
     );
   }, [hydrated, session, requests, providerProfile]);
@@ -1155,6 +1249,27 @@ export default function Home() {
 
   async function submitAuth() {
     setAuthError("");
+    if (authMode === "update-password") {
+      const securityError = passwordSecurityError(authPassword);
+      if (securityError) return setAuthError(securityError);
+      if (authPassword !== authPasswordConfirm) return setAuthError("Las contraseñas no coinciden.");
+      if (!supabase) return setAuthError("La recuperación requiere conexión con la base segura.");
+      setAuthBusy(true);
+      const result = await supabase.auth.updateUser({ password: authPassword });
+      if (!result.error) await supabase.rpc("complete_password_change");
+      setAuthBusy(false);
+      if (result.error) return setAuthError(result.error.message);
+      await supabase.auth.signOut();
+      setSession(null);
+      setSignedInName(null);
+      setPasswordChangeRequired(false);
+      setGuestGateLocked(true);
+      setAuthPassword("");
+      setAuthPasswordConfirm("");
+      setAuthMode("login");
+      setRequested("Contraseña actualizada. Ingresá nuevamente.");
+      return;
+    }
     if (!authEmail.includes("@"))
       return setAuthError("Ingresá un correo válido.");
     if (authMode === "recovery") {
@@ -1163,15 +1278,15 @@ export default function Home() {
         ? await supabase.auth.resetPasswordForEmail(
             authEmail.trim().toLowerCase(),
             {
-              redirectTo:
-                process.env.EXPO_PUBLIC_APP_URL ??
-                "https://laburapp-iota.vercel.app",
+              redirectTo: Platform.OS === "web"
+                ? (typeof window !== "undefined" ? window.location.origin : process.env.EXPO_PUBLIC_APP_URL ?? "https://laburapp-iota.vercel.app")
+                : Linking.createURL("recover-password"),
             },
           )
         : { error: null };
       setAuthBusy(false);
       if (error) return setAuthError(error.message);
-      setAuthMode(null);
+      setAuthMode(guestGateLocked ? "login" : null);
       setRequested(
         supabase
           ? "Revisá tu correo para recuperar la cuenta."
@@ -1179,10 +1294,13 @@ export default function Home() {
       );
       return;
     }
-    if (authPassword.length < 8)
-      return setAuthError("La contraseña debe tener al menos 8 caracteres.");
-    if (!/[A-Za-zÁÉÍÓÚáéíóúÑñ]/.test(authPassword) || !/\d/.test(authPassword))
-      return setAuthError("La contraseña debe incluir al menos una letra y un número.");
+    if (authMode === "register") {
+      const securityError = passwordSecurityError(authPassword);
+      if (securityError) return setAuthError(securityError);
+      if (authPassword !== authPasswordConfirm) return setAuthError("Las contraseñas no coinciden.");
+    } else if (authPassword.length < 8) {
+      return setAuthError("Ingresá tu contraseña completa.");
+    }
     if (authMode === "register" && authName.trim().length < 2)
       return setAuthError("Ingresá tu nombre y apellido.");
     if (authMode === "register" && !acceptedTerms)
@@ -1195,6 +1313,7 @@ export default function Home() {
     let resolvedRole: SavedSession["role"] =
       authMode === "register" ? authRole : "client";
     let photoUri: string | undefined;
+    let mustChangePassword = false;
     if (supabase) {
       const result =
         authMode === "register"
@@ -1215,7 +1334,7 @@ export default function Home() {
       }
       if (authMode === "register" && !result.data.session) {
         setAuthBusy(false);
-        setAuthMode(null);
+        setAuthMode(guestGateLocked ? "login" : null);
         setAuthPassword("");
         setRequested(
           "Cuenta creada. Revisá tu correo para confirmarla y después ingresá.",
@@ -1236,11 +1355,12 @@ export default function Home() {
             : "client";
         const profileResult = await supabase
           .from("profiles")
-          .select("full_name, avatar_path")
+          .select("full_name, avatar_path, must_change_password")
           .eq("id", result.data.user.id)
           .maybeSingle();
         if (profileResult.data?.full_name) name = profileResult.data.full_name;
         photoUri = profileResult.data?.avatar_path ?? undefined;
+        mustChangePassword = profileResult.data?.must_change_password === true;
       }
     } else if (authMode === "login") {
       const demo = demoAccounts.find(
@@ -1266,10 +1386,15 @@ export default function Home() {
         role: nextSession.role,
         city: authCity,
         source: supabase ? "supabase" : "mobile_demo",
+        password_management: "Supabase Auth · no exportable",
+        recovery: "Correo de recuperación",
       });
     setAuthBusy(false);
-    setAuthMode(null);
+    setGuestGateLocked(false);
+    setAuthMode(mustChangePassword ? "update-password" : null);
+    setPasswordChangeRequired(mustChangePassword);
     setAuthPassword("");
+    setAuthPasswordConfirm("");
     if (authMode === "register" && authRole === "provider") {
       setProfileDraft((current) => ({
         ...current,
@@ -1286,6 +1411,8 @@ export default function Home() {
     setAuthMode(null);
     setAuthError("");
     setAuthPassword("");
+    setAuthPasswordConfirm("");
+    setGuestGateLocked(false);
     if (account.role === "admin") setTab("Panel");
     if (
       account.role === "provider" &&
@@ -2072,8 +2199,31 @@ export default function Home() {
     setSession(null);
     setCurrentUserId(null);
     setSignedInName(null);
+    setAdminPreviewRole("admin");
+    setProviderProfile(null);
+    setGuestGateLocked(false);
     setTab("Inicio");
     setRequested("Cerraste sesión en este dispositivo.");
+  }
+
+  function showAdminPreview(role: "client" | "provider") {
+    if (session?.role !== "admin") return;
+    setAdminPreviewRole(role);
+    if (role === "provider") {
+      const preview = createDemoProviderProfile(session.name);
+      setProviderProfile(preview);
+      setProfileDraft(preview);
+      setTab("Perfil");
+    } else {
+      setProviderProfile(null);
+      setTab("Inicio");
+    }
+  }
+
+  function leaveAdminPreview() {
+    setAdminPreviewRole("admin");
+    setProviderProfile(null);
+    setTab("Panel");
   }
 
   function updateRequest(
@@ -2465,6 +2615,7 @@ export default function Home() {
         .map(({ provider }) => provider),
     [query, cityFilter, providerSort],
   );
+  const visibleProviders = session ? filtered : filtered.slice(0, 4);
   const selectedPublicWorks = publicProfileProvider
     ? publicPortfolioFor(publicProfileProvider)
     : [];
@@ -2557,6 +2708,16 @@ export default function Home() {
           </TouchableOpacity>
         </View>
       </View>
+      {session?.role === "admin" && adminPreviewRole !== "admin" && (
+        <View style={styles.adminPreviewBanner}>
+          <Text style={styles.adminPreviewText}>
+            Vista como {adminPreviewRole === "client" ? "cliente" : "prestador"} · seguís siendo administrador
+          </Text>
+          <TouchableOpacity accessibilityRole="button" onPress={leaveAdminPreview}>
+            <Text style={styles.adminPreviewAction}>Volver al panel</Text>
+          </TouchableOpacity>
+        </View>
+      )}
       <ScrollView
         contentContainerStyle={[styles.content, compactHeader && styles.contentCompact]}
         keyboardShouldPersistTaps="handled"
@@ -2583,7 +2744,7 @@ export default function Home() {
                 style={styles.quickSearches}
                 accessibilityLabel="Búsquedas frecuentes"
               >
-                {quickSearches.map((term) => (
+                {(session ? quickSearches : quickSearches.slice(0, 6)).map((term) => (
                   <TouchableOpacity
                     key={term}
                     accessibilityRole="button"
@@ -2609,8 +2770,10 @@ export default function Home() {
             <View style={[styles.sectionHeader, compactHeader && styles.sectionHeaderCompact]}>
               <Text style={[styles.sectionTitle, compactHeader && styles.sectionTitleCompact]}>
                 {query || cityFilter !== "Todas"
-                  ? `Resultados · ${filtered.length}`
-                  : `Profesionales cerca tuyo · ${filtered.length}`}
+                  ? `Resultados · ${session ? filtered.length : visibleProviders.length}`
+                  : session
+                    ? `Profesionales cerca tuyo · ${filtered.length}`
+                    : "Profesionales destacados"}
               </Text>
               <View
                 style={[styles.compactFilters, compactHeader && styles.compactFiltersMobile]}
@@ -2715,7 +2878,13 @@ export default function Home() {
                 </View>
               </View>
             </View>
-            {filtered.map((provider) => {
+            {!session && (
+              <View style={styles.guestPreviewNotice}>
+                <Text style={styles.guestPreviewTitle}>Explorá antes de registrarte</Text>
+                <Text style={styles.guestPreviewCopy}>Te mostramos una selección breve. Para pedir presupuestos y ver todas las funciones necesitás una cuenta.</Text>
+              </View>
+            )}
+            {visibleProviders.map((provider) => {
               const featuredWork = featuredWorkFor(provider);
               const expanded = expandedProviderName === provider.name;
               const initials = provider.name.split(" ").map((part) => part[0]).join("");
@@ -2743,10 +2912,10 @@ export default function Home() {
                     </TouchableOpacity>
                     <View style={styles.featuredWorkCopy}><Text style={styles.favoriteLabel}>★ DESTACADO</Text><Text style={styles.featuredWorkTitle}>{featuredWork.title}</Text><Text numberOfLines={3} style={styles.featuredWorkDescription}>{featuredWork.description}</Text><TouchableOpacity accessibilityRole="link" onPress={() => setPublicProfileProvider(provider)}><Text style={styles.viewProfileLink}>Ver perfil completo</Text></TouchableOpacity></View>
                 </View>}
-                <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => startQuote(provider)}><Text style={styles.buttonText}>Solicitar presupuesto</Text></TouchableOpacity>
+                <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => startQuote(provider)}><Text style={styles.buttonText}>{session ? "Solicitar presupuesto" : "Ingresá para solicitar"}</Text></TouchableOpacity>
               </View>;
             })}
-            {filtered.length === 0 && (
+            {visibleProviders.length === 0 && (
               <View style={styles.empty}>
                 <Text style={styles.emptyTitle}>
                   Tito no encontró coincidencias
@@ -2761,7 +2930,7 @@ export default function Home() {
           <View style={styles.sectionPage}>
             <Text style={styles.pageTitle}>Solicitudes</Text>
             <Text style={styles.pageCopy}>Pedí y recibí presupuestos. Si tenés el modo prestador activo, también respondés desde acá.</Text>
-            {session?.role !== "admin" && (
+            {effectiveRole !== "admin" && (
               <View style={styles.requestQuotaCard}>
                 <View>
                   <Text style={styles.panelEyebrow}>PLAN GRATIS</Text>
@@ -2777,7 +2946,7 @@ export default function Home() {
                 </Text>
               </View>
             )}
-            {(session?.role === "provider" || providerProfile?.published) && (
+            {(effectiveRole === "provider" || providerProfile?.published) && (
               <View style={styles.notificationsPanel}>
                 <View style={styles.notificationHeading}>
                   <View>
@@ -2823,7 +2992,7 @@ export default function Home() {
                 )}
               </View>
             )}
-            {(session?.role === "provider" || providerProfile?.published) && isDemoSession && <View style={styles.simulatorBanner}>
+            {(effectiveRole === "provider" || providerProfile?.published) && isDemoSession && <View style={styles.simulatorBanner}>
               <View style={styles.simulatorCopy}>
                 <Text style={styles.simulatorTitle}>Simulador del PMV</Text>
                 <Text style={styles.simulatorText}>
@@ -3201,6 +3370,15 @@ export default function Home() {
             <Text style={styles.pageCopy}>
               Vista operativa reservada para cuentas con rol administrador.
             </Text>
+            <View style={styles.adminViewSwitcher}>
+              <TouchableOpacity accessibilityRole="button" style={styles.adminViewButton} onPress={() => showAdminPreview("client")}>
+                <Text style={styles.adminViewButtonText}>VER COMO CLIENTE</Text>
+              </TouchableOpacity>
+              <TouchableOpacity accessibilityRole="button" style={styles.adminViewButton} onPress={() => showAdminPreview("provider")}>
+                <Text style={styles.adminViewButtonText}>VER COMO PRESTADOR</Text>
+              </TouchableOpacity>
+            </View>
+            <Text style={styles.adminViewHelp}>Estas vistas no cambian tus permisos de administrador.</Text>
             <View style={styles.adminMetrics}>
               {[
                 ["Usuarios", "1.284"],
@@ -3267,9 +3445,9 @@ export default function Home() {
             ) : (
               <>
                 <View style={styles.accountCard}>
-                  {(session.role === "provider" ? providerProfile?.photoUri : session.photoUri) ? (
+                  {(effectiveRole === "provider" ? providerProfile?.photoUri : session.photoUri) ? (
                     <Image
-                      source={{ uri: session.role === "provider" ? providerProfile?.photoUri : session.photoUri }}
+                      source={{ uri: effectiveRole === "provider" ? providerProfile?.photoUri : session.photoUri }}
                       style={styles.profilePhoto}
                     />
                   ) : (
@@ -3282,7 +3460,7 @@ export default function Home() {
                   <View style={styles.accountBody}>
                     <View style={styles.verifiedNameRow}>
                       <Text style={styles.accountName}>{session.name}</Text>
-                      {session.role === "provider" && providerProfile?.verified && (
+                      {effectiveRole === "provider" && providerProfile?.verified && (
                         <Text
                           accessibilityLabel="Perfil verificado"
                           style={styles.verifiedIcon}
@@ -3290,7 +3468,7 @@ export default function Home() {
                           ✓
                         </Text>
                       )}
-                      {session.role === "provider" && !!providerProfile?.diagnosticPrice && (
+                      {effectiveRole === "provider" && !!providerProfile?.diagnosticPrice && (
                         <Text style={styles.diagnosticBadge}>
                           Diagnóstico desde $
                           {providerProfile.diagnosticPrice.toLocaleString(
@@ -3299,7 +3477,7 @@ export default function Home() {
                         </Text>
                       )}
                     </View>
-                    {session.role === "client" ? (
+                    {effectiveRole === "client" ? (
                       <Text style={styles.clientJobsCount}>{clientHistory.length} trabajos contratados en los últimos 6 meses</Text>
                     ) : (
                       <>
@@ -3314,12 +3492,12 @@ export default function Home() {
                       </>
                     )}
                   </View>
-                  {session.role === "client" && (
+                  {effectiveRole === "client" && session.role !== "admin" && (
                     <TouchableOpacity accessibilityRole="button" disabled={clientPhotoBusy} style={styles.editProfileButton} onPress={() => void pickClientPhoto()}>
                       <Text style={styles.editProfileButtonText}>{clientPhotoBusy ? "CARGANDO…" : session.photoUri ? "CAMBIAR FOTO" : "AGREGAR FOTO"}</Text>
                     </TouchableOpacity>
                   )}
-                  {session.role === "provider" && providerProfile?.published && (
+                  {effectiveRole === "provider" && providerProfile?.published && (
                     <TouchableOpacity
                       accessibilityRole="button"
                       style={styles.followersButton}
@@ -3332,7 +3510,7 @@ export default function Home() {
                     </TouchableOpacity>
                   )}
                 </View>
-                {session.role === "provider" && followersVisible && providerProfile?.published && (
+                {effectiveRole === "provider" && followersVisible && providerProfile?.published && (
                   <View style={styles.followersPanel}>
                     <View style={styles.workCardTop}>
                       <Text style={styles.panelEyebrow}>SEGUIDORES</Text>
@@ -3360,7 +3538,7 @@ export default function Home() {
                     ))}
                   </View>
                 )}
-                {session.role === "provider" && providerProfile?.published ? (
+                {effectiveRole === "provider" && providerProfile?.published ? (
                   <View style={styles.providerPanel}>
                     <View style={styles.workCardTop}>
                       <Text style={styles.panelEyebrow}>
@@ -3368,16 +3546,16 @@ export default function Home() {
                       </Text>
                       <View style={styles.providerHeaderActions}>
                         <Text style={styles.publishedBadge}>Publicado</Text>
-                        <TouchableOpacity
-                          accessibilityRole="button"
-                          accessibilityLabel="Editar perfil de prestador"
-                          style={styles.editProfileButton}
-                          onPress={openProviderProfile}
-                        >
-                          <Text style={styles.editProfileButtonText}>
-                            EDITAR
-                          </Text>
-                        </TouchableOpacity>
+                        {session.role !== "admin" && (
+                          <TouchableOpacity
+                            accessibilityRole="button"
+                            accessibilityLabel="Editar perfil de prestador"
+                            style={styles.editProfileButton}
+                            onPress={openProviderProfile}
+                          >
+                            <Text style={styles.editProfileButtonText}>EDITAR</Text>
+                          </TouchableOpacity>
+                        )}
                       </View>
                     </View>
                     <Text style={styles.providerTrade}>
@@ -3418,7 +3596,7 @@ export default function Home() {
                               >
                                 <Text style={[styles.certificationIcon, !isVerified && styles.certificationPendingIcon]}>{isVerified ? "✓" : "…"}</Text>
                                 <Text style={[styles.certificationText, !isVerified && styles.certificationPendingText]}>
-                                  {certification}{isVerified ? "" : reviewStatus === "pending" ? " · en revisión" : reviewStatus === "rejected" ? " · observada" : " · sin validar"}
+                                  {certification}{isVerified ? "" : reviewStatus === "pending" ? " · en revisión" : reviewStatus === "rejected" ? " · observada" : reviewStatus === "expired" ? " · actualizar" : " · sin validar"}
                                 </Text>
                               </View>
                               );
@@ -3509,9 +3687,11 @@ export default function Home() {
                         </Text>
                         <View style={styles.providerHeaderActions}>
                           <Text style={styles.servicePlanBadge}>3 GRATIS</Text>
-                          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Editar trabajos realizados" style={styles.editProfileButton} onPress={openPortfolioEditor}>
-                            <Text style={styles.editProfileButtonText}>EDITAR</Text>
-                          </TouchableOpacity>
+                          {session.role !== "admin" && (
+                            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Editar trabajos realizados" style={styles.editProfileButton} onPress={openPortfolioEditor}>
+                              <Text style={styles.editProfileButtonText}>EDITAR</Text>
+                            </TouchableOpacity>
+                          )}
                         </View>
                       </View>
                       {providerProfile.portfolioWorks?.length ? (
@@ -3547,7 +3727,7 @@ export default function Home() {
                       )}
                     </View>
                   </View>
-                ) : session.role === "client" || session.role === "provider" ? (
+                ) : effectiveRole === "client" || effectiveRole === "provider" ? (
                   <View style={styles.providerInvite}>
                     <Text style={styles.providerInviteTitle}>
                       ¿Querés ofrecer tus servicios?
@@ -3556,14 +3736,11 @@ export default function Home() {
                       Completá todo en una sola pantalla y empezá a recibir
                       solicitudes.
                     </Text>
-                    <TouchableOpacity
-                      style={styles.modalPrimary}
-                      onPress={openProviderProfile}
-                    >
-                      <Text style={styles.modalPrimaryText}>
-                        Crear perfil de prestador
-                      </Text>
-                    </TouchableOpacity>
+                    {session.role !== "admin" && (
+                      <TouchableOpacity style={styles.modalPrimary} onPress={openProviderProfile}>
+                        <Text style={styles.modalPrimaryText}>Crear perfil de prestador</Text>
+                      </TouchableOpacity>
+                    )}
                   </View>
                 ) : (
                   <View style={styles.reviewBox}>
@@ -3727,35 +3904,47 @@ export default function Home() {
       </AppModal>
       <AppModal
         visible={authMode !== null}
-        onRequestClose={() => setAuthMode(null)}
+        onRequestClose={() => {
+          if (!guestGateLocked && !passwordChangeRequired) setAuthMode(null);
+        }}
       >
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
-            <TouchableOpacity
-              accessibilityRole="button"
-              accessibilityLabel="Cerrar"
-              style={styles.modalClose}
-              onPress={() => setAuthMode(null)}
-            >
-              <Text style={styles.modalCloseText}>×</Text>
-            </TouchableOpacity>
+            {!guestGateLocked && !passwordChangeRequired && (
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel="Cerrar"
+                style={styles.modalClose}
+                onPress={() => setAuthMode(null)}
+              >
+                <Text style={styles.modalCloseText}>×</Text>
+              </TouchableOpacity>
+            )}
             <Text style={styles.modalTitle}>
               {authMode === "login"
                 ? "Ingresá a LaburApp"
                 : authMode === "recovery"
                   ? "Recuperá tu cuenta"
-                  : "Creá tu cuenta"}
+                  : authMode === "update-password"
+                    ? "Creá una contraseña nueva"
+                    : "Creá tu cuenta"}
             </Text>
             <Text style={styles.modalCopy}>
               {authMode === "login"
                 ? supabase
-                  ? "Ingresá con tu cuenta de LaburApp."
+                  ? guestGateLocked
+                    ? "Ya viste lo esencial. Ingresá o registrate para continuar."
+                    : "Ingresá con tu cuenta de LaburApp."
                   : "Continuá con una cuenta demo para probar el flujo."
                 : authMode === "recovery"
                   ? supabase
                     ? "Ingresá tu correo y te enviaremos instrucciones."
                     : "En el modo demo no se envía ningún correo real."
-                  : "Una cuenta sirve para contratar y ofrecer servicios."}
+                  : authMode === "update-password"
+                    ? "Usá 12 caracteres o más, con mayúscula, minúscula, número y símbolo."
+                    : guestGateLocked
+                      ? "Registrate gratis para ver perfiles completos y solicitar presupuestos."
+                      : "Una cuenta sirve para contratar y ofrecer servicios."}
             </Text>
             {authMode === "login" && demoAccessEnabled && (
               <View style={styles.demoAccounts}>
@@ -3795,21 +3984,33 @@ export default function Home() {
                 style={styles.modalInput}
               />
             )}
-            <TextInput
-              value={authEmail}
-              onChangeText={setAuthEmail}
-              autoCapitalize="none"
-              keyboardType="email-address"
-              placeholder="Correo electrónico"
-              placeholderTextColor="#71818B"
-              style={styles.modalInput}
-            />
+            {authMode !== "update-password" && (
+              <TextInput
+                value={authEmail}
+                onChangeText={setAuthEmail}
+                autoCapitalize="none"
+                keyboardType="email-address"
+                placeholder="Correo electrónico"
+                placeholderTextColor="#71818B"
+                style={styles.modalInput}
+              />
+            )}
             {authMode !== "recovery" && (
               <TextInput
                 value={authPassword}
                 onChangeText={setAuthPassword}
                 secureTextEntry
-                placeholder="Contraseña (6 caracteres mínimo)"
+                placeholder={authMode === "login" ? "Contraseña" : "Contraseña segura (12 caracteres mínimo)"}
+                placeholderTextColor="#71818B"
+                style={styles.modalInput}
+              />
+            )}
+            {(authMode === "register" || authMode === "update-password") && (
+              <TextInput
+                value={authPasswordConfirm}
+                onChangeText={setAuthPasswordConfirm}
+                secureTextEntry
+                placeholder="Repetí la contraseña"
                 placeholderTextColor="#71818B"
                 style={styles.modalInput}
               />
@@ -3896,6 +4097,8 @@ export default function Home() {
                     ? "Ingresar"
                     : authMode === "recovery"
                       ? "Enviar instrucciones"
+                      : authMode === "update-password"
+                        ? "Guardar contraseña segura"
                       : supabase
                         ? "Crear cuenta"
                         : "Crear cuenta demo"}
@@ -3912,21 +4115,25 @@ export default function Home() {
                 <Text style={styles.recoveryLink}>Olvidé mi contraseña</Text>
               </TouchableOpacity>
             )}
-            <TouchableOpacity
-              accessibilityRole="button"
-              onPress={() => {
-                setAuthError("");
-                setAuthMode(authMode === "login" ? "register" : "login");
-              }}
-            >
-              <Text style={styles.modalSwitch}>
-                {authMode === "login"
-                  ? "¿No tenés cuenta? Registrate"
-                  : authMode === "recovery"
-                    ? "Volver a ingresar"
-                    : "¿Ya tenés cuenta? Ingresá"}
-              </Text>
-            </TouchableOpacity>
+            {authMode !== "update-password" && (
+              <TouchableOpacity
+                accessibilityRole="button"
+                onPress={() => {
+                  setAuthError("");
+                  setAuthPassword("");
+                  setAuthPasswordConfirm("");
+                  setAuthMode(authMode === "login" ? "register" : "login");
+                }}
+              >
+                <Text style={styles.modalSwitch}>
+                  {authMode === "login"
+                    ? "¿No tenés cuenta? Registrate"
+                    : authMode === "recovery"
+                      ? "Volver a ingresar"
+                      : "¿Ya tenés cuenta? Ingresá"}
+                </Text>
+              </TouchableOpacity>
+            )}
           </View>
         </View>
       </AppModal>
@@ -4318,23 +4525,25 @@ export default function Home() {
           )}
         </View>
       </AppModal>
-      <View style={[styles.nav, compactHeader && styles.navCompact]}>
-        {navigationItems.map((item) => (
-          <TouchableOpacity
-            accessibilityRole="button"
-            accessibilityLabel={item}
-            key={item}
-            onPress={() => setTab(item)}
-            style={[styles.navItem, item === "QR" && styles.qrNavItem]}
-          >
-            {item === "QR" ? (
-              <><Text style={styles.qrNavIcon}>▣</Text><Text style={[styles.qrNavText, tab === item && styles.navActive]}>QR</Text></>
-            ) : (
-              <Text numberOfLines={1} style={[styles.navText, compactHeader && styles.navTextCompact, tab === item && styles.navActive]}>{item}</Text>
-            )}
-          </TouchableOpacity>
-        ))}
-      </View>
+      {session && (
+        <View style={[styles.nav, compactHeader && styles.navCompact]}>
+          {navigationItems.map((item) => (
+            <TouchableOpacity
+              accessibilityRole="button"
+              accessibilityLabel={item}
+              key={item}
+              onPress={() => setTab(item)}
+              style={[styles.navItem, item === "QR" && styles.qrNavItem]}
+            >
+              {item === "QR" ? (
+                <><Text style={styles.qrNavIcon}>▣</Text><Text style={[styles.qrNavText, tab === item && styles.navActive]}>QR</Text></>
+              ) : (
+                <Text numberOfLines={1} style={[styles.navText, compactHeader && styles.navTextCompact, tab === item && styles.navActive]}>{item}</Text>
+              )}
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -4401,6 +4610,9 @@ function createStyles(colors: ThemeColors) {
     loginButtonTextCompact: { fontSize: 12 },
     content: { padding: 18, paddingBottom: 110 },
     contentCompact: { paddingHorizontal: 12, paddingTop: 12, paddingBottom: 104 },
+    adminPreviewBanner: { minHeight: 38, paddingHorizontal: 16, paddingVertical: 8, backgroundColor: colors.warningSurface, borderBottomWidth: 1, borderBottomColor: colors.orange, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
+    adminPreviewText: { flex: 1, color: colors.warningText, fontSize: 11, fontWeight: "800" },
+    adminPreviewAction: { color: colors.orange, fontSize: 11, fontWeight: "900" },
     hero: {
       backgroundColor: colors.brandNavy,
       borderRadius: 24,
@@ -4453,6 +4665,9 @@ function createStyles(colors: ThemeColors) {
       lineHeight: 14,
       fontWeight: "700",
     },
+    guestPreviewNotice: { backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.line, borderRadius: 14, padding: 12, marginBottom: 12 },
+    guestPreviewTitle: { color: colors.navy, fontSize: 13, fontWeight: "900" },
+    guestPreviewCopy: { color: colors.stone, fontSize: 11, lineHeight: 16, marginTop: 3 },
     quickSearchTextActive: { color: "white" },
     sectionHeader: {
       minHeight: 42,
@@ -5224,6 +5439,10 @@ function createStyles(colors: ThemeColors) {
     providerInviteTitle: { color: "white", fontSize: 20, fontWeight: "900" },
     logoutButton: { alignSelf: "center", padding: 14, marginTop: 13 },
     logoutText: { color: colors.danger, fontWeight: "800" },
+    adminViewSwitcher: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 },
+    adminViewButton: { flexGrow: 1, minHeight: 44, borderRadius: 12, borderWidth: 1, borderColor: colors.blue, backgroundColor: colors.brandNavy, alignItems: "center", justifyContent: "center", paddingHorizontal: 14 },
+    adminViewButtonText: { color: "white", fontSize: 11, fontWeight: "900" },
+    adminViewHelp: { color: colors.stone, fontSize: 10, marginTop: 7, marginBottom: 10 },
     adminMetrics: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
     adminMetric: {
       flexGrow: 1,
