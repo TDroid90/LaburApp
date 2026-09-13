@@ -44,7 +44,7 @@ import {
   SavedSession,
 } from "../lib/local-store";
 import { enqueueMirrorEvent, flushMirrorEvents } from "../lib/mirror-events";
-import { backendMode, supabase } from "../lib/supabase";
+import { supabase } from "../lib/supabase";
 
 const providers = [
   {
@@ -1141,11 +1141,15 @@ export default function Home() {
             supabase.from("user_roles").select("role").eq("user_id", user.id),
             supabase.from("profiles").select("full_name, avatar_path, must_change_password").eq("id", user.id).maybeSingle(),
           ]);
+          const requestedProvider = user.user_metadata?.role === "provider";
           const role: SavedSession["role"] = rolesResult.data?.some((item) => item.role === "admin")
             ? "admin"
-            : rolesResult.data?.some((item) => item.role === "provider")
+            : rolesResult.data?.some((item) => item.role === "provider") || requestedProvider
               ? "provider"
               : "client";
+          if (requestedProvider && !rolesResult.data?.some((item) => item.role === "provider")) {
+            await supabase.rpc("enable_provider_mode");
+          }
           restoredSession = {
             name: profileResult.data?.full_name ?? restoredSession.name,
             email: restoredSession.email,
@@ -1242,6 +1246,124 @@ export default function Home() {
       setRequested("No pudimos guardar los cambios en este dispositivo."),
     );
   }, [hydrated, session, requests, providerProfile]);
+
+  useEffect(() => {
+    if (!hydrated || session?.role !== "provider" || !supabase || isDemoSession) return;
+    let cancelled = false;
+    void (async () => {
+      const userResult = await supabase.auth.getUser();
+      const userId = userResult.data.user?.id;
+      if (!userId || cancelled) return;
+      const [identityResult, providerResult] = await Promise.all([
+        supabase.from("profiles").select("full_name, city, avatar_path, public_id").eq("id", userId).maybeSingle(),
+        supabase.from("provider_profiles").select("trade_title, diagnostic_price, bio, skills_text, training, certifications, zones, availability, availability_start, availability_end, published, verified_at, followers_count").eq("user_id", userId).maybeSingle(),
+      ]);
+      if (cancelled) return;
+      if (!providerResult.data) {
+        const onboardingDraft: SavedProviderProfile = {
+          displayName: String(identityResult.data?.full_name ?? session.name),
+          city: String(identityResult.data?.city ?? ""),
+          photoUri: identityResult.data?.avatar_path ?? undefined,
+          publicId: identityResult.data?.public_id ?? undefined,
+          trade: "",
+          bio: "",
+          skills: "",
+          zones: "",
+          availability: "",
+          published: false,
+        };
+        setProviderProfile(null);
+        setProfileDraft(onboardingDraft);
+        setProfileError("");
+        setProfileModal(true);
+        setTab("Perfil");
+        return;
+      }
+      if (providerProfile) return;
+
+      const [tradesResult, offersResult, ratesResult, credentialsResult, worksResult, photosResult] = await Promise.all([
+        supabase.from("provider_services").select("trade_name, position").eq("provider_id", userId).eq("active", true).order("position"),
+        supabase.from("provider_service_offers").select("id, family, specialization, specializations, description, position").eq("provider_id", userId).eq("active", true).order("position"),
+        supabase.from("provider_rate_items").select("id, trade_name, label, unit, unit_price, active").eq("provider_id", userId).order("created_at"),
+        supabase.from("credentials").select("id, kind, credential_number, private_path, status, updated_at").eq("provider_id", userId),
+        supabase.from("provider_completed_works").select("id, service_label, description, position").eq("provider_id", userId).order("position"),
+        supabase.from("provider_portfolio_items").select("id, work_id, storage_path, drive_file_id, watermarked, photo_position").eq("provider_id", userId).order("photo_position"),
+      ]);
+      if (cancelled) return;
+      const providerRow = providerResult.data;
+      const availabilityStart = String(providerRow.availability_start ?? "08:00").slice(0, 5);
+      const availabilityEnd = String(providerRow.availability_end ?? "18:00").slice(0, 5);
+      const tradeRows = tradesResult.data ?? [];
+      const titleTrades = String(providerRow.trade_title ?? "").split(" · ").filter(Boolean);
+      const primaryTrade = String(tradeRows[0]?.trade_name ?? titleTrades[0] ?? "");
+      const secondaryTrade = String(tradeRows[1]?.trade_name ?? titleTrades[1] ?? "") || undefined;
+      const photoRows = photosResult.data ?? [];
+      const hydratedProfile: SavedProviderProfile = {
+        publicId: identityResult.data?.public_id ?? undefined,
+        displayName: String(identityResult.data?.full_name ?? session.name),
+        city: String(identityResult.data?.city ?? ""),
+        photoUri: identityResult.data?.avatar_path ?? undefined,
+        trade: primaryTrade,
+        secondaryTrade,
+        diagnosticPrice: Number(providerRow.diagnostic_price ?? 0),
+        bio: String(providerRow.bio ?? ""),
+        training: String(providerRow.training ?? ""),
+        certifications: providerRow.certifications ?? [],
+        credentials: (credentialsResult.data ?? []).map((item) => ({
+          id: String(item.id),
+          certification: String(item.kind),
+          number: item.credential_number ? String(item.credential_number) : undefined,
+          privatePath: item.private_path ? String(item.private_path) : undefined,
+          status: item.status as SavedCredentialEvidence["status"],
+          updatedAt: item.updated_at ? String(item.updated_at) : undefined,
+        })),
+        services: (offersResult.data ?? []).map((item) => ({
+          id: String(item.id),
+          family: String(item.family),
+          service: String(item.specialization),
+          specialties: item.specializations ?? [String(item.specialization)],
+          description: String(item.description ?? ""),
+          price: 0,
+          startTime: availabilityStart,
+          endTime: availabilityEnd,
+        })),
+        coverageAreas: providerRow.zones ?? [],
+        portfolioWorks: (worksResult.data ?? []).map((work) => ({
+          id: String(work.id),
+          service: String(work.service_label),
+          description: String(work.description),
+          photos: photoRows
+            .filter((photo) => String(photo.work_id) === String(work.id))
+            .map((photo) => ({
+              id: String(photo.id),
+              uri: supabase!.storage.from("portfolio").getPublicUrl(String(photo.storage_path)).data.publicUrl,
+              storagePath: String(photo.storage_path),
+              driveFileId: photo.drive_file_id ? String(photo.drive_file_id) : undefined,
+              watermarked: photo.watermarked === true,
+            })),
+        })),
+        skills: String(providerRow.skills_text ?? ""),
+        zones: (providerRow.zones ?? []).length >= 5 ? "Toda la provincia" : "Cobertura seleccionada",
+        availability: String(providerRow.availability ?? ""),
+        availabilityStart,
+        availabilityEnd,
+        tariffItems: (ratesResult.data ?? []).map((item) => ({
+          id: String(item.id),
+          trade: String(item.trade_name),
+          label: String(item.label),
+          unit: String(item.unit),
+          unitPrice: Number(item.unit_price),
+          enabled: item.active !== false,
+        })),
+        verified: !!providerRow.verified_at,
+        followersCount: Number(providerRow.followers_count ?? 0),
+        published: providerRow.published === true,
+      };
+      setProviderProfile(hydratedProfile);
+      setProfileDraft(hydratedProfile);
+    })();
+    return () => { cancelled = true; };
+  }, [hydrated, session?.email, session?.role, isDemoSession, providerProfile?.publicId]);
 
   useEffect(() => {
     if (!hydrated || !session || !supabase || isDemoSession) return;
@@ -1618,6 +1740,9 @@ export default function Home() {
         );
         return;
       }
+      if (authMode === "register" && authRole === "provider") {
+        await supabase.rpc("enable_provider_mode");
+      }
       name = String(result.data.user?.user_metadata?.full_name || name);
       if (result.data.user?.id) setCurrentUserId(result.data.user.id);
       if (authMode === "login" && result.data.user) {
@@ -1625,11 +1750,15 @@ export default function Home() {
           .from("user_roles")
           .select("role")
           .eq("user_id", result.data.user.id);
+        const requestedProvider = result.data.user.user_metadata?.role === "provider";
         resolvedRole = roles?.some((item) => item.role === "admin")
           ? "admin"
-          : roles?.some((item) => item.role === "provider")
+          : roles?.some((item) => item.role === "provider") || requestedProvider
             ? "provider"
             : "client";
+        if (requestedProvider && !roles?.some((item) => item.role === "provider")) {
+          await supabase.rpc("enable_provider_mode");
+        }
         const profileResult = await supabase
           .from("profiles")
           .select("full_name, avatar_path, must_change_password")
@@ -3856,13 +3985,7 @@ export default function Home() {
                     ) : (
                       <>
                         <Text style={styles.accountEmail}>{session.email}</Text>
-                        <Text style={styles.localBadge}>
-                          {isDemoSession
-                            ? "Cuenta de demostración"
-                            : backendMode === "supabase"
-                              ? "Conectado a Supabase"
-                              : "Guardado en este dispositivo"}
-                        </Text>
+                        {isDemoSession && <Text style={styles.localBadge}>Cuenta de demostración</Text>}
                       </>
                     )}
                   </View>
