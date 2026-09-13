@@ -67,6 +67,57 @@ const sources = {
   },
 };
 
+const camuzziCities = {
+  camrg: { label: "Camuzzi Río Grande", locality: "94200" },
+  camtol: { label: "Camuzzi Tolhuin", locality: "94201" },
+  camush: { label: "Camuzzi Ushuaia", locality: "94100" },
+};
+
+async function lookupCamuzzi(sourceKey, query) {
+  const city = camuzziCities[sourceKey];
+  const officialUrl = "https://www.camuzzigas.com/guia-de-tramites/gasistas-matriculados/";
+  const body = new URLSearchParams({
+    provincia: "TDF",
+    localidad: city.locality,
+    categoria: "",
+    mejorhogar: "N",
+    gasistasocial: "0",
+    draw: "1",
+    start: "0",
+    length: "10",
+    "search[value]": query,
+    "search[regex]": "false",
+  });
+  const response = await fetch(
+    "https://www.camuzzigas.com/wp-content/themes/hello-theme-child-master/gasistas.json.php",
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded;charset=UTF-8",
+        "user-agent": "LaburApp credential verification/0.9",
+      },
+      body,
+      signal: AbortSignal.timeout(12000),
+    },
+  );
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const payload = await response.json();
+  const matches = (Array.isArray(payload?.data) ? payload.data : []).slice(0, 10).map((row) => ({
+    matricula: cleanCell(row?.Codigo),
+    nombre: cleanCell(row?.Nombre),
+    categoria: cleanCell(row?.Categoria),
+    localidad: cleanCell(row?.Localidad2),
+  }));
+  return {
+    source: city.label,
+    officialUrl,
+    status: matches.length ? "matched" : "not_found",
+    matches,
+    checkedAt: new Date().toISOString(),
+    note: "Consulta directa al padrón público de Camuzzi para Tierra del Fuego. La aprobación requiere revisión humana.",
+  };
+}
+
 async function requireAdmin(req, supabaseUrl, publicKey, serviceKey) {
   const authorization = String(req.headers.authorization ?? "");
   if (!authorization.startsWith("Bearer ")) return null;
@@ -95,14 +146,18 @@ export default async function handler(req, res) {
   const query = String(req.query?.query ?? "").trim().slice(0, 60);
   if (query.length < 2) return respond(res, 400, { error: "Ingresá apellido, DNI o matrícula." });
 
-  if (sourceKey === "camuzzi") {
-    return respond(res, 200, {
-      source: "Camuzzi Gas",
-      officialUrl: "https://www.camuzzigas.com/guia-de-tramites/gasistas-matriculados/",
-      status: "manual_required",
-      matches: [],
-      note: "Camuzzi no publica una API estable. Abrí el padrón oficial y corroborá allí la matrícula.",
-    });
+  if (camuzziCities[sourceKey]) {
+    try {
+      return respond(res, 200, await lookupCamuzzi(sourceKey, query));
+    } catch {
+      return respond(res, 502, {
+        source: camuzziCities[sourceKey].label,
+        officialUrl: "https://www.camuzzigas.com/guia-de-tramites/gasistas-matriculados/",
+        status: "manual_required",
+        matches: [],
+        error: "Camuzzi no respondió. Abrí el padrón oficial en una pestaña nueva y verificá manualmente.",
+      });
+    }
   }
 
   const source = sources[sourceKey];

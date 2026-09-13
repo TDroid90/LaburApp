@@ -621,11 +621,45 @@ type RegistryLookupResult = {
   note?: string;
   error?: string;
 };
+type AdminPlatformMetrics = {
+  generated_at: string;
+  users: {
+    total: number;
+    clients: number;
+    providers: number;
+    active: number;
+    new_30d: number;
+    published_providers: number;
+    verified_providers: number;
+  };
+  subscriptions: { total: number; clients: number; providers: number };
+  activity: {
+    requests: number;
+    requests_30d: number;
+    cancelled_requests: number;
+    quotes: number;
+    quotes_30d: number;
+    jobs: number;
+    jobs_30d: number;
+    completed_jobs: number;
+  };
+  quality: { reviews: number; average_rating: number };
+  cities: Array<{ city: string; users: number; providers: number }>;
+};
 
 const CONTACT_WARNING = "No está permitido compartir teléfonos de contacto o emails.";
 const FREE_WEEKLY_REQUEST_LIMIT = 3;
 const REQUEST_LIFETIME_MS = 5 * 24 * 60 * 60 * 1000;
 const CLIENT_HISTORY_MS = 183 * 24 * 60 * 60 * 1000;
+
+async function openExternalUrl(url: string) {
+  if (!/^https:\/\//i.test(url)) return;
+  if (Platform.OS === "web" && typeof window !== "undefined") {
+    window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  await Linking.openURL(url);
+}
 const reviewQualitySuggestions = [
   "Puntualidad",
   "Rapidez",
@@ -1002,6 +1036,8 @@ export default function Home() {
   const [registryBusy, setRegistryBusy] = useState(false);
   const [registryResult, setRegistryResult] = useState<RegistryLookupResult | null>(null);
   const [registryResultCredentialId, setRegistryResultCredentialId] = useState<string | null>(null);
+  const [adminPlatformMetrics, setAdminPlatformMetrics] = useState<AdminPlatformMetrics | null>(null);
+  const [adminMetricsLoading, setAdminMetricsLoading] = useState(false);
   const [signedInName, setSignedInName] = useState<string | null>(null);
   const [session, setSession] = useState<SavedSession | null>(null);
   const [requests, setRequests] = useState<SavedRequest[]>([]);
@@ -1077,6 +1113,13 @@ export default function Home() {
       ? ["Inicio", "Panel", "Perfil"]
       : ["Inicio", "Solicitudes", "QR", "Contratados", "Perfil"];
   const isDemoSession = session?.email.endsWith("@laburapp.demo") ?? false;
+  const requestToQuoteRate = adminPlatformMetrics?.activity.requests
+    ? Math.round((adminPlatformMetrics.activity.quotes / adminPlatformMetrics.activity.requests) * 100)
+    : 0;
+  const quoteToJobRate = adminPlatformMetrics?.activity.quotes
+    ? Math.round((adminPlatformMetrics.activity.jobs / adminPlatformMetrics.activity.quotes) * 100)
+    : 0;
+  const topAdminCity = adminPlatformMetrics?.cities[0];
 
   useEffect(() => {
     void AsyncStorage.getItem(THEME_STORAGE_KEY).then((savedTheme) => {
@@ -1311,7 +1354,35 @@ export default function Home() {
   useEffect(() => {
     if (tab !== "Panel" || session?.role !== "admin" || isDemoSession) return;
     void loadAdminCredentialReviews();
+    void loadAdminPlatformMetrics();
   }, [tab, session?.role, isDemoSession]);
+
+  async function loadAdminPlatformMetrics() {
+    if (!supabase || session?.role !== "admin" || isDemoSession) return;
+    setAdminMetricsLoading(true);
+    const result = await supabase.rpc("admin_platform_metrics");
+    if (!result.error) {
+      setAdminPlatformMetrics(result.data as AdminPlatformMetrics);
+      setAdminMetricsLoading(false);
+      return;
+    }
+    const auth = await supabase.auth.getSession();
+    const token = auth.data.session?.access_token;
+    if (!token) {
+      setAdminReviewError("La sesión administrativa venció. Volvé a ingresar.");
+      setAdminMetricsLoading(false);
+      return;
+    }
+    try {
+      const response = await fetch("/api/admin-metrics", { headers: { authorization: `Bearer ${token}` } });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error ?? "No pudimos leer las métricas.");
+      setAdminPlatformMetrics(payload as AdminPlatformMetrics);
+    } catch (error) {
+      setAdminReviewError(error instanceof Error ? error.message : "No pudimos leer las métricas reales.");
+    }
+    setAdminMetricsLoading(false);
+  }
 
   async function loadAdminCredentialReviews() {
     if (!supabase || session?.role !== "admin" || isDemoSession) return;
@@ -1366,7 +1437,7 @@ export default function Home() {
     setAdminReviewsLoading(false);
   }
 
-  async function lookupPublicRegistry(source: "dpe" | "cooprg" | "camuzzi", queryOverride?: string, credentialId?: string) {
+  async function lookupPublicRegistry(source: "dpe" | "cooprg" | "camrg" | "camtol" | "camush", queryOverride?: string, credentialId?: string) {
     if (!supabase || session?.role !== "admin") return;
     const value = (queryOverride ?? registryQuery).trim();
     if (value.length < 2) return setAdminReviewError("Ingresá apellido, DNI o matrícula para consultar el padrón.");
@@ -3589,6 +3660,47 @@ export default function Home() {
               </TouchableOpacity>
             </View>
             <Text style={styles.adminViewHelp}>Estas vistas no cambian tus permisos de administrador.</Text>
+            <View style={styles.providerPanel}>
+              <View style={styles.adminQueueHeader}>
+                <View>
+                  <Text style={styles.panelEyebrow}>DATOS REALES DE LA PLATAFORMA</Text>
+                  <Text style={styles.adminModuleTitle}>Resumen general</Text>
+                </View>
+                <TouchableOpacity disabled={adminMetricsLoading} style={styles.adminRefresh} onPress={() => void loadAdminPlatformMetrics()}>
+                  <Text style={styles.adminRefreshText}>{adminMetricsLoading ? "Actualizando…" : "Actualizar"}</Text>
+                </TouchableOpacity>
+              </View>
+              <View style={styles.adminMetrics}>
+                <View style={styles.adminMetric}>
+                  <Text style={styles.panelEyebrow}>Usuarios registrados</Text>
+                  <Text style={styles.adminMetricValue}>{adminPlatformMetrics?.users.total ?? "—"}</Text>
+                  <Text style={styles.adminMetricDetail}>C = {adminPlatformMetrics?.users.clients ?? "—"} · P = {adminPlatformMetrics?.users.providers ?? "—"}</Text>
+                </View>
+                {[
+                  ["Suscriptores", adminPlatformMetrics?.subscriptions.total],
+                  ["Solicitudes", adminPlatformMetrics?.activity.requests],
+                  ["Presupuestos", adminPlatformMetrics?.activity.quotes],
+                  ["Trabajos contratados", adminPlatformMetrics?.activity.jobs],
+                  ["Trabajos terminados", adminPlatformMetrics?.activity.completed_jobs],
+                ].map(([label, value]) => (
+                  <View key={String(label)} style={styles.adminMetric}>
+                    <Text style={styles.panelEyebrow}>{label}</Text>
+                    <Text style={styles.adminMetricValue}>{value ?? "—"}</Text>
+                  </View>
+                ))}
+              </View>
+              <Text style={styles.adminMetricFootnote}>C = clientes sin perfil prestador · P = cuentas con perfil prestador. Un prestador también puede contratar.</Text>
+              <View style={styles.adminInsightGrid}>
+                <View style={styles.adminInsight}><Text style={styles.adminInsightValue}>{adminPlatformMetrics?.users.new_30d ?? "—"}</Text><Text style={styles.adminInsightLabel}>usuarios nuevos · 30 días</Text></View>
+                <View style={styles.adminInsight}><Text style={styles.adminInsightValue}>{adminPlatformMetrics?.activity.requests_30d ?? "—"}</Text><Text style={styles.adminInsightLabel}>solicitudes · 30 días</Text></View>
+                <View style={styles.adminInsight}><Text style={styles.adminInsightValue}>{adminPlatformMetrics?.activity.quotes_30d ?? "—"}</Text><Text style={styles.adminInsightLabel}>presupuestos · 30 días</Text></View>
+                <View style={styles.adminInsight}><Text style={styles.adminInsightValue}>{requestToQuoteRate}%</Text><Text style={styles.adminInsightLabel}>solicitud → presupuesto</Text></View>
+                <View style={styles.adminInsight}><Text style={styles.adminInsightValue}>{quoteToJobRate}%</Text><Text style={styles.adminInsightLabel}>presupuesto → trabajo</Text></View>
+                <View style={styles.adminInsight}><Text style={styles.adminInsightValue}>{adminPlatformMetrics?.quality.average_rating ?? "—"}</Text><Text style={styles.adminInsightLabel}>promedio · {adminPlatformMetrics?.quality.reviews ?? "—"} reseñas</Text></View>
+              </View>
+              {!!topAdminCity && <Text style={styles.adminSegmentCopy}>Mayor comunidad: <Text style={styles.adminSegmentStrong}>{topAdminCity.city}</Text> · {topAdminCity.users} usuarios · {topAdminCity.providers} prestadores. Publicados: {adminPlatformMetrics?.users.published_providers ?? 0} · Verificados: {adminPlatformMetrics?.users.verified_providers ?? 0}.</Text>}
+              {!!adminPlatformMetrics?.cities.length && <View style={styles.adminCityRow}>{adminPlatformMetrics.cities.map((item) => <Text key={item.city} style={styles.adminCityChip}>{item.city}: {item.users} / P {item.providers}</Text>)}</View>}
+            </View>
             <View style={styles.adminMetrics}>
               {[
                 ["Revisiones pendientes", `${adminCredentialReviews.filter((item) => item.status === "pending").length}`],
@@ -3610,14 +3722,16 @@ export default function Home() {
               <View style={styles.adminRegistryActions}>
                 <TouchableOpacity disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("cooprg")}><Text style={styles.adminRegistryButtonText}>Cooperativa RG</Text></TouchableOpacity>
                 <TouchableOpacity disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("dpe")}><Text style={styles.adminRegistryButtonText}>DPE Ushuaia</Text></TouchableOpacity>
-                <TouchableOpacity disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camuzzi")}><Text style={styles.adminRegistryButtonText}>Camuzzi</Text></TouchableOpacity>
+                <TouchableOpacity disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camrg")}><Text style={styles.adminRegistryButtonText}>CAMRG</Text></TouchableOpacity>
+                <TouchableOpacity disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camtol")}><Text style={styles.adminRegistryButtonText}>CAMTOL</Text></TouchableOpacity>
+                <TouchableOpacity disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camush")}><Text style={styles.adminRegistryButtonText}>CAMUSH</Text></TouchableOpacity>
               </View>
               {registryBusy && <Text style={styles.adminMuted}>Consultando el padrón oficial…</Text>}
               {registryResult && <View style={styles.registryResult}>
                 <View style={styles.registryResultHeader}><Text style={styles.registryResultTitle}>{registryResult.source}</Text><Text style={[styles.registryResultStatus, registryResult.status === "matched" && styles.registryMatched]}>{registryResult.status === "matched" ? "COINCIDENCIA" : registryResult.status === "not_found" ? "NO ENCONTRADO" : "REVISIÓN MANUAL"}</Text></View>
                 {!!registryResult.note && <Text style={styles.adminModuleCopy}>{registryResult.note}</Text>}
                 {registryResult.matches.slice(0, 5).map((match, index) => <View key={`registry-${index}`} style={styles.registryMatch}>{Object.entries(match).map(([label, value]) => value ? <Text key={label} style={styles.registryMatchText}><Text style={styles.registryMatchLabel}>{label.replace(/_/g, " ")}: </Text>{value}</Text> : null)}</View>)}
-                <TouchableOpacity accessibilityRole="link" style={styles.adminOfficialLink} onPress={() => void Linking.openURL(registryResult.officialUrl)}><Text style={styles.adminOfficialLinkText}>Abrir fuente oficial ↗</Text></TouchableOpacity>
+                <TouchableOpacity accessibilityRole="link" style={styles.adminOfficialLink} onPress={() => void openExternalUrl(registryResult.officialUrl)}><Text style={styles.adminOfficialLinkText}>Abrir fuente oficial en otra pestaña ↗</Text></TouchableOpacity>
               </View>}
             </View>
 
@@ -3654,7 +3768,9 @@ export default function Home() {
                       <View style={styles.adminRegistryActions}>
                         <TouchableOpacity style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("cooprg", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>Buscar en Cooperativa</Text></TouchableOpacity>
                         <TouchableOpacity style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("dpe", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>Buscar en DPE</Text></TouchableOpacity>
-                        <TouchableOpacity style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camuzzi", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>Buscar en Camuzzi</Text></TouchableOpacity>
+                        <TouchableOpacity style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camrg", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>CAMRG</Text></TouchableOpacity>
+                        <TouchableOpacity style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camtol", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>CAMTOL</Text></TouchableOpacity>
+                        <TouchableOpacity style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camush", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>CAMUSH</Text></TouchableOpacity>
                       </View>
                       <View style={styles.adminDecisionRow}>
                         <TouchableOpacity style={styles.adminRejectButton} onPress={() => void submitCredentialReview(item, "rejected")}><Text style={styles.adminRejectText}>Observar / rechazar</Text></TouchableOpacity>
@@ -5718,6 +5834,16 @@ function createStyles(colors: ThemeColors) {
       fontWeight: "900",
       marginTop: 6,
     },
+    adminMetricDetail: { color: colors.blue, fontSize: 10, fontWeight: "900", marginTop: 3 },
+    adminMetricFootnote: { color: colors.stone, fontSize: 9, lineHeight: 14, marginTop: 8 },
+    adminInsightGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 12 },
+    adminInsight: { flexGrow: 1, flexBasis: 145, minHeight: 62, borderRadius: 11, backgroundColor: colors.raised, padding: 10, justifyContent: "center" },
+    adminInsightValue: { color: colors.blue, fontSize: 19, fontWeight: "900" },
+    adminInsightLabel: { color: colors.stone, fontSize: 9, fontWeight: "800", marginTop: 2 },
+    adminSegmentCopy: { color: colors.stone, fontSize: 10, lineHeight: 15, marginTop: 11 },
+    adminSegmentStrong: { color: colors.navy, fontWeight: "900" },
+    adminCityRow: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 9 },
+    adminCityChip: { color: colors.navy, backgroundColor: colors.raised, borderRadius: 999, paddingHorizontal: 9, paddingVertical: 6, fontSize: 9, fontWeight: "800" },
     adminModuleTitle: { color: colors.navy, fontSize: 18, fontWeight: "900", marginTop: 4 },
     adminModuleCopy: { color: colors.stone, fontSize: 11, lineHeight: 16, marginTop: 4, marginBottom: 10 },
     adminRegistryActions: { flexDirection: "row", flexWrap: "wrap", gap: 7, marginBottom: 9 },
