@@ -22,5 +22,22 @@ additional_redirect_urls = [
   "http://localhost:3000/**"
 ]
 
+[auth.email.template.confirmation]
+subject = "Confirmá tu cuenta de LaburApp"
+content_path = "./supabase/templates/confirmation.html"
+
+[auth.email.template.recovery]
+subject = "Recuperá tu contraseña de LaburApp"
+content_path = "./supabase/templates/recovery.html"
+
+[auth.email.template.email_change]
+subject = "Confirmá tu nuevo correo de LaburApp"
+content_path = "./supabase/templates/email-change.html"
+
+[auth.email.notification.password_changed]
+enabled = true
+subject = "Tu contraseña de LaburApp fue actualizada"
+content_path = "./supabase/templates/password-changed.html"
+
 [storage]
 enabled = true

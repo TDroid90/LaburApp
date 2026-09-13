@@ -561,7 +561,17 @@ const quickSearches = [
   "Costura",
   "Informática",
 ];
-type Provider = (typeof providers)[number] & { providerId?: string; publicId?: string };
+type Provider = (typeof providers)[number] & {
+  providerId?: string;
+  publicId?: string;
+  photoUri?: string;
+  bio?: string;
+  certifications?: string[];
+  diagnosticPrice?: number;
+  availabilityStart?: string;
+  availabilityEnd?: string;
+  portfolioWorks?: PublicPortfolioWork[];
+};
 type ProviderSort = "recent" | "jobs" | "rating";
 type FeaturedWork = {
   title: string;
@@ -777,6 +787,12 @@ const infoPages: Record<InfoPageKey, { title: string; body: string }> = {
 };
 
 function featuredWorkFor(provider: Provider): FeaturedWork {
+  const publishedWork = provider.portfolioWorks?.find((work) => work.photoUris.length > 0);
+  if (publishedWork) return {
+    title: publishedWork.title,
+    description: publishedWork.description,
+    photoUri: publishedWork.photoUris[0],
+  };
   return featuredWorks[provider.name] ?? {
     title: `Trabajo de ${provider.trade}`,
     description: `Trabajo finalizado en ${provider.city}, seleccionado por el profesional como muestra destacada.`,
@@ -785,6 +801,7 @@ function featuredWorkFor(provider: Provider): FeaturedWork {
 }
 
 function publicPortfolioFor(provider: Provider): PublicPortfolioWork[] {
+  if (provider.portfolioWorks) return provider.portfolioWorks;
   if (provider.name === "Profesional Demo") {
     return demoPortfolioWorks.map((work) => ({
       id: work.id,
@@ -803,6 +820,14 @@ function publicPortfolioFor(provider: Provider): PublicPortfolioWork[] {
 }
 
 function publicDetailsFor(provider: Provider): PublicProfileDetails {
+  if (provider.providerId) {
+    return {
+      bio: provider.bio || `${provider.name} ofrece servicios de ${provider.trade.toLowerCase()} en ${provider.city}.`,
+      certifications: provider.certifications ?? [],
+      diagnosticPrice: provider.diagnosticPrice,
+      reviews: [],
+    };
+  }
   if (provider.name === "Profesional Demo") {
     return {
       bio: "Mantenimiento, diagnóstico y reparaciones domiciliarias con atención clara y ordenada. Formación técnica y más de seis años de experiencia.",
@@ -964,6 +989,19 @@ function readableAuthError(message: string) {
   return "No pudimos completar el acceso. Volvé a intentarlo.";
 }
 
+function readableProfileError(message: string) {
+  const normalized = message.toLowerCase();
+  if (normalized.includes("auth_required") || normalized.includes("jwt") || normalized.includes("row-level security"))
+    return "Tu sesión venció o no tiene permiso para guardar este perfil. Volvé a ingresar y probá nuevamente.";
+  if (normalized.includes("invalid_city")) return "Elegí una ciudad válida de la lista.";
+  if (normalized.includes("invalid_availability")) return "Revisá el horario: el final debe ser posterior al inicio.";
+  if (normalized.includes("invalid_trade")) return "Elegí al menos un oficio o profesión.";
+  if (normalized.includes("free_service_limit")) return "El plan gratis permite hasta 2 servicios.";
+  if (normalized.includes("duplicate") || normalized.includes("unique"))
+    return "Hay un dato repetido en el perfil. Revisalo y volvé a guardar.";
+  return "No pudimos guardar el perfil. Tus datos siguen en pantalla para que vuelvas a intentarlo.";
+}
+
 function safeFolderPart(value: string) {
   return (
     value
@@ -1012,6 +1050,9 @@ export default function Home() {
   const [workPhoto, setWorkPhoto] = useState<{ provider: Provider; work: FeaturedWork } | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [infoPage, setInfoPage] = useState<InfoPageKey | null>(null);
+  const [infoReturnAuthMode, setInfoReturnAuthMode] = useState<
+    "login" | "register" | "recovery" | "update-password" | null
+  >(null);
   const [tab, setTab] = useState("Inicio");
   const [requested, setRequested] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
@@ -1043,6 +1084,9 @@ export default function Home() {
   const [requests, setRequests] = useState<SavedRequest[]>([]);
   const [providerProfile, setProviderProfile] =
     useState<SavedProviderProfile | null>(null);
+  const [publishedProviders, setPublishedProviders] = useState<Provider[]>([]);
+  const [providerDirectoryLoading, setProviderDirectoryLoading] = useState(true);
+  const [providerDirectoryError, setProviderDirectoryError] = useState("");
   const [hydrated, setHydrated] = useState(false);
   const [authName, setAuthName] = useState("");
   const [authEmail, setAuthEmail] = useState("");
@@ -1240,12 +1284,80 @@ export default function Home() {
     setMenuOpen(false);
   }
 
+  function openRegistrationInfo(key: "terms" | "privacy") {
+    setInfoReturnAuthMode(authMode);
+    setAuthMode(null);
+    setInfoPage(key);
+  }
+
+  function closeInfoPage() {
+    setInfoPage(null);
+    if (infoReturnAuthMode) setAuthMode(infoReturnAuthMode);
+    setInfoReturnAuthMode(null);
+  }
+
   useEffect(() => {
     if (!hydrated) return;
     saveLocalState({ session, requests, providerProfile: session?.role === "admin" ? null : providerProfile }).catch(() =>
       setRequested("No pudimos guardar los cambios en este dispositivo."),
     );
   }, [hydrated, session, requests, providerProfile]);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    if (!supabase || isDemoSession) {
+      setPublishedProviders(providers);
+      setProviderDirectoryLoading(false);
+      setProviderDirectoryError("");
+      return;
+    }
+    let cancelled = false;
+    setProviderDirectoryLoading(true);
+    void (async () => {
+      const result = await supabase.rpc("discover_published_providers");
+      if (cancelled) return;
+      if (result.error) {
+        setPublishedProviders([]);
+        setProviderDirectoryError("No pudimos cargar los profesionales publicados. Actualizá la página en unos segundos.");
+        setProviderDirectoryLoading(false);
+        return;
+      }
+      const directory = (result.data ?? []).map((row: any): Provider => {
+        const publishedWorks: PublicPortfolioWork[] = (Array.isArray(row.works) ? row.works : []).map((work: any) => ({
+          id: String(work.id),
+          title: String(work.title ?? "Trabajo realizado"),
+          description: String(work.description ?? ""),
+          photoUris: (Array.isArray(work.photos) ? work.photos : []).map((storagePath: string) =>
+            supabase!.storage.from("portfolio").getPublicUrl(String(storagePath)).data.publicUrl,
+          ),
+        }));
+        const tradeTitle = String(row.trade_title ?? "Servicio profesional");
+        const rating = Number(row.rating ?? 0);
+        return {
+          providerId: String(row.provider_id),
+          publicId: String(row.public_id ?? ""),
+          name: String(row.display_name ?? "Profesional"),
+          trade: tradeTitle.split(" · ")[0] || "Servicio profesional",
+          city: String(row.city ?? ""),
+          rating: rating > 0 ? rating.toFixed(1).replace(".", ",") : "Nuevo",
+          jobs: Number(row.completed_jobs ?? 0),
+          badge: row.verified ? "Identidad verificada" : "Perfil publicado",
+          skills: String(row.skills_text ?? tradeTitle),
+          photoUri: row.avatar_path ? String(row.avatar_path) : undefined,
+          bio: row.bio ? String(row.bio) : undefined,
+          certifications: Array.isArray(row.certifications) ? row.certifications.map(String) : [],
+          diagnosticPrice: Number(row.diagnostic_price ?? 0),
+          availabilityStart: String(row.availability_start ?? "08:00").slice(0, 5),
+          availabilityEnd: String(row.availability_end ?? "18:00").slice(0, 5),
+          portfolioWorks: publishedWorks,
+        };
+      });
+      setPublishedProviders(directory);
+      setProviderDirectoryError("");
+      setProviderDirectoryLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [hydrated, isDemoSession, requestRefresh, providerProfile?.published]);
 
   useEffect(() => {
     if (!hydrated || session?.role !== "provider" || !supabase || isDemoSession) return;
@@ -1895,16 +2007,14 @@ export default function Home() {
       if (supabase && !isDemoSession) {
         const { data: userData } = await supabase.auth.getUser();
         if (!userData.user) throw new Error("Volvé a ingresar para enviar la solicitud.");
-        if (!providerId) {
-          const providerResult = await supabase
-            .from("profiles")
-            .select("id")
-            .eq("full_name", quoteProvider.name)
-            .limit(1)
-            .maybeSingle();
-          providerId = providerResult.data?.id;
-        }
-        if (!providerId) throw new Error("No encontramos el perfil publicado de este profesional.");
+        if (!providerId) throw new Error("Este perfil no está publicado y no puede recibir solicitudes.");
+        const publishedProvider = await supabase
+          .from("provider_profiles")
+          .select("published")
+          .eq("user_id", providerId)
+          .maybeSingle();
+        if (publishedProvider.error || publishedProvider.data?.published !== true)
+          throw new Error("Este profesional ya no tiene un perfil publicado.");
         const desiredAt = /^\d{4}-\d{2}-\d{2}$/.test(quoteDate.trim())
           ? `${quoteDate.trim()}T${quoteStartTime}:00-03:00`
           : null;
@@ -1930,7 +2040,9 @@ export default function Home() {
         if (result.error) throw new Error(
           result.error.message.includes("FREE_WEEKLY_REQUEST_LIMIT")
             ? "Ya usaste tus 3 solicitudes gratuitas de esta semana. Para pedir más necesitás Cliente Plus."
-            : `No pudimos guardar la solicitud: ${result.error.message}`,
+            : result.error.message.toLowerCase().includes("row-level security")
+              ? "Tu sesión venció. Volvé a ingresar antes de enviar la solicitud."
+              : "No pudimos guardar la solicitud. Revisá los datos e intentá nuevamente.",
         );
         requestId = result.data.id;
         storedInDatabase = true;
@@ -2064,8 +2176,8 @@ export default function Home() {
     }
     setQuoteError("");
     setQuotePhotos([]);
-    let availabilityStart = "08:00";
-    let availabilityEnd = "18:00";
+    let availabilityStart = provider.availabilityStart ?? "08:00";
+    let availabilityEnd = provider.availabilityEnd ?? "18:00";
     if (provider.name === providerProfile?.displayName) {
       const availability = providerProfile.services?.find((service) => service.startTime && service.endTime);
       availabilityStart = providerProfile.availabilityStart ?? availability?.startTime ?? availabilityStart;
@@ -2073,17 +2185,22 @@ export default function Home() {
     }
     let resolvedProvider = provider;
     if (supabase && !isDemoSession) {
-      let providerId = provider.providerId;
+      const providerId = provider.providerId;
       if (!providerId) {
-        const profileLookup = await supabase.from("profiles").select("id").eq("full_name", provider.name).limit(1).maybeSingle();
-        providerId = profileLookup.data?.id;
+        setRequested("Este perfil no está publicado y no puede recibir solicitudes.");
+        return;
       }
       if (providerId) {
         const availabilityLookup = await supabase
           .from("provider_profiles")
-          .select("availability_start, availability_end")
+          .select("availability_start, availability_end, published")
           .eq("user_id", providerId)
           .maybeSingle();
+        if (availabilityLookup.error || availabilityLookup.data?.published !== true) {
+          setRequested("Este profesional ya no tiene un perfil publicado.");
+          setRequestRefresh((current) => current + 1);
+          return;
+        }
         availabilityStart = String(availabilityLookup.data?.availability_start ?? availabilityStart).slice(0, 5);
         availabilityEnd = String(availabilityLookup.data?.availability_end ?? availabilityEnd).slice(0, 5);
         resolvedProvider = { ...provider, providerId };
@@ -2156,60 +2273,48 @@ export default function Home() {
           });
         if (uploadError) {
           setProfileBusy(false);
-          return setProfileError(uploadError.message);
+          return setProfileError("No pudimos guardar la foto de perfil. Usá una imagen JPG o PNG y volvé a intentar.");
         }
         photoUri = supabase.storage
           .from("profile-photos")
           .getPublicUrl(photoPath).data.publicUrl;
       }
-      const profileResult = await supabase
-        .from("profiles")
-        .upsert({
-          id: user.id,
-          full_name: nextDraft.displayName.trim(),
+      const profileSaveResult = await supabase.rpc("save_own_provider_profile", {
+        p_profile: {
+          display_name: nextDraft.displayName.trim(),
           city: nextDraft.city.trim(),
           avatar_path: photoUri ?? null,
-        })
-        .select("public_id")
-        .single();
-      const providerResult = await supabase
-        .from("provider_profiles")
-        .upsert({
-          user_id: user.id,
-          trade_title: [nextDraft.trade.trim(), nextDraft.secondaryTrade?.trim()].filter(Boolean).join(" · "),
+          trade: nextDraft.trade.trim(),
+          secondary_trade: nextDraft.secondaryTrade?.trim() || null,
           diagnostic_price: diagnosticPrice,
           bio: nextDraft.bio.trim(),
-          skills_text: nextDraft.skills.trim(),
+          skills: nextDraft.skills.trim(),
           training: nextDraft.training?.trim() || null,
           certifications: nextDraft.certifications ?? [],
-          zones: nextDraft.coverageAreas?.length
-            ? nextDraft.coverageAreas
-            : [nextDraft.city],
+          zones: nextDraft.coverageAreas?.length ? nextDraft.coverageAreas : [nextDraft.city],
           availability: nextDraft.availability.trim(),
           availability_start: nextDraft.availabilityStart ?? services[0]?.startTime ?? "08:00",
           availability_end: nextDraft.availabilityEnd ?? services[0]?.endTime ?? "18:00",
-          published: true,
-        });
-      if (profileResult.error || providerResult.error) {
+          services: services.map((item) => ({
+            family: item.family,
+            service: item.service,
+            specializations: item.specialties?.length ? item.specialties : [item.service],
+            description: item.description?.trim(),
+          })),
+        },
+      });
+      if (profileSaveResult.error) {
         setProfileBusy(false);
-        return setProfileError(
-          profileResult.error?.message ??
-            providerResult.error?.message ??
-            "No pudimos publicar el perfil.",
-        );
+        return setProfileError(readableProfileError(profileSaveResult.error.message));
       }
-      const enableProviderResult = await supabase.rpc("enable_provider_mode");
-      if (enableProviderResult.error) {
-        setProfileBusy(false);
-        return setProfileError("No pudimos habilitar el modo prestador. Intentá nuevamente.");
-      }
+      const savedPublicId = String(profileSaveResult.data ?? nextDraft.publicId ?? "");
       const existingCredentialsResult = await supabase
         .from("credentials")
         .select("id, kind, private_path")
         .eq("provider_id", user.id);
       if (existingCredentialsResult.error) {
         setProfileBusy(false);
-        return setProfileError(existingCredentialsResult.error.message);
+        return setProfileError(readableProfileError(existingCredentialsResult.error.message));
       }
       const selectedCertifications = new Set(nextDraft.certifications ?? []);
       const staleCredentials = (existingCredentialsResult.data ?? []).filter(
@@ -2223,7 +2328,7 @@ export default function Home() {
           .in("id", staleCredentials.map((credential) => credential.id));
         if (deleteRows.error) {
           setProfileBusy(false);
-          return setProfileError(deleteRows.error.message);
+          return setProfileError(readableProfileError(deleteRows.error.message));
         }
         if (stalePaths.length) await supabase.storage.from("provider-credentials").remove(stalePaths);
       }
@@ -2255,7 +2360,7 @@ export default function Home() {
             });
           if (uploadResult.error) {
             setProfileBusy(false);
-            return setProfileError(`No pudimos guardar el comprobante de ${credential.certification}: ${uploadResult.error.message}`);
+            return setProfileError(`No pudimos guardar el comprobante de ${credential.certification}. Verificá que sea una imagen JPG legible y volvé a intentar.`);
           }
         }
         if (!privatePath) continue;
@@ -2272,7 +2377,7 @@ export default function Home() {
           : await supabase.from("credentials").insert(row).select("id, status, updated_at").single();
         if (savedRow.error) {
           setProfileBusy(false);
-          return setProfileError(savedRow.error.message);
+          return setProfileError(readableProfileError(savedRow.error.message));
         }
         if (previousPrivatePath && previousPrivatePath !== privatePath) {
           await supabase.storage.from("provider-credentials").remove([previousPrivatePath]);
@@ -2287,74 +2392,7 @@ export default function Home() {
         });
       }
       savedCredentials = processedCredentials;
-      await supabase
-        .from("provider_services")
-        .delete()
-        .eq("provider_id", user.id);
-      const professionalItems = [nextDraft.trade.trim(), nextDraft.secondaryTrade?.trim()]
-        .filter((item): item is string => !!item)
-        .slice(0, 2);
-      const { error: tradesError } = await supabase
-        .from("provider_services")
-        .insert(professionalItems.map((tradeName, index) => ({
-          provider_id: user.id,
-          trade_name: tradeName,
-          position: index + 1,
-        })));
-      if (tradesError) {
-        setProfileBusy(false);
-        return setProfileError(tradesError.message);
-      }
-      await supabase
-        .from("provider_rate_items")
-        .delete()
-        .eq("provider_id", user.id);
-      const { error: ratesError } = await supabase
-        .from("provider_rate_items")
-        .insert({
-          provider_id: user.id,
-          trade_name: nextDraft.trade.trim(),
-          label: "Diagnóstico / visita técnica",
-          unit: "visita",
-          unit_price: diagnosticPrice,
-          availability_start: nextDraft.availabilityStart ?? services[0]?.startTime ?? "08:00",
-          availability_end: nextDraft.availabilityEnd ?? services[0]?.endTime ?? "18:00",
-          slot_position: 1,
-          active: true,
-        });
-      if (ratesError) {
-        setProfileBusy(false);
-        return setProfileError(ratesError.message);
-      }
-      await supabase
-        .from("provider_service_offers")
-        .delete()
-        .eq("provider_id", user.id);
-      const { error: offersError } = await supabase
-        .from("provider_service_offers")
-        .insert(
-          services.map((item, index) => ({
-            provider_id: user.id,
-            family: item.family,
-            specialization: (item.specialties?.length
-              ? item.specialties
-              : [item.service]
-            ).join(" · "),
-            specializations: item.specialties?.length
-              ? item.specialties
-              : [item.service],
-            description: item.description?.trim(),
-            position: index + 1,
-            active: true,
-          })),
-        );
-      if (offersError) {
-        setProfileBusy(false);
-        return setProfileError(offersError.message);
-      }
-      nextDraft.publicId = String(
-        profileResult.data?.public_id ?? nextDraft.publicId ?? "",
-      );
+      nextDraft.publicId = savedPublicId;
     }
     const publishedProfile = {
       ...nextDraft,
@@ -3001,7 +3039,7 @@ export default function Home() {
     requests.find((request) => request.id === quoteBuilderRequestId) ?? null;
   const filtered = useMemo(
     () =>
-      providers
+      publishedProviders
         .map((provider, registrationOrder) => ({ provider, registrationOrder }))
         .filter(
           ({ provider }) =>
@@ -3023,7 +3061,7 @@ export default function Home() {
               : b.registrationOrder - a.registrationOrder,
         )
         .map(({ provider }) => provider),
-    [query, cityFilter, providerSort],
+    [publishedProviders, query, cityFilter, providerSort],
   );
   const visibleProviders = session ? filtered : filtered.slice(0, 4);
   const selectedPublicWorks = publicProfileProvider
@@ -3294,11 +3332,17 @@ export default function Home() {
                 <Text style={styles.guestPreviewCopy}>Te mostramos una selección breve. Para pedir presupuestos y ver todas las funciones necesitás una cuenta.</Text>
               </View>
             )}
+            {providerDirectoryLoading && (
+              <View style={styles.empty}><Text style={styles.heroCopy}>Cargando profesionales publicados…</Text></View>
+            )}
+            {!!providerDirectoryError && (
+              <View style={styles.empty}><Text style={styles.modalError}>{providerDirectoryError}</Text></View>
+            )}
             {visibleProviders.map((provider) => {
               const featuredWork = featuredWorkFor(provider);
               const expanded = expandedProviderName === provider.name;
               const initials = provider.name.split(" ").map((part) => part[0]).join("");
-              return <View key={provider.name} style={[styles.card, compactHeader && styles.cardCompact, expanded && styles.cardExpanded]}>
+              return <View key={provider.providerId ?? provider.name} style={[styles.card, compactHeader && styles.cardCompact, expanded && styles.cardExpanded]}>
                 <TouchableOpacity accessibilityRole="link" accessibilityLabel={`Abrir perfil profesional completo de ${provider.name}`} style={styles.cardOpenArea} onPress={() => setPublicProfileProvider(provider)}>
                   <View style={styles.avatar}>
                     <Text style={styles.avatarText}>{initials}</Text>
@@ -3325,7 +3369,7 @@ export default function Home() {
                 <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => startQuote(provider)}><Text style={styles.buttonText}>{session ? "Solicitar presupuesto" : "Ingresá para solicitar"}</Text></TouchableOpacity>
               </View>;
             })}
-            {visibleProviders.length === 0 && (
+            {!providerDirectoryLoading && !providerDirectoryError && visibleProviders.length === 0 && (
               <View style={styles.empty}>
                 <Text style={styles.emptyTitle}>
                   Tito no encontró coincidencias
@@ -4299,6 +4343,7 @@ export default function Home() {
                 style={styles.drawerItem}
                 onPress={() => {
                   setMenuOpen(false);
+                  setInfoReturnAuthMode(null);
                   setInfoPage(key);
                 }}
               >
@@ -4318,10 +4363,10 @@ export default function Home() {
           <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar menú lateral" style={styles.drawerDismissArea} onPress={() => setMenuOpen(false)} />
         </View>
       </AppModal>
-      <AppModal visible={infoPage !== null} onRequestClose={() => setInfoPage(null)}>
+      <AppModal visible={infoPage !== null} onRequestClose={closeInfoPage}>
         <View style={styles.modalBackdrop}>
           {infoPage && <View style={styles.infoPageCard}>
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar información" style={styles.modalClose} onPress={() => setInfoPage(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar información" style={styles.modalClose} onPress={closeInfoPage}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
             <Text style={styles.modalTitle}>{infoPages[infoPage].title}</Text>
             <Text style={styles.infoPageBody}>{infoPages[infoPage].body}</Text>
           </View>}
@@ -4566,19 +4611,22 @@ export default function Home() {
                     </TouchableOpacity>
                   ))}
                 </View>
-                <TouchableOpacity
-                  accessibilityRole="checkbox"
-                  accessibilityState={{ checked: acceptedTerms }}
-                  onPress={() => setAcceptedTerms(!acceptedTerms)}
-                  style={styles.termsRow}
-                >
-                  <Text style={styles.checkbox}>
-                    {acceptedTerms ? "☑" : "☐"}
-                  </Text>
+                <View style={styles.termsRow}>
+                  <TouchableOpacity
+                    accessibilityRole="checkbox"
+                    accessibilityLabel="Aceptar los términos y condiciones y la política de privacidad"
+                    accessibilityState={{ checked: acceptedTerms }}
+                    onPress={() => setAcceptedTerms(!acceptedTerms)}
+                  >
+                    <Text style={styles.checkbox}>{acceptedTerms ? "☑" : "☐"}</Text>
+                  </TouchableOpacity>
                   <Text style={styles.termsText}>
-                    Acepto los términos y la política de privacidad.
+                    Acepto los{" "}
+                    <Text accessibilityRole="link" onPress={() => openRegistrationInfo("terms")} style={styles.termsLink}>términos y condiciones</Text>
+                    , y la{" "}
+                    <Text accessibilityRole="link" onPress={() => openRegistrationInfo("privacy")} style={styles.termsLink}>política de privacidad</Text>.
                   </Text>
-                </TouchableOpacity>
+                </View>
               </>
             )}
             {!!authError && <Text style={styles.modalError}>{authError}</Text>}
@@ -6289,6 +6337,7 @@ function createStyles(colors: ThemeColors) {
     termsRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 },
     checkbox: { color: colors.orange, fontSize: 22, marginRight: 7 },
     termsText: { color: colors.stone, fontSize: 12, flex: 1 },
+    termsLink: { color: colors.blue, fontWeight: "900", textDecorationLine: "underline" },
     modalError: {
       color: colors.danger,
       fontSize: 13,
