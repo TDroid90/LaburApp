@@ -1092,7 +1092,6 @@ export default function Home() {
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authPasswordConfirm, setAuthPasswordConfirm] = useState("");
-  const [authRole, setAuthRole] = useState<"client" | "provider">("client");
   const [authCity, setAuthCity] = useState("Río Grande");
   const [authBusy, setAuthBusy] = useState(false);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
@@ -1152,6 +1151,7 @@ export default function Home() {
     ? `Hola, ${signedInName.split(" ")[0]}`
     : "Ingresar";
   const effectiveRole = session?.role === "admin" ? adminPreviewRole : session?.role;
+  const hasProviderProfile = providerProfile?.published === true;
   const navigationItems =
     effectiveRole === "admin"
       ? ["Inicio", "Panel", "Perfil"]
@@ -1185,15 +1185,11 @@ export default function Home() {
             supabase.from("user_roles").select("role").eq("user_id", user.id),
             supabase.from("profiles").select("full_name, avatar_path, must_change_password").eq("id", user.id).maybeSingle(),
           ]);
-          const requestedProvider = user.user_metadata?.role === "provider";
           const role: SavedSession["role"] = rolesResult.data?.some((item) => item.role === "admin")
             ? "admin"
-            : rolesResult.data?.some((item) => item.role === "provider") || requestedProvider
+            : rolesResult.data?.some((item) => item.role === "provider")
               ? "provider"
               : "client";
-          if (requestedProvider && !rolesResult.data?.some((item) => item.role === "provider")) {
-            await supabase.rpc("enable_provider_mode");
-          }
           restoredSession = {
             name: profileResult.data?.full_name ?? restoredSession.name,
             email: restoredSession.email,
@@ -1486,7 +1482,7 @@ export default function Home() {
       if (!currentUserId || cancelled) return;
       setCurrentUserId(currentUserId);
       await supabase.rpc("purge_expired_client_data");
-      if (session.role === "client") {
+      if (session.role !== "admin") {
         const membership = await supabase
           .from("client_memberships")
           .select("plan_code")
@@ -1544,7 +1540,7 @@ export default function Home() {
           clientName: clientProfile?.full_name ?? "Cliente",
           providerId: row.provider_id,
           viewerRole,
-          clientEmail: session.role === "client" ? session.email : undefined,
+          clientEmail: viewerRole === "client" ? session.email : undefined,
           provider: profile?.full_name ?? providerProfile?.displayName ?? "Profesional",
           trade: trades.get(row.provider_id) ?? "Servicio profesional",
           description: row.description,
@@ -1821,8 +1817,7 @@ export default function Home() {
     setAuthBusy(true);
     let name =
       authMode === "register" ? authName.trim() : authEmail.split("@")[0];
-    let resolvedRole: SavedSession["role"] =
-      authMode === "register" ? authRole : "client";
+    let resolvedRole: SavedSession["role"] = "client";
     let photoUri: string | undefined;
     let mustChangePassword = false;
     if (supabase) {
@@ -1832,7 +1827,7 @@ export default function Home() {
               email: authEmail.trim().toLowerCase(),
               password: authPassword,
               options: {
-                data: { full_name: name, role: authRole, city: authCity },
+                data: { full_name: name, role: "client", city: authCity },
               },
             })
           : await supabase.auth.signInWithPassword({
@@ -1852,9 +1847,6 @@ export default function Home() {
         );
         return;
       }
-      if (authMode === "register" && authRole === "provider") {
-        await supabase.rpc("enable_provider_mode");
-      }
       name = String(result.data.user?.user_metadata?.full_name || name);
       if (result.data.user?.id) setCurrentUserId(result.data.user.id);
       if (authMode === "login" && result.data.user) {
@@ -1862,15 +1854,11 @@ export default function Home() {
           .from("user_roles")
           .select("role")
           .eq("user_id", result.data.user.id);
-        const requestedProvider = result.data.user.user_metadata?.role === "provider";
         resolvedRole = roles?.some((item) => item.role === "admin")
           ? "admin"
-          : roles?.some((item) => item.role === "provider") || requestedProvider
+          : roles?.some((item) => item.role === "provider")
             ? "provider"
             : "client";
-        if (requestedProvider && !roles?.some((item) => item.role === "provider")) {
-          await supabase.rpc("enable_provider_mode");
-        }
         const profileResult = await supabase
           .from("profiles")
           .select("full_name, avatar_path, must_change_password")
@@ -1913,14 +1901,6 @@ export default function Home() {
     setPasswordChangeRequired(mustChangePassword);
     setAuthPassword("");
     setAuthPasswordConfirm("");
-    if (authMode === "register" && authRole === "provider") {
-      setProfileDraft((current) => ({
-        ...current,
-        displayName: name,
-        city: authCity,
-      }));
-      setProfileModal(true);
-    }
   }
 
   function loginDemoAccount(account: SavedSession) {
@@ -2216,7 +2196,6 @@ export default function Home() {
   function openProviderProfile() {
     if (!session) {
       setAuthMode("register");
-      setAuthRole("provider");
       return;
     }
     setProfileDraft(
@@ -3400,7 +3379,7 @@ export default function Home() {
                 </Text>
               </View>
             )}
-            {(effectiveRole === "provider" || providerProfile?.published) && (
+            {hasProviderProfile && (
               <View style={styles.notificationsPanel}>
                 <View style={styles.notificationHeading}>
                   <View>
@@ -3446,7 +3425,7 @@ export default function Home() {
                 )}
               </View>
             )}
-            {(effectiveRole === "provider" || providerProfile?.published) && isDemoSession && <View style={styles.simulatorBanner}>
+            {hasProviderProfile && isDemoSession && <View style={styles.simulatorBanner}>
               <View style={styles.simulatorCopy}>
                 <Text style={styles.simulatorTitle}>Simulador del PMV</Text>
                 <Text style={styles.simulatorText}>
@@ -3847,7 +3826,7 @@ export default function Home() {
                 <View style={styles.adminMetric}>
                   <Text style={styles.panelEyebrow}>Usuarios registrados</Text>
                   <Text style={styles.adminMetricValue}>{adminPlatformMetrics?.users.total ?? "—"}</Text>
-                  <Text style={styles.adminMetricDetail}>C = {adminPlatformMetrics?.users.clients ?? "—"} · P = {adminPlatformMetrics?.users.providers ?? "—"}</Text>
+                  <Text style={styles.adminMetricDetail}>C = {adminPlatformMetrics?.users.total ?? "—"} · P = {adminPlatformMetrics?.users.providers ?? "—"}</Text>
                 </View>
                 {[
                   ["Suscriptores", adminPlatformMetrics?.subscriptions.total],
@@ -3862,7 +3841,7 @@ export default function Home() {
                   </View>
                 ))}
               </View>
-              <Text style={styles.adminMetricFootnote}>C = clientes sin perfil prestador · P = cuentas con perfil prestador. Un prestador también puede contratar.</Text>
+              <Text style={styles.adminMetricFootnote}>C = cuentas registradas · P = cuentas con perfil prestador. Los prestadores también pueden contratar.</Text>
               <View style={styles.adminInsightGrid}>
                 <View style={styles.adminInsight}><Text style={styles.adminInsightValue}>{adminPlatformMetrics?.users.new_30d ?? "—"}</Text><Text style={styles.adminInsightLabel}>usuarios nuevos · 30 días</Text></View>
                 <View style={styles.adminInsight}><Text style={styles.adminInsightValue}>{adminPlatformMetrics?.activity.requests_30d ?? "—"}</Text><Text style={styles.adminInsightLabel}>solicitudes · 30 días</Text></View>
@@ -3992,9 +3971,9 @@ export default function Home() {
             ) : (
               <>
                 <View style={styles.accountCard}>
-                  {(effectiveRole === "provider" ? providerProfile?.photoUri : session.photoUri) ? (
+                  {(providerProfile?.photoUri ?? session.photoUri) ? (
                     <Image
-                      source={{ uri: effectiveRole === "provider" ? providerProfile?.photoUri : session.photoUri }}
+                      source={{ uri: providerProfile?.photoUri ?? session.photoUri }}
                       style={styles.profilePhoto}
                     />
                   ) : (
@@ -4007,7 +3986,7 @@ export default function Home() {
                   <View style={styles.accountBody}>
                     <View style={styles.verifiedNameRow}>
                       <Text style={styles.accountName}>{session.name}</Text>
-                      {effectiveRole === "provider" && providerProfile?.verified && (
+                      {hasProviderProfile && providerProfile?.verified && (
                         <Text
                           accessibilityLabel="Perfil verificado"
                           style={styles.verifiedIcon}
@@ -4015,7 +3994,7 @@ export default function Home() {
                           ✓
                         </Text>
                       )}
-                      {effectiveRole === "provider" && !!providerProfile?.diagnosticPrice && (
+                      {hasProviderProfile && !!providerProfile?.diagnosticPrice && (
                         <Text style={styles.diagnosticBadge}>
                           Diagnóstico desde $
                           {providerProfile.diagnosticPrice.toLocaleString(
@@ -4024,21 +4003,15 @@ export default function Home() {
                         </Text>
                       )}
                     </View>
-                    {effectiveRole === "client" ? (
-                      <Text style={styles.clientJobsCount}>{clientHistory.length} trabajos contratados en los últimos 6 meses</Text>
-                    ) : (
-                      <>
-                        <Text style={styles.accountEmail}>{session.email}</Text>
-                        {isDemoSession && <Text style={styles.localBadge}>Cuenta de demostración</Text>}
-                      </>
-                    )}
+                    <Text style={styles.clientJobsCount}>{clientHistory.length} trabajos contratados en los últimos 6 meses</Text>
+                    {isDemoSession && <Text style={styles.localBadge}>Cuenta de demostración</Text>}
                   </View>
-                  {effectiveRole === "client" && session.role !== "admin" && (
+                  {session.role !== "admin" && (
                     <TouchableOpacity accessibilityRole="button" disabled={clientPhotoBusy} style={styles.editProfileButton} onPress={() => void pickClientPhoto()}>
                       <Text style={styles.editProfileButtonText}>{clientPhotoBusy ? "CARGANDO…" : session.photoUri ? "CAMBIAR FOTO" : "AGREGAR FOTO"}</Text>
                     </TouchableOpacity>
                   )}
-                  {effectiveRole === "provider" && providerProfile?.published && (
+                  {hasProviderProfile && (
                     <TouchableOpacity
                       accessibilityRole="button"
                       style={styles.followersButton}
@@ -4051,7 +4024,7 @@ export default function Home() {
                     </TouchableOpacity>
                   )}
                 </View>
-                {effectiveRole === "provider" && followersVisible && providerProfile?.published && (
+                {hasProviderProfile && followersVisible && (
                   <View style={styles.followersPanel}>
                     <View style={styles.workCardTop}>
                       <Text style={styles.panelEyebrow}>SEGUIDORES</Text>
@@ -4079,7 +4052,7 @@ export default function Home() {
                     ))}
                   </View>
                 )}
-                {effectiveRole === "provider" && providerProfile?.published ? (
+                {hasProviderProfile ? (
                   <View style={styles.providerPanel}>
                     <View style={styles.workCardTop}>
                       <Text style={styles.panelEyebrow}>
@@ -4559,35 +4532,9 @@ export default function Home() {
             )}
             {authMode === "register" && (
               <>
-                <Text style={styles.modalLabel}>
-                  ¿Cómo vas a usar LaburApp?
+                <Text style={styles.singleAccountNote}>
+                  Con esta misma cuenta podés contratar profesionales. Si después querés ofrecer servicios, completás tu perfil profesional desde “Mi perfil”.
                 </Text>
-                <View style={styles.roleRow}>
-                  {[
-                    ["client", "Quiero contratar"],
-                    ["provider", "Quiero ofrecer"],
-                  ].map(([value, label]) => (
-                    <TouchableOpacity
-                      key={value}
-                      onPress={() =>
-                        setAuthRole(value as "client" | "provider")
-                      }
-                      style={[
-                        styles.roleChoice,
-                        authRole === value && styles.roleChoiceActive,
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.roleChoiceText,
-                          authRole === value && styles.roleChoiceTextActive,
-                        ]}
-                      >
-                        {label}
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
                 <Text style={styles.modalLabel}>Tu ciudad</Text>
                 <View style={styles.roleRow}>
                   {cityChoices.map((city) => (
@@ -6334,6 +6281,7 @@ function createStyles(colors: ThemeColors) {
     },
     roleChoiceText: { color: colors.stone, fontSize: 12, fontWeight: "800" },
     roleChoiceTextActive: { color: colors.navy },
+    singleAccountNote: { color: colors.stone, fontSize: 12, lineHeight: 18, marginBottom: 14 },
     termsRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 },
     checkbox: { color: colors.orange, fontSize: 22, marginRight: 7 },
     termsText: { color: colors.stone, fontSize: 12, flex: 1 },
