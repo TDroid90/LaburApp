@@ -233,7 +233,7 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
     const invalidCredential = (draft.credentials ?? []).find((credential) => {
       if (!credential.imageUri && !credential.privatePath) return false;
       const rule = certificationRules.find((item) => item.label === credential.certification);
-      return rule?.requiresNumber && (credential.number?.trim().length ?? 0) < 3;
+      return rule?.requiresNumber && (credential.number?.trim().length ?? 0) < 1;
     });
     if (invalidCredential) {
       const rule = certificationRules.find((item) => item.label === invalidCredential.certification);
@@ -296,11 +296,11 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
             <ScrollView style={styles.credentialModalScroll} contentContainerStyle={styles.credentialModalContent} keyboardShouldPersistTaps="handled">
               <View style={styles.credentialInstructions}>
                 <Text style={styles.credentialInstructionTitle}>Antes de subir</Text>
-                <Text style={styles.credentialInstruction}>• Una certificación admite un único archivo. Si seleccionaste 5 certificaciones, podés subir como máximo 5 archivos.</Text>
+                <Text style={styles.credentialInstruction}>• Cargá un único archivo por cada certificación seleccionada.</Text>
                 <Text style={styles.credentialInstruction}>• Si el documento es doble faz, uní frente y dorso en una sola imagen antes de cargarlo.</Text>
                 <Text style={styles.credentialInstruction}>• La imagen debe estar completa, enfocada, legible y tomada con buena luz, sin reflejos ni dedos tapando datos.</Text>
                 <Text style={styles.credentialInstruction}>• El archivo original se conserva como máximo 5 días y se elimina antes si finaliza la revisión. Los datos temporales del análisis automático se eliminan dentro de 48 horas.</Text>
-                <Text style={styles.credentialInstruction}>• Una certificación sin vencimiento se considera válida durante 3 años. La identidad se vuelve a verificar cada año.</Text>
+                <Text style={styles.credentialInstruction}>• Las certificaciones sin fecha de vencimiento se consideran válidas durante 1 año. La identidad también se vuelve a verificar cada año.</Text>
               </View>
               <View style={styles.credentialsList}>
                 {draft.certifications?.map((certification) => {
