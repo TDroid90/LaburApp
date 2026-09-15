@@ -1158,7 +1158,7 @@ export default function Home() {
   const hasProviderProfile = providerProfile?.published === true;
   const navigationItems =
     effectiveRole === "admin"
-      ? ["Inicio", "Panel", "Perfil"]
+      ? ["Inicio", "Panel"]
       : ["Inicio", "Solicitudes", "QR", "Contratados", "Perfil"];
   const isDemoSession = session?.email.endsWith("@laburapp.demo") ?? false;
   const requestToQuoteRate = adminPlatformMetrics?.activity.requests
