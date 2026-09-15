@@ -41,6 +41,15 @@ function tableRows(html) {
     .filter((cells) => cells.length >= 3);
 }
 
+function matchesRegistryQuery(row, query) {
+  const rawQuery = String(query ?? "").trim();
+  const queryNormalized = normalize(rawQuery);
+  if (/^\d+$/.test(rawQuery)) {
+    return String(row.matricula ?? "").replace(/\D/g, "") === rawQuery;
+  }
+  return normalize(Object.values(row).join(" ")).includes(queryNormalized);
+}
+
 const sources = {
   dpe: {
     label: "DPE Ushuaia",
@@ -102,12 +111,12 @@ async function lookupCamuzzi(sourceKey, query) {
   );
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   const payload = await response.json();
-  const matches = (Array.isArray(payload?.data) ? payload.data : []).slice(0, 10).map((row) => ({
+  const matches = (Array.isArray(payload?.data) ? payload.data : []).map((row) => ({
     matricula: cleanCell(row?.Codigo),
     nombre: cleanCell(row?.Nombre),
     categoria: cleanCell(row?.Categoria),
     localidad: cleanCell(row?.Localidad2),
-  }));
+  })).filter((row) => matchesRegistryQuery(row, query)).slice(0, 10);
   return {
     source: city.label,
     officialUrl,
@@ -144,7 +153,7 @@ export default async function handler(req, res) {
 
   const sourceKey = String(req.query?.source ?? "").toLowerCase();
   const query = String(req.query?.query ?? "").trim().slice(0, 60);
-  if (query.length < 2) return respond(res, 400, { error: "Ingresá apellido, DNI o matrícula." });
+  if (query.length < 1) return respond(res, 400, { error: "Ingresá apellido, DNI o matrícula." });
 
   if (camuzziCities[sourceKey]) {
     try {
@@ -169,11 +178,10 @@ export default async function handler(req, res) {
       signal: AbortSignal.timeout(12000),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const queryNormalized = normalize(query);
     const matches = tableRows(await response.text())
-      .filter((cells) => normalize(cells.join(" ")).includes(queryNormalized))
-      .slice(0, 10)
-      .map(source.select);
+      .map(source.select)
+      .filter((row) => matchesRegistryQuery(row, query))
+      .slice(0, 10);
     return respond(res, 200, {
       source: source.label,
       officialUrl: source.url,

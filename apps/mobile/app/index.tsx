@@ -1069,6 +1069,7 @@ export default function Home() {
   const [adminCredentialReviews, setAdminCredentialReviews] = useState<AdminCredentialReview[]>([]);
   const [adminReviewsLoading, setAdminReviewsLoading] = useState(false);
   const [adminReviewError, setAdminReviewError] = useState("");
+  const [adminReviewFeedback, setAdminReviewFeedback] = useState<{ tone: "success" | "warning"; message: string } | null>(null);
   const [expandedAdminCredentialId, setExpandedAdminCredentialId] = useState<string | null>(null);
   const [adminReviewNotes, setAdminReviewNotes] = useState<Record<string, string>>({});
   const [adminOcrTexts, setAdminOcrTexts] = useState<Record<string, string>>({});
@@ -1670,10 +1671,13 @@ export default function Home() {
   async function lookupPublicRegistry(source: "dpe" | "cooprg" | "camrg" | "camtol" | "camush", queryOverride?: string, credentialId?: string) {
     if (!supabase || session?.role !== "admin") return;
     const value = (queryOverride ?? registryQuery).trim();
-    if (value.length < 2) return setAdminReviewError("Ingresá apellido, DNI o matrícula para consultar el padrón.");
+    if (value.length < 1) return setAdminReviewError("Ingresá apellido, DNI o matrícula para consultar el padrón.");
     setRegistryQuery(value);
     setRegistryBusy(true);
     setAdminReviewError("");
+    setAdminReviewFeedback(null);
+    setRegistryResult(null);
+    setRegistryResultCredentialId(credentialId ?? null);
     const auth = await supabase.auth.getSession();
     const token = auth.data.session?.access_token;
     if (!token) {
@@ -1684,10 +1688,33 @@ export default function Home() {
       const response = await fetch(`/api/registry-lookup?source=${encodeURIComponent(source)}&query=${encodeURIComponent(value)}`, {
         headers: { authorization: `Bearer ${token}` },
       });
-      const payload = await response.json();
+      const payload = await response.json() as RegistryLookupResult;
       if (!response.ok && !payload.officialUrl) throw new Error(payload.error ?? "El padrón no respondió.");
-      setRegistryResult(payload as RegistryLookupResult);
+      setRegistryResult(payload);
       setRegistryResultCredentialId(credentialId ?? null);
+      if (credentialId) {
+        const registryMatchData = { official_url: payload.officialUrl, matches: payload.matches };
+        const savedLookup = await supabase.from("credentials").update({
+          registry_source: payload.source,
+          registry_match_status: payload.status,
+          registry_match_data: registryMatchData,
+        }).eq("id", credentialId);
+        if (savedLookup.error) throw new Error("Encontramos el resultado, pero no pudimos vincularlo con la certificación.");
+        setAdminCredentialReviews((current) => current.map((item) => item.id === credentialId ? {
+          ...item,
+          registrySource: payload.source,
+          registryMatchStatus: payload.status,
+          registryMatchData,
+        } : item));
+        setAdminReviewFeedback({
+          tone: payload.status === "matched" ? "success" : "warning",
+          message: payload.status === "matched"
+            ? `Coincidencia confirmada: la matrícula ${value} figura en ${payload.source}.`
+            : payload.status === "not_found"
+              ? `No encontramos la matrícula ${value} en ${payload.source}. Revisá la fuente antes de decidir.`
+              : `${payload.source} requiere una revisión manual.`,
+        });
+      }
     } catch (error) {
       setAdminReviewError(error instanceof Error ? error.message : "No pudimos consultar el padrón.");
     } finally {
@@ -1731,18 +1758,19 @@ export default function Home() {
     if (!supabase || session?.role !== "admin") return;
     setAdminReviewsLoading(true);
     setAdminReviewError("");
+    setAdminReviewFeedback(null);
     const ocrText = adminOcrTexts[item.id] ?? "";
     const reviewRegistryResult = registryResultCredentialId === item.id ? registryResult : null;
-    const registryStatus = reviewRegistryResult?.status ?? "not_checked";
+    const registryStatus = reviewRegistryResult?.status ?? item.registryMatchStatus;
     const result = await supabase.rpc("admin_review_credential", {
       p_credential_id: item.id,
       p_status: status,
       p_notes: adminReviewNotes[item.id] ?? "",
       p_ocr_text: ocrText,
       p_ocr_fields: extractCredentialFields(ocrText),
-      p_registry_source: reviewRegistryResult?.source ?? null,
+      p_registry_source: reviewRegistryResult?.source ?? item.registrySource ?? null,
       p_registry_match_status: registryStatus,
-      p_registry_match_data: reviewRegistryResult ? { official_url: reviewRegistryResult.officialUrl, matches: reviewRegistryResult.matches } : {},
+      p_registry_match_data: reviewRegistryResult ? { official_url: reviewRegistryResult.officialUrl, matches: reviewRegistryResult.matches } : item.registryMatchData,
     });
     if (result.error) {
       setAdminReviewsLoading(false);
@@ -1751,6 +1779,12 @@ export default function Home() {
     setExpandedAdminCredentialId(null);
     setRegistryResult(null);
     setRegistryResultCredentialId(null);
+    setAdminReviewFeedback({
+      tone: status === "verified" ? "success" : "warning",
+      message: status === "verified"
+        ? `${item.kind} de ${item.providerName}: APROBADA correctamente.`
+        : `${item.kind} de ${item.providerName}: quedó OBSERVADA / RECHAZADA.`,
+    });
     await loadAdminCredentialReviews();
   }
 
@@ -3879,7 +3913,7 @@ export default function Home() {
                 <TouchableOpacity disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camush")}><Text style={styles.adminRegistryButtonText}>CAMUSH</Text></TouchableOpacity>
               </View>
               {registryBusy && <Text style={styles.adminMuted}>Consultando el padrón oficial…</Text>}
-              {registryResult && <View style={styles.registryResult}>
+              {registryResult && !registryResultCredentialId && <View style={styles.registryResult}>
                 <View style={styles.registryResultHeader}><Text style={styles.registryResultTitle}>{registryResult.source}</Text><Text style={[styles.registryResultStatus, registryResult.status === "matched" && styles.registryMatched]}>{registryResult.status === "matched" ? "COINCIDENCIA" : registryResult.status === "not_found" ? "NO ENCONTRADO" : "REVISIÓN MANUAL"}</Text></View>
                 {!!registryResult.note && <Text style={styles.adminModuleCopy}>{registryResult.note}</Text>}
                 {registryResult.matches.slice(0, 5).map((match, index) => <View key={`registry-${index}`} style={styles.registryMatch}>{Object.entries(match).map(([label, value]) => value ? <Text key={label} style={styles.registryMatchText}><Text style={styles.registryMatchLabel}>{label.replace(/_/g, " ")}: </Text>{value}</Text> : null)}</View>)}
@@ -3893,16 +3927,19 @@ export default function Home() {
                 <TouchableOpacity disabled={adminReviewsLoading} style={styles.adminRefresh} onPress={() => void loadAdminCredentialReviews()}><Text style={styles.adminRefreshText}>{adminReviewsLoading ? "Actualizando…" : "Actualizar"}</Text></TouchableOpacity>
               </View>
               <Text style={styles.adminModuleCopy}>Los originales se eliminan como máximo a los 5 días. La lectura automática se procesa localmente en este navegador y su texto temporal se elimina a las 48 horas.</Text>
+              {!!adminReviewFeedback && <View style={[styles.adminReviewFeedback, adminReviewFeedback.tone === "success" ? styles.adminReviewFeedbackSuccess : styles.adminReviewFeedbackWarning]}><Text style={styles.adminReviewFeedbackText}>{adminReviewFeedback.message}</Text></View>}
               {!!adminReviewError && <Text style={styles.modalError}>{adminReviewError}</Text>}
               {!adminReviewsLoading && adminCredentialReviews.length === 0 && <Text style={styles.adminEmpty}>No hay comprobantes pendientes u observados.</Text>}
               {adminCredentialReviews.map((item) => {
                 const expanded = expandedAdminCredentialId === item.id;
                 const deadlinePassed = !!item.reviewDeadlineAt && new Date(item.reviewDeadlineAt).getTime() < Date.now();
-                return <View key={item.id} style={styles.adminCredentialCard}>
+                const itemRegistryResult = registryResultCredentialId === item.id ? registryResult : null;
+                const statusLabel = item.status === "pending" ? "● PENDIENTE" : item.status === "verified" ? "✓ APROBADA" : item.status === "expired" ? "↻ ACTUALIZAR" : "! OBSERVADA";
+                return <View key={item.id} style={[styles.adminCredentialCard, item.status === "pending" ? styles.adminCredentialCardPending : item.status === "verified" ? styles.adminCredentialCardVerified : styles.adminCredentialCardObserved]}>
                   <TouchableOpacity accessibilityRole="button" style={styles.adminCredentialSummary} onPress={() => { setExpandedAdminCredentialId(expanded ? null : item.id); setRegistryResult(null); setRegistryResultCredentialId(null); }}>
                     <View style={styles.adminCredentialSummaryCopy}>
                       <Text style={styles.adminCredentialName}>{item.providerName}</Text>
-                      <Text style={styles.adminCredentialKind}>{item.kind}{item.city ? ` · ${item.city}` : ""} · {item.status === "pending" ? "PENDIENTE" : item.status === "verified" ? "APROBADA" : item.status === "expired" ? "ACTUALIZAR" : "OBSERVADA"}</Text>
+                      <View style={styles.adminCredentialKindRow}><Text style={styles.adminCredentialKind}>{item.kind}{item.city ? ` · ${item.city}` : ""}</Text><Text style={[styles.adminCredentialStatus, item.status === "pending" ? styles.adminCredentialStatusPending : item.status === "verified" ? styles.adminCredentialStatusVerified : styles.adminCredentialStatusObserved]}>{statusLabel}</Text></View>
                       <Text style={[styles.adminCredentialDeadline, deadlinePassed && styles.adminDeadlineExpired]}>Recibido {new Date(item.createdAt).toLocaleDateString("es-AR")} · límite {item.reviewDeadlineAt ? new Date(item.reviewDeadlineAt).toLocaleDateString("es-AR") : "5 días"}</Text>
                     </View>
                     <Text style={styles.adminCredentialOpen}>{expanded ? "−" : "+"}</Text>
@@ -3912,6 +3949,7 @@ export default function Home() {
                     <View style={styles.adminCredentialData}>
                       <Text style={styles.modalFieldLabel}>Número informado</Text>
                       <Text style={styles.adminCredentialValue}>{item.credentialNumber || "No informado"}</Text>
+                      <Text style={styles.adminRegistryHint}>{item.credentialNumber ? `Los botones consultan directamente la matrícula informada: ${item.credentialNumber}.` : "No hay un número informado; la búsqueda usará el nombre del prestador."}</Text>
                       {!!item.signedUrl && <TouchableOpacity disabled={adminOcrBusyId === item.id} style={styles.adminOcrButton} onPress={() => void runCredentialOcr(item)}><Text style={styles.adminOcrButtonText}>{adminOcrBusyId === item.id ? "Leyendo imagen…" : "Leer imagen automáticamente"}</Text></TouchableOpacity>}
                       <Text style={styles.modalFieldLabel}>Texto leído · editable</Text>
                       <TextInput multiline value={adminOcrTexts[item.id] ?? ""} onChangeText={(value) => setAdminOcrTexts((current) => ({ ...current, [item.id]: value }))} placeholder="La lectura automática o tu transcripción aparecerá acá." placeholderTextColor="#71818B" style={[styles.modalInput, styles.adminOcrText]} />
@@ -3924,6 +3962,13 @@ export default function Home() {
                         <TouchableOpacity style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camtol", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>CAMTOL</Text></TouchableOpacity>
                         <TouchableOpacity style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camush", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>CAMUSH</Text></TouchableOpacity>
                       </View>
+                      {registryBusy && registryResultCredentialId === item.id && <Text style={styles.adminRegistryChecking}>Consultando la matrícula {item.credentialNumber || item.providerName}…</Text>}
+                      {!!itemRegistryResult && <View style={[styles.adminCredentialMatchFeedback, itemRegistryResult.status === "matched" ? styles.adminCredentialMatchSuccess : styles.adminCredentialMatchWarning]}>
+                        <Text style={styles.adminCredentialMatchTitle}>{itemRegistryResult.status === "matched" ? `✓ MATRÍCULA ${item.credentialNumber || ""} ENCONTRADA` : itemRegistryResult.status === "not_found" ? "● SIN COINCIDENCIA" : "● REVISIÓN MANUAL"}</Text>
+                        <Text style={styles.adminCredentialMatchCopy}>{itemRegistryResult.status === "matched" ? `Coincide en ${itemRegistryResult.source}. Ahora podés aprobar la certificación.` : itemRegistryResult.error || itemRegistryResult.note || "Revisá la fuente oficial antes de decidir."}</Text>
+                        {itemRegistryResult.matches.slice(0, 3).map((match, index) => <View key={`credential-registry-${index}`} style={styles.registryMatch}>{Object.entries(match).map(([label, value]) => value ? <Text key={label} style={styles.registryMatchText}><Text style={styles.registryMatchLabel}>{label.replace(/_/g, " ")}: </Text>{value}</Text> : null)}</View>)}
+                        <TouchableOpacity accessibilityRole="link" style={styles.adminOfficialLink} onPress={() => void openExternalUrl(itemRegistryResult.officialUrl)}><Text style={styles.adminOfficialLinkText}>Abrir fuente oficial en otra pestaña ↗</Text></TouchableOpacity>
+                      </View>}
                       <View style={styles.adminDecisionRow}>
                         <TouchableOpacity style={styles.adminRejectButton} onPress={() => void submitCredentialReview(item, "rejected")}><Text style={styles.adminRejectText}>Observar / rechazar</Text></TouchableOpacity>
                         <TouchableOpacity style={styles.adminApproveButton} onPress={() => void submitCredentialReview(item, "verified")}><Text style={styles.adminApproveText}>Aprobar verificación</Text></TouchableOpacity>
@@ -5983,10 +6028,18 @@ function createStyles(colors: ThemeColors) {
     adminRefreshText: { color: colors.blue, fontSize: 9, fontWeight: "900" },
     adminEmpty: { color: colors.stone, fontSize: 11, textAlign: "center", paddingVertical: 18 },
     adminCredentialCard: { borderWidth: 1, borderColor: colors.line, borderRadius: 13, backgroundColor: colors.raised, overflow: "hidden", marginTop: 8 },
+    adminCredentialCardPending: { borderColor: "#FF7800", borderWidth: 2 },
+    adminCredentialCardVerified: { borderColor: "#20B77A", borderWidth: 2, backgroundColor: colors.successSurface },
+    adminCredentialCardObserved: { borderColor: colors.danger, borderWidth: 2 },
     adminCredentialSummary: { minHeight: 66, flexDirection: "row", alignItems: "center", padding: 11, gap: 9 },
     adminCredentialSummaryCopy: { flex: 1 },
     adminCredentialName: { color: colors.navy, fontSize: 13, fontWeight: "900" },
-    adminCredentialKind: { color: colors.blue, fontSize: 10, fontWeight: "800", marginTop: 2 },
+    adminCredentialKindRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 7, marginTop: 4 },
+    adminCredentialKind: { color: colors.blue, fontSize: 10, fontWeight: "800", flexShrink: 1 },
+    adminCredentialStatus: { color: "white", fontSize: 9, fontWeight: "900", borderRadius: 999, paddingHorizontal: 9, paddingVertical: 5, overflow: "hidden" },
+    adminCredentialStatusPending: { backgroundColor: "#FF7800" },
+    adminCredentialStatusVerified: { backgroundColor: "#159765" },
+    adminCredentialStatusObserved: { backgroundColor: colors.danger },
     adminCredentialDeadline: { color: colors.stone, fontSize: 9, marginTop: 4 },
     adminDeadlineExpired: { color: colors.danger, fontWeight: "900" },
     adminCredentialOpen: { color: colors.blue, fontSize: 24, fontWeight: "900" },
@@ -5996,6 +6049,17 @@ function createStyles(colors: ThemeColors) {
     adminDocumentGoneText: { color: colors.stone, fontSize: 10, fontWeight: "800" },
     adminCredentialData: { width: "100%" },
     adminCredentialValue: { color: colors.navy, fontSize: 13, fontWeight: "900", marginBottom: 10 },
+    adminRegistryHint: { color: colors.stone, fontSize: 10, lineHeight: 15, marginTop: -5, marginBottom: 10 },
+    adminRegistryChecking: { color: "#FF7800", fontSize: 11, fontWeight: "900", marginBottom: 9 },
+    adminCredentialMatchFeedback: { borderWidth: 2, borderRadius: 12, padding: 11, marginBottom: 10 },
+    adminCredentialMatchSuccess: { borderColor: "#20B77A", backgroundColor: colors.successSurface },
+    adminCredentialMatchWarning: { borderColor: "#FF7800", backgroundColor: colors.warningSurface },
+    adminCredentialMatchTitle: { color: colors.navy, fontSize: 12, fontWeight: "900" },
+    adminCredentialMatchCopy: { color: colors.stone, fontSize: 10, lineHeight: 15, marginTop: 4 },
+    adminReviewFeedback: { borderWidth: 2, borderRadius: 12, padding: 12, marginTop: 4, marginBottom: 10 },
+    adminReviewFeedbackSuccess: { borderColor: "#20B77A", backgroundColor: colors.successSurface },
+    adminReviewFeedbackWarning: { borderColor: "#FF7800", backgroundColor: colors.warningSurface },
+    adminReviewFeedbackText: { color: colors.navy, fontSize: 12, fontWeight: "900", lineHeight: 17 },
     adminOcrButton: { minHeight: 43, borderRadius: 10, backgroundColor: colors.brandNavy, alignItems: "center", justifyContent: "center", marginBottom: 10 },
     adminOcrButtonText: { color: "white", fontSize: 10, fontWeight: "900" },
     adminOcrText: { minHeight: 150, paddingTop: 11, textAlignVertical: "top" },
