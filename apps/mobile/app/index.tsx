@@ -1391,8 +1391,6 @@ export default function Home() {
         setTab("Perfil");
         return;
       }
-      if (providerProfile) return;
-
       const [tradesResult, offersResult, ratesResult, credentialsResult, worksResult, photosResult] = await Promise.all([
         supabase.from("provider_services").select("trade_name, position").eq("provider_id", userId).eq("active", true).order("position"),
         supabase.from("provider_service_offers").select("id, family, specialization, specializations, description, position").eq("provider_id", userId).eq("active", true).order("position"),
@@ -1475,7 +1473,7 @@ export default function Home() {
       setProfileDraft(hydratedProfile);
     })();
     return () => { cancelled = true; };
-  }, [hydrated, session?.email, session?.role, isDemoSession, providerProfile?.publicId]);
+  }, [hydrated, session?.email, session?.role, isDemoSession]);
 
   useEffect(() => {
     if (!hydrated || !session || !supabase || isDemoSession) return;
