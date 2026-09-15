@@ -4206,7 +4206,7 @@ export default function Home() {
                         </Text>
                       )}
                     </View>
-                    <Text style={styles.clientJobsCount}>{clientHistory.length} trabajos contratados en los últimos 6 meses</Text>
+                    <Text style={styles.clientJobsCount}>{session.role === "provider" ? `${contractedRequests.length} trabajos gestionados` : `${clientHistory.length} trabajos contratados en los últimos 6 meses`}</Text>
                     {isDemoSession && <Text style={styles.localBadge}>Cuenta de demostración</Text>}
                   </View>
                   {session.role !== "admin" && (
