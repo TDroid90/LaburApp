@@ -1473,7 +1473,7 @@ export default function Home() {
       setProfileDraft(hydratedProfile);
     })();
     return () => { cancelled = true; };
-  }, [hydrated, session?.email, session?.role, isDemoSession]);
+  }, [hydrated, session?.email, session?.role, isDemoSession, requestRefresh]);
 
   useEffect(() => {
     if (!hydrated || !session || !supabase || isDemoSession) return;
@@ -1579,6 +1579,7 @@ export default function Home() {
       .on("postgres_changes", { event: "*", schema: "public", table: "service_requests" }, () => setRequestRefresh((current) => current + 1))
       .on("postgres_changes", { event: "*", schema: "public", table: "quotes" }, () => setRequestRefresh((current) => current + 1))
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, () => setRequestRefresh((current) => current + 1))
+      .on("postgres_changes", { event: "*", schema: "public", table: "credentials" }, () => setRequestRefresh((current) => current + 1))
       .subscribe();
     return () => { void realtimeClient.removeChannel(channel); };
   }, [session?.email, isDemoSession]);
