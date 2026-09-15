@@ -20,16 +20,16 @@ export const statusPresentation: Record<JobStatus, { label: string; next: string
   provider_reviewing: { label: "En revisión", next: "El profesional prepara su presupuesto.", tone: "blue" },
   quote_sent: { label: "Presupuesto recibido", next: "Aceptalo o pedí una modificación.", tone: "blue" },
   quote_revision_requested: { label: "Cambios solicitados", next: "El profesional envía una nueva versión.", tone: "orange" },
-  quote_accepted: { label: "Presupuesto aceptado", next: "Realizá el pago protegido simulado.", tone: "blue" },
-  payment_pending: { label: "Pago pendiente", next: "Completá el pago protegido.", tone: "orange" },
-  payment_authorized: { label: "Pago autorizado", next: "LaburApp protege los fondos.", tone: "blue" },
-  funds_held: { label: "Pago protegido", next: "Coordiná la fecha del trabajo.", tone: "green" },
+  quote_accepted: { label: "Presupuesto aceptado", next: "Coordiná fecha y forma de pago directamente con el profesional.", tone: "blue" },
+  payment_pending: { label: "Condiciones acordadas", next: "Coordiná la fecha del trabajo.", tone: "orange" },
+  payment_authorized: { label: "Trabajo coordinado", next: "Confirmá la fecha con el profesional.", tone: "blue" },
+  funds_held: { label: "Trabajo coordinado", next: "Coordiná la fecha del trabajo.", tone: "green" },
   scheduled: { label: "Trabajo coordinado", next: "El profesional confirma el inicio.", tone: "blue" },
   in_progress: { label: "Trabajo en curso", next: "El profesional propone la finalización.", tone: "blue" },
   completion_proposed: { label: "Finalización propuesta", next: "El cliente confirma el resultado.", tone: "orange" },
   client_confirmation_pending: { label: "Esperando confirmación", next: "Confirmá que el trabajo fue terminado.", tone: "orange" },
-  completed: { label: "Trabajo completado", next: "LaburApp libera los fondos protegidos.", tone: "green" },
-  funds_released: { label: "Finalizado y pagado", next: "Dejá una reseña verificada.", tone: "green" },
+  completed: { label: "Trabajo completado", next: "Dejá una reseña verificada.", tone: "green" },
+  funds_released: { label: "Trabajo finalizado", next: "Dejá una reseña verificada.", tone: "green" },
   cancelled: { label: "Cancelado", next: "Este trabajo no continuará.", tone: "red" },
   disputed: { label: "En revisión", next: "El equipo revisa el caso.", tone: "red" },
   refunded: { label: "Reintegrado", next: "El pago fue reintegrado.", tone: "green" },
@@ -78,12 +78,12 @@ export function applyDemoAction(request: SavedRequest, action: DemoAction): Save
   if (action === "pay" && quote) {
     const fee = calculateFee(quote.amount, false);
     payment = { total: fee.total, fee: fee.fee, providerNet: fee.providerNet, protected: true };
-    messages.push({ id: `${Date.now()}-payment`, sender: "system", body: "Pago simulado aprobado. Los fondos quedan protegidos hasta confirmar el trabajo.", createdAt: now });
+    messages.push({ id: `${Date.now()}-payment`, sender: "system", body: "Condiciones de pago registradas entre cliente y profesional.", createdAt: now });
   }
   if (action === "schedule") messages.push({ id: `${Date.now()}-schedule`, sender: "system", body: "Trabajo coordinado para la fecha conversada.", createdAt: now });
   if (action === "start") messages.push({ id: `${Date.now()}-start`, sender: "provider", body: "Ya estoy trabajando en el pedido.", createdAt: now });
   if (action === "propose_completion") messages.push({ id: `${Date.now()}-finish`, sender: "provider", body: "Terminé el trabajo. Revisalo y confirmá la finalización desde la app.", createdAt: now });
-  if (action === "release") messages.push({ id: `${Date.now()}-release`, sender: "system", body: "Trabajo confirmado. Fondos liberados al profesional.", createdAt: now });
+  if (action === "release") messages.push({ id: `${Date.now()}-release`, sender: "system", body: "Trabajo confirmado y acuerdo finalizado.", createdAt: now });
 
   return { ...request, status, quote, payment, messages };
 }
@@ -113,12 +113,12 @@ export function primaryActionFor(status: JobStatus): { action: DemoAction; label
   switch (status) {
     case "request_sent": return { action: "provider_quote", label: "Simular respuesta del profesional" };
     case "quote_revision_requested": return { action: "revised_quote", label: "Simular presupuesto corregido" };
-    case "quote_accepted": return { action: "pay", label: "Simular pago protegido" };
+    case "quote_accepted": return { action: "pay", label: "Registrar condiciones acordadas" };
     case "funds_held": return { action: "schedule", label: "Confirmar fecha acordada" };
     case "scheduled": return { action: "start", label: "Simular inicio del trabajo" };
     case "in_progress": return { action: "propose_completion", label: "Simular trabajo terminado" };
     case "client_confirmation_pending": return { action: "confirm_completion", label: "Confirmar que está terminado" };
-    case "completed": return { action: "release", label: "Liberar pago simulado" };
+    case "completed": return { action: "release", label: "Finalizar acuerdo" };
     default: return null;
   }
 }

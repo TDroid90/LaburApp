@@ -162,6 +162,10 @@ export type SavedProfileReview = {
   rating: number;
   comment: string;
   createdAt: string;
+  qualities?: string[];
+  price?: number;
+  duration?: string;
+  appealedAt?: string;
 };
 
 export type SavedTariffItem = {

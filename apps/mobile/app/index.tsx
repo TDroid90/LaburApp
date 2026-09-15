@@ -41,6 +41,7 @@ import {
   SavedQuote,
   SavedRequest,
   SavedRequestPhoto,
+  SavedProfileReview,
   SavedSession,
 } from "../lib/local-store";
 import { enqueueMirrorEvent, flushMirrorEvents } from "../lib/mirror-events";
@@ -571,6 +572,7 @@ type Provider = (typeof providers)[number] & {
   availabilityStart?: string;
   availabilityEnd?: string;
   portfolioWorks?: PublicPortfolioWork[];
+  profileReviews?: SavedProfileReview[];
 };
 type ProviderSort = "recent" | "jobs" | "rating";
 type FeaturedWork = {
@@ -588,7 +590,7 @@ type PublicProfileDetails = {
   bio: string;
   certifications: string[];
   diagnosticPrice?: number;
-  reviews: Array<{ author: string; comment: string; rating: number }>;
+  reviews: Array<{ author: string; comment: string; rating: number; qualities?: string[]; createdAt?: string; price?: number; duration?: string }>;
 };
 type InfoPageKey = "terms" | "privacy" | "about" | "usage" | "certifications";
 type RequestReceipt = {
@@ -838,11 +840,24 @@ function publicPortfolioFor(provider: Provider): PublicPortfolioWork[] {
 
 function publicDetailsFor(provider: Provider): PublicProfileDetails {
   if (provider.providerId) {
+    const reviews = (provider.profileReviews ?? [])
+      .slice()
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, 3)
+      .map((review) => ({
+        author: review.authorName,
+        comment: review.comment,
+        rating: review.rating,
+        qualities: review.qualities,
+        createdAt: review.createdAt,
+        price: review.price,
+        duration: review.duration,
+      }));
     return {
       bio: provider.bio || `${provider.name} ofrece servicios de ${provider.trade.toLowerCase()} en ${provider.city}.`,
       certifications: provider.certifications ?? [],
       diagnosticPrice: provider.diagnosticPrice,
-      reviews: [],
+      reviews,
     };
   }
   if (provider.name === "Profesional Demo") {
@@ -1153,6 +1168,8 @@ export default function Home() {
   const [reviewQualities, setReviewQualities] = useState<string[]>([]);
   const [customReviewQuality, setCustomReviewQuality] = useState("");
   const [reviewError, setReviewError] = useState("");
+  const [appealReview, setAppealReview] = useState<SavedProfileReview | null>(null);
+  const [appealReason, setAppealReason] = useState("");
   const [acceptQuoteRequestId, setAcceptQuoteRequestId] = useState<string | null>(null);
   const [completionQr, setCompletionQr] = useState<{ requestId: string; value: string } | null>(null);
   const [qrBusy, setQrBusy] = useState(false);
@@ -1161,6 +1178,7 @@ export default function Home() {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [clientPlan, setClientPlan] = useState<"free" | "plus">("free");
   const [clientPhotoBusy, setClientPhotoBusy] = useState(false);
+  const reviewQualityLimit = clientPlan === "plus" ? 6 : 3;
   const [quoteBuilderRequestId, setQuoteBuilderRequestId] = useState<
     string | null
   >(null);
@@ -1336,7 +1354,27 @@ export default function Home() {
         setProviderDirectoryLoading(false);
         return;
       }
-      const directory = (result.data ?? []).map((row: any): Provider => {
+      const providerRows = result.data ?? [];
+      const providerIds = providerRows.map((row: any) => String(row.provider_id)).filter(Boolean);
+      const reviewsResult = providerIds.length
+        ? await supabase.from("reviews").select("id, provider_id, rating, comment, qualities, created_at").in("provider_id", providerIds).is("moderated_at", null).order("created_at", { ascending: false })
+        : { data: [] as any[] };
+      const reviewsByProvider = new Map<string, SavedProfileReview[]>();
+      for (const row of reviewsResult.data ?? []) {
+        const providerId = String((row as any).provider_id ?? "");
+        if (!providerId) continue;
+        const list = reviewsByProvider.get(providerId) ?? [];
+        if (list.length < 3) list.push({
+          id: String((row as any).id),
+          authorName: "Cliente verificado",
+          rating: Number((row as any).rating ?? 0),
+          comment: String((row as any).comment ?? ""),
+          qualities: Array.isArray((row as any).qualities) ? (row as any).qualities.map(String) : [],
+          createdAt: String((row as any).created_at ?? ""),
+        });
+        reviewsByProvider.set(providerId, list);
+      }
+      const directory = providerRows.map((row: any): Provider => {
         const publishedWorks: PublicPortfolioWork[] = (Array.isArray(row.works) ? row.works : []).map((work: any) => ({
           id: String(work.id),
           title: String(work.title ?? "Trabajo realizado"),
@@ -1364,6 +1402,7 @@ export default function Home() {
           availabilityStart: String(row.availability_start ?? "08:00").slice(0, 5),
           availabilityEnd: String(row.availability_end ?? "18:00").slice(0, 5),
           portfolioWorks: publishedWorks,
+          profileReviews: reviewsByProvider.get(String(row.provider_id)) ?? [],
         };
       });
       setPublishedProviders(directory);
@@ -1405,7 +1444,7 @@ export default function Home() {
         setTab("Perfil");
         return;
       }
-      const [tradesResult, offersResult, ratesResult, tariffTemplateResult, credentialsResult, worksResult, photosResult] = await Promise.all([
+      const [tradesResult, offersResult, ratesResult, tariffTemplateResult, credentialsResult, worksResult, photosResult, reviewsResult] = await Promise.all([
         supabase.from("provider_services").select("trade_name, position").eq("provider_id", userId).eq("active", true).order("position"),
         supabase.from("provider_service_offers").select("id, family, specialization, specializations, description, position").eq("provider_id", userId).eq("active", true).order("position"),
         supabase.from("provider_rate_items").select("id, trade_name, label, unit, unit_price, active").eq("provider_id", userId).order("created_at"),
@@ -1413,6 +1452,7 @@ export default function Home() {
         supabase.from("credentials").select("id, kind, credential_number, private_path, status, updated_at").eq("provider_id", userId),
         supabase.from("provider_completed_works").select("id, service_label, description, position").eq("provider_id", userId).order("position"),
         supabase.from("provider_portfolio_items").select("id, work_id, storage_path, drive_file_id, watermarked, photo_position").eq("provider_id", userId).order("photo_position"),
+        supabase.from("reviews").select("id, rating, comment, qualities, created_at").eq("provider_id", userId).is("moderated_at", null).order("created_at", { ascending: false }).limit(3),
       ]);
       if (cancelled) return;
       const providerRow = providerResult.data;
@@ -1467,6 +1507,14 @@ export default function Home() {
               driveFileId: photo.drive_file_id ? String(photo.drive_file_id) : undefined,
               watermarked: photo.watermarked === true,
             })),
+        })),
+        profileReviews: (reviewsResult.data ?? []).map((item) => ({
+          id: String(item.id),
+          authorName: "Cliente verificado",
+          rating: Number(item.rating ?? 0),
+          comment: String(item.comment ?? ""),
+          qualities: Array.isArray(item.qualities) ? item.qualities.map(String) : [],
+          createdAt: String(item.created_at ?? ""),
         })),
         skills: String(providerRow.skills_text ?? ""),
         zones: (providerRow.zones ?? []).length >= 5 ? "Toda la provincia" : "Cobertura seleccionada",
@@ -1609,7 +1657,8 @@ export default function Home() {
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, () => setRequestRefresh((current) => current + 1))
       .on("postgres_changes", { event: "*", schema: "public", table: "credentials" }, () => setRequestRefresh((current) => current + 1))
       .subscribe();
-    return () => { void realtimeClient.removeChannel(channel); };
+    const refreshTimer = setInterval(() => setRequestRefresh((current) => current + 1), 3000);
+    return () => { clearInterval(refreshTimer); void realtimeClient.removeChannel(channel); };
   }, [session?.email, isDemoSession]);
 
   useEffect(() => {
@@ -2771,7 +2820,7 @@ export default function Home() {
       updateRequest(id, (request) => applyDemoAction(request, action));
       setRequested(
         action === "pay"
-          ? "Pago simulado aprobado y protegido."
+          ? "Condiciones de pago registradas."
           : "Estado del trabajo actualizado.",
       );
     } catch {
@@ -2920,7 +2969,7 @@ export default function Home() {
       ...current.filter((request) => !request.id.startsWith("scenario-")),
     ]);
     setRequested(
-      "Se cargaron tres casos para probar presupuestos, pagos y estados.",
+      "Se cargaron tres casos para probar presupuestos y estados.",
     );
   }
 
@@ -2977,7 +3026,9 @@ export default function Home() {
     setChatError("");
     if (!chatRequestId || !body)
       return setChatError("Escribí un mensaje para enviarlo.");
-    if (containsContactAttempt(body, [chatRequestId]))
+    const request = requests.find((item) => item.id === chatRequestId);
+    const publicRequestId = request?.displayId ?? requestDisplayId(chatRequestId);
+    if (containsContactAttempt(body, [chatRequestId, publicRequestId]))
       return setChatError(
         "Por seguridad, no compartas teléfonos, correos, redes ni enlaces antes de contratar.",
       );
@@ -2985,7 +3036,6 @@ export default function Home() {
       return setChatError(
         "Los precios sólo se envían mediante un presupuesto. Usá el chat para consultar el alcance del servicio.",
       );
-    const request = requests.find((item) => item.id === chatRequestId);
     const messageExpiry = new Date(Date.now() + REQUEST_LIFETIME_MS).toISOString();
     const message: SavedMessage = {
       id: `${Date.now()}-${session?.role ?? "client"}`,
@@ -2994,7 +3044,7 @@ export default function Home() {
       createdAt: new Date().toISOString(),
       expiresAt: messageExpiry,
     };
-    const isRevision = body.startsWith(`Solicitud de Cambios Presupuesto ${chatRequestId}`);
+    const isRevision = body.startsWith(`Solicitud de Cambios Presupuesto ${publicRequestId}`);
     if (request && supabase && !isDemoSession && /^[0-9a-f-]{36}$/i.test(request.id)) {
       const userResult = await supabase.auth.getUser();
       if (!userResult.data.user) return setChatError("Volvé a ingresar para enviar el mensaje.");
@@ -3039,8 +3089,8 @@ export default function Home() {
       return setReviewError("Esta reseña todavía no está habilitada.");
     if (reviewComment.trim().length < 5)
       return setReviewError("Contá brevemente cómo fue el trabajo.");
-    if (reviewQualities.length > 3)
-      return setReviewError("Elegí hasta 3 cualidades.");
+    if (reviewQualities.length > reviewQualityLimit)
+      return setReviewError(`Elegí hasta ${reviewQualityLimit} cualidades.`);
     if (supabase && !isDemoSession && request.jobId && request.providerId) {
       const userResult = await supabase.auth.getUser();
       if (!userResult.data.user) return setReviewError("Volvé a ingresar para publicar la reseña.");
@@ -3060,6 +3110,8 @@ export default function Home() {
         rating: reviewRating,
         comment: reviewComment.trim(),
         qualities: reviewQualities,
+        price: request.quote?.amount,
+        duration: request.quote?.eta,
         createdAt: new Date().toISOString(),
       },
     }));
@@ -3075,12 +3127,33 @@ export default function Home() {
     const quality = customReviewQuality.trim();
     setReviewError("");
     if (quality.length < 2) return setReviewError("Escribí una cualidad válida.");
-    if (reviewQualities.length >= 3) return setReviewError("Elegí hasta 3 cualidades.");
+    if (reviewQualities.length >= reviewQualityLimit) return setReviewError(`Elegí hasta ${reviewQualityLimit} cualidades.`);
     if (reviewQualities.some((item) => item.toLocaleLowerCase("es") === quality.toLocaleLowerCase("es"))) {
       return setReviewError("Esa cualidad ya está elegida.");
     }
     setReviewQualities((current) => [...current, quality]);
     setCustomReviewQuality("");
+  }
+
+  async function submitReviewAppeal() {
+    if (!appealReview) return;
+    if (appealReason.trim().length < 5) return setRequested("Contá brevemente por qué querés apelar la reseña.");
+    if (supabase && !isDemoSession) {
+      const userResult = await supabase.auth.getUser();
+      if (!userResult.data.user) return setRequested("Volvé a ingresar para enviar la apelación.");
+      const result = await supabase.from("reports").insert({
+        reporter_id: userResult.data.user.id,
+        target_type: "review",
+        target_id: appealReview.id,
+        category: "review_appeal",
+        details: appealReason.trim(),
+        status: "pending",
+      });
+      if (result.error) return setRequested("No pudimos enviar la apelación. Intentá nuevamente.");
+    }
+    setAppealReview(null);
+    setAppealReason("");
+    setRequested("Apelación enviada a administración.");
   }
 
   async function pickClientPhoto() {
@@ -3158,6 +3231,10 @@ export default function Home() {
     if (session?.role === "provider" && request.provider === currentProviderName && (!request.clientEmail || request.clientEmail !== session.email)) return "provider";
     return "client";
   }
+  function unreadMessagesFor(request: SavedRequest) {
+    const viewer = requestViewerRole(request);
+    return (request.messages ?? []).filter((message) => message.sender !== "system" && message.sender !== viewer).length;
+  }
   const participantRequests = requests.filter((request) => {
     if (session?.role === "admin") return true;
     if (request.viewerRole) return true;
@@ -3166,15 +3243,20 @@ export default function Home() {
   const workRequests = participantRequests.filter((request) =>
     !hiddenRequestIds.includes(request.id) &&
     activeRequest(request) &&
-    !completedStatuses.has(request.status),
+    !completedStatuses.has(request.status) &&
+    !hiredStatuses.has(request.status),
   );
+  const contractedRequests = participantRequests
+    .filter((request) => hiredStatuses.has(request.status) && !hiddenRequestIds.includes(request.id))
+    .sort((a, b) => new Date(b.completedAt ?? b.createdAt).getTime() - new Date(a.completedAt ?? a.createdAt).getTime())
+    .slice(0, 10);
   const providerPendingRequests = workRequests.filter(
     (request) => requestViewerRole(request) === "provider" && (request.status === "request_sent" || request.status === "quote_revision_requested"),
   );
   const clientHistory = participantRequests
     .filter((request) =>
       requestViewerRole(request) === "client" &&
-      completedStatuses.has(request.status) &&
+      hiredStatuses.has(request.status) &&
       new Date(request.completedAt ?? request.createdAt).getTime() >= Date.now() - CLIENT_HISTORY_MS,
     )
     .sort((a, b) => new Date(b.completedAt ?? b.createdAt).getTime() - new Date(a.completedAt ?? a.createdAt).getTime())
@@ -3182,6 +3264,14 @@ export default function Home() {
   const weeklyRequestCount = participantRequests.filter(
     (request) => requestViewerRole(request) === "client" && new Date(request.createdAt).getTime() >= startOfCurrentWeek() && request.status !== "cancelled",
   ).length;
+  const requestNotificationCount = workRequests.filter((request) =>
+    (requestViewerRole(request) === "provider" && (request.status === "request_sent" || request.status === "quote_revision_requested")) ||
+    (requestViewerRole(request) === "client" && (request.status === "quote_sent" || request.status === "quote_revision_requested")),
+  ).length + participantRequests.filter((request) => unreadMessagesFor(request) > 0).length;
+  const latestProfileReviews = (providerProfile?.profileReviews ?? [])
+    .slice()
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, 3);
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -3258,7 +3348,7 @@ export default function Home() {
                 Encontrá a quien sabe hacerlo.
               </Text>
               <Text style={styles.heroCopy}>
-                Prestadores locales, pagos protegidos y reseñas de trabajos
+                Prestadores locales, acuerdos claros y reseñas de trabajos
                 reales.
               </Text>
               <TextInput
@@ -3471,7 +3561,7 @@ export default function Home() {
                   <Text style={styles.panelEyebrow}>PLAN GRATIS</Text>
                   <Text style={styles.requestQuotaTitle}>Presupuestos de esta semana</Text>
                   {clientPlan === "free" && weeklyRequestCount >= FREE_WEEKLY_REQUEST_LIMIT && (
-                    <TouchableOpacity accessibilityRole="button" onPress={() => setRequested("Cliente Plus habilitará solicitudes adicionales. La contratación de la membresía se conectará con el módulo de pagos.")}>
+                    <TouchableOpacity accessibilityRole="button" onPress={() => setRequested("Cliente Plus habilitará solicitudes adicionales y beneficios exclusivos.")}>
                       <Text style={styles.upgradeLink}>Ver Cliente Plus</Text>
                     </TouchableOpacity>
                   )}
@@ -3531,8 +3621,7 @@ export default function Home() {
               <View style={styles.simulatorCopy}>
                 <Text style={styles.simulatorTitle}>Simulador del PMV</Text>
                 <Text style={styles.simulatorText}>
-                  Cargá casos ficticios para recorrer el circuito sin pagos ni
-                  operaciones reales.
+                  Cargá casos ficticios para recorrer el circuito sin operaciones reales.
                 </Text>
               </View>
               <TouchableOpacity
@@ -3674,14 +3763,10 @@ export default function Home() {
                     {request.payment?.protected && (
                       <View style={styles.paymentBox}>
                         <Text style={styles.paymentTitle}>
-                          🛡 Pago protegido (simulado)
+                          Condiciones acordadas
                         </Text>
                         <Text style={styles.paymentText}>
-                          Total ${request.payment.total.toLocaleString("es-AR")}{" "}
-                          · comisión $
-                          {request.payment.fee.toLocaleString("es-AR")} · recibe
-                          el profesional $
-                          {request.payment.providerNet.toLocaleString("es-AR")}
+                          Total ${request.payment.total.toLocaleString("es-AR")} · acordado directamente con el profesional.
                         </Text>
                       </View>
                     )}
@@ -3782,12 +3867,8 @@ export default function Home() {
                           setChatError("");
                         }}
                       >
-                        <Text style={styles.cardLink}>
-                          Abrir conversación (
-                          {request.messages?.filter(
-                            (message) => message.sender !== "system",
-                          ).length ?? 0}
-                          )
+                        <Text style={[styles.cardLink, unreadMessagesFor(request) > 0 && styles.chatPendingLink]}>
+                          {unreadMessagesFor(request) > 0 ? `🔴 Mensajes pendientes (${unreadMessagesFor(request)})` : `Abrir conversación (${request.messages?.filter((message) => message.sender !== "system").length ?? 0})`}
                         </Text>
                       </TouchableOpacity>
                       {cancellableStatuses.has(request.status) && (
@@ -3859,7 +3940,7 @@ export default function Home() {
             <Text style={styles.pageCopy}>
               Tus últimos 10 trabajos contratados, con el profesional y el estado de cada servicio.
             </Text>
-            {clientHistory.length === 0 ? (
+            {contractedRequests.length === 0 ? (
               <View style={styles.emptyPanel}>
                 <Text style={styles.emptyIcon}>🤝</Text>
                 <Text style={styles.emptyTitle}>Todavía no contrataste trabajos</Text>
@@ -3870,7 +3951,7 @@ export default function Home() {
                   <Text style={styles.secondaryText}>Buscar profesionales</Text>
                 </TouchableOpacity>
               </View>
-            ) : clientHistory.map((request) => {
+            ) : contractedRequests.map((request) => {
               const presentation = statusPresentation[request.status];
               return (
                 <View key={`hired-${request.id}`} style={styles.workCard}>
@@ -3888,14 +3969,15 @@ export default function Home() {
                   {!!request.zone && <Text style={styles.workMeta}>Zona: {request.zone}</Text>}
                   {!!request.desiredAt && <Text style={styles.workMeta}>Disponibilidad: {request.desiredAt}</Text>}
                   {!!request.quote && <Text style={styles.hiredAmount}>Presupuesto: ${request.quote.amount.toLocaleString("es-AR")}</Text>}
-                  <Text style={styles.completedVerified}>✓ Finalización confirmada por QR</Text>
-                  {!request.review ? (
+                  {requestViewerRole(request) === "provider" && !completedStatuses.has(request.status) && <TouchableOpacity accessibilityRole="button" disabled={qrBusy} style={styles.primaryActionFull} onPress={() => void issueCompletionQr(request)}><Text style={styles.primaryActionText}>{qrBusy ? "Generando QR…" : "Trabajo terminado · Mostrar QR"}</Text></TouchableOpacity>}
+                  {completedStatuses.has(request.status) && <Text style={styles.completedVerified}>✓ Finalización confirmada por QR</Text>}
+                  {requestViewerRole(request) === "client" && completedStatuses.has(request.status) && !request.review ? (
                     <TouchableOpacity accessibilityRole="button" style={styles.primaryActionFull} onPress={() => { setReviewRequestId(request.id); setReviewError(""); }}>
                       <Text style={styles.primaryActionText}>Dejar reseña</Text>
                     </TouchableOpacity>
-                  ) : (
+                  ) : request.review ? (
                     <Text style={styles.verifiedReview}>✓ Reseña publicada</Text>
-                  )}
+                  ) : <Text style={styles.nextStepText}>Coordiná el trabajo y esperá el QR al finalizar.</Text>}
                 </View>
               );
             })}
@@ -4279,13 +4361,13 @@ export default function Home() {
                         </Text>
                       </View>
                     </View>
-                    {!!providerProfile.profileReviews?.length && (
+                    {!!latestProfileReviews.length && (
                       <View style={styles.profileSection}>
                         <View style={styles.workCardTop}>
                           <Text style={styles.panelEyebrow}>RESEÑAS</Text>
-                          <Text style={styles.reviewAverage}>★ 5,0</Text>
+                          <Text style={styles.reviewAverage}>★ {((latestProfileReviews.reduce((sum, review) => sum + review.rating, 0) / latestProfileReviews.length) || 0).toFixed(1).replace(".", ",")}</Text>
                         </View>
-                        {providerProfile.profileReviews.map((review) => (
+                        {latestProfileReviews.map((review) => (
                           <View key={review.id} style={styles.profileReview}>
                             <View style={styles.reviewAuthorRow}>
                               <View style={styles.reviewAvatar}>
@@ -4297,9 +4379,7 @@ export default function Home() {
                                 <Text style={styles.reviewAuthor}>
                                   {review.authorName}
                                 </Text>
-                                <Text style={styles.reviewDate}>
-                                  {review.createdAt}
-                                </Text>
+                                <Text style={styles.reviewDate}>{new Date(review.createdAt).toLocaleDateString("es-AR")}</Text>
                               </View>
                               <Text style={styles.reviewStarsSmall}>
                                 {"★".repeat(review.rating)}
@@ -4308,9 +4388,12 @@ export default function Home() {
                             <Text style={styles.reviewComment}>
                               “{review.comment}”
                             </Text>
+                            {!!review.qualities?.length && <Text style={styles.reviewQualitiesText}>{review.qualities.join(" · ")}</Text>}
+                            <Text style={styles.reviewMeta}>Precio: {review.price ? `$${review.price.toLocaleString("es-AR")}` : "No informado"} · Tiempo: {review.duration || "No informado"}</Text>
                             <Text style={styles.verifiedReview}>
                               ✓ Trabajo verificado en LaburApp
                             </Text>
+                            {session.role !== "admin" && <TouchableOpacity accessibilityRole="button" style={styles.appealReviewButton} onPress={() => { setAppealReview(review); setAppealReason(""); }}><Text style={styles.appealReviewButtonText}>Revisar reseña y apelar</Text></TouchableOpacity>}
                           </View>
                         ))}
                       </View>
@@ -4384,7 +4467,7 @@ export default function Home() {
                     </Text>
                     <Text style={styles.reviewText}>
                       Usá la pestaña Panel para moderar usuarios, profesionales,
-                      trabajos, pagos y auditoría.
+                      trabajos y auditoría.
                     </Text>
                   </View>
                 )}
@@ -4495,8 +4578,8 @@ export default function Home() {
                 </View>
               </View>
               {!!selectedPublicDetails.reviews.length && <View style={styles.publicProfileSection}>
-                <View style={styles.workCardTop}><Text style={styles.panelEyebrow}>RESEÑAS</Text><Text style={styles.reviewAverage}>★ 5,0</Text></View>
-                {selectedPublicDetails.reviews.map((review) => <View key={review.author} style={styles.publicReviewRow}><View><Text style={styles.reviewAuthor}>{review.author}</Text><Text style={styles.publicReviewComment}>“{review.comment}”</Text></View><Text style={styles.reviewStarsSmall}>{"★".repeat(review.rating)}</Text></View>)}
+                <View style={styles.workCardTop}><Text style={styles.panelEyebrow}>RESEÑAS</Text><Text style={styles.reviewAverage}>★ {(selectedPublicDetails.reviews.reduce((sum, review) => sum + review.rating, 0) / selectedPublicDetails.reviews.length).toFixed(1).replace(".", ",")}</Text></View>
+                {selectedPublicDetails.reviews.slice(0, 3).map((review, index) => <View key={`${review.author}-${index}`} style={styles.publicReviewRow}><View style={styles.publicReviewCopy}><Text style={styles.reviewAuthor}>{review.author}</Text><Text style={styles.publicReviewComment}>“{review.comment}”</Text>{!!review.qualities?.length && <Text style={styles.reviewQualitiesText}>{review.qualities.join(" · ")}</Text>}<Text style={styles.reviewMeta}>{review.createdAt ? new Date(review.createdAt).toLocaleDateString("es-AR") : "Fecha no informada"} · Precio: {review.price ? `$${review.price.toLocaleString("es-AR")}` : "No informado"} · Tiempo: {review.duration || "No informado"}</Text></View><Text style={styles.reviewStarsSmall}>{"★".repeat(review.rating)}</Text></View>)}
               </View>}
             </>}
             <View style={styles.publicProfileSection}>
@@ -4998,8 +5081,17 @@ export default function Home() {
             </ScrollView>
             <TextInput
               multiline
+              blurOnSubmit={false}
+              returnKeyType="send"
               value={chatMessage}
               onChangeText={setChatMessage}
+              onKeyPress={(event) => {
+                const nativeEvent = event.nativeEvent as unknown as { key?: string; shiftKey?: boolean; preventDefault?: () => void };
+                if (nativeEvent.key === "Enter" && !nativeEvent.shiftKey) {
+                  nativeEvent.preventDefault?.();
+                  void sendChatMessage();
+                }
+              }}
               placeholder="Escribí un mensaje"
               placeholderTextColor="#71818B"
               style={[styles.modalInput, styles.chatInput]}
@@ -5023,7 +5115,7 @@ export default function Home() {
         onRequestClose={() => setReviewRequestId(null)}
       >
         <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
+          <View style={[styles.modalCard, styles.reviewModalCard]}>
             <TouchableOpacity
               accessibilityRole="button"
               accessibilityLabel="Cerrar"
@@ -5032,6 +5124,7 @@ export default function Home() {
             >
               <Text style={styles.modalCloseText}>×</Text>
             </TouchableOpacity>
+            <ScrollView style={styles.reviewModalScroll} contentContainerStyle={styles.reviewModalContent} keyboardShouldPersistTaps="handled">
             <Text style={styles.modalTitle}>Calificá el trabajo</Text>
             <Text style={styles.modalCopy}>
               {reviewRequest
@@ -5065,7 +5158,7 @@ export default function Home() {
               placeholderTextColor="#71818B"
               style={[styles.modalInput, styles.multiline]}
             />
-            <Text style={styles.modalLabel}>Elegí hasta 3 cualidades</Text>
+            <Text style={styles.modalLabel}>Elegí hasta {reviewQualityLimit} cualidades</Text>
             <View style={styles.qualityChoices}>
               {reviewQualitySuggestions.map((quality) => {
                 const selected = reviewQualities.includes(quality);
@@ -5075,7 +5168,7 @@ export default function Home() {
                     accessibilityRole="checkbox"
                     accessibilityState={{ checked: selected }}
                     style={[styles.qualityChoice, selected && styles.qualityChoiceActive]}
-                    onPress={() => setReviewQualities((current) => selected ? current.filter((item) => item !== quality) : current.length < 3 ? [...current, quality] : current)}
+                    onPress={() => setReviewQualities((current) => selected ? current.filter((item) => item !== quality) : current.length < reviewQualityLimit ? [...current, quality] : current)}
                   >
                     <Text style={[styles.qualityChoiceText, selected && styles.qualityChoiceTextActive]}>{quality}</Text>
                   </TouchableOpacity>
@@ -5116,6 +5209,18 @@ export default function Home() {
             >
               <Text style={styles.modalPrimaryText}>Publicar reseña</Text>
             </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </View>
+      </AppModal>
+      <AppModal visible={appealReview !== null} onRequestClose={() => setAppealReview(null)}>
+        <View style={styles.modalBackdrop}>
+          <View style={[styles.modalCard, styles.reviewModalCard]}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar apelación" style={styles.modalClose} onPress={() => setAppealReview(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+            <Text style={styles.modalTitle}>Apelar reseña</Text>
+            <Text style={styles.modalCopy}>La administración revisará tu pedido y te responderá por este medio.</Text>
+            <TextInput multiline value={appealReason} onChangeText={setAppealReason} placeholder="Contanos qué dato querés revisar" placeholderTextColor="#71818B" style={[styles.modalInput, styles.multiline]} />
+            <TouchableOpacity accessibilityRole="button" style={styles.modalPrimary} onPress={() => void submitReviewAppeal()}><Text style={styles.modalPrimaryText}>Enviar apelación</Text></TouchableOpacity>
           </View>
         </View>
       </AppModal>
@@ -5149,7 +5254,10 @@ export default function Home() {
               {item === "QR" ? (
                 <><Text style={styles.qrNavIcon}>▣</Text><Text style={[styles.qrNavText, tab === item && styles.navActive]}>QR</Text></>
               ) : (
-                <Text numberOfLines={1} style={[styles.navText, compactHeader && styles.navTextCompact, tab === item && styles.navActive]}>{item}</Text>
+                <View style={styles.navLabelWrap}>
+                  <Text numberOfLines={1} style={[styles.navText, compactHeader && styles.navTextCompact, tab === item && styles.navActive]}>{item}</Text>
+                  {item === "Solicitudes" && requestNotificationCount > 0 && <Text accessibilityLabel={`${requestNotificationCount} novedades`} style={styles.navAlert}>!</Text>}
+                </View>
               )}
             </TouchableOpacity>
           ))}
@@ -6200,9 +6308,11 @@ function createStyles(colors: ThemeColors) {
     },
     navCompact: { height: 64 },
     navItem: { flex: 1, alignItems: "center", justifyContent: "center" },
+    navLabelWrap: { flexDirection: "row", alignItems: "center", gap: 4 },
     navText: { color: colors.stone, fontWeight: "700" },
     navTextCompact: { fontSize: 10 },
     navActive: { color: colors.orange },
+    navAlert: { color: "#FF4D4D", fontSize: 18, lineHeight: 18, fontWeight: "900" },
     drawerBackdrop: {
       position: Platform.OS === "web" ? ("fixed" as "absolute") : "absolute",
       top: 0,
@@ -6261,6 +6371,7 @@ function createStyles(colors: ThemeColors) {
     publicWorkPhotoButton: { flex: 1, aspectRatio: 1, borderRadius: 10, overflow: "hidden", backgroundColor: colors.surfaceSoft },
     publicWorkPhoto: { width: "100%", height: "100%" },
     publicReviewRow: { marginTop: 9, padding: 11, borderRadius: 11, backgroundColor: colors.raised, flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: 10 },
+    publicReviewCopy: { flex: 1 },
     publicReviewComment: { color: colors.stone, fontSize: 10, lineHeight: 15, marginTop: 4, maxWidth: 470 },
     publicProfileWorkTitle: { color: colors.navy, fontSize: 17, fontWeight: "900", marginTop: 10 },
     publicProfileWorkDescription: { color: colors.stone, fontSize: 12, lineHeight: 18, marginTop: 5 },
@@ -6289,6 +6400,9 @@ function createStyles(colors: ThemeColors) {
       paddingBottom: 30,
       maxHeight: "92%",
     },
+    reviewModalCard: { maxHeight: "92%" },
+    reviewModalScroll: { flexGrow: 0 },
+    reviewModalContent: { paddingBottom: 12 },
     quoteModalScroll: { maxHeight: "100%" },
     quoteModalContent: { paddingTop: 2, paddingBottom: 4 },
     modalClose: {
@@ -6598,6 +6712,10 @@ function createStyles(colors: ThemeColors) {
     customQualityButton: { borderRadius: 12, borderWidth: 1, borderColor: colors.blue, paddingHorizontal: 13, paddingVertical: 12 },
     customQualityButtonText: { color: colors.blue, fontSize: 11, fontWeight: "900" },
     reviewQualitiesText: { color: colors.green, fontSize: 10, fontWeight: "900", marginTop: 6 },
+    reviewMeta: { color: colors.stone, fontSize: 11, marginTop: 6 },
+    appealReviewButton: { alignSelf: "flex-start", marginTop: 10, borderWidth: 1, borderColor: colors.blue, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8 },
+    appealReviewButtonText: { color: colors.blue, fontSize: 11, fontWeight: "900" },
+    chatPendingLink: { color: "#FF4D4D", fontSize: 14, fontWeight: "900" },
     qrNavItem: { marginTop: -16 },
     qrNavIcon: { width: 48, height: 48, borderRadius: 24, color: "white", backgroundColor: colors.orange, textAlign: "center", lineHeight: 48, fontSize: 24, fontWeight: "900", overflow: "hidden" },
     qrNavText: { color: colors.stone, fontSize: 9, fontWeight: "900", marginTop: 2 },
