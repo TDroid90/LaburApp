@@ -3147,7 +3147,7 @@ export default function Home() {
         target_id: appealReview.id,
         category: "review_appeal",
         details: appealReason.trim(),
-        status: "pending",
+        status: "open",
       });
       if (result.error) return setRequested("No pudimos enviar la apelación. Intentá nuevamente.");
     }
