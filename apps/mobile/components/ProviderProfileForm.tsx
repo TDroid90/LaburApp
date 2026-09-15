@@ -3,7 +3,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import { Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, useWindowDimensions, View } from "react-native";
 import { containsContactAttempt } from "@laburapp/shared";
-import type { SavedCredentialEvidence, SavedProviderProfile, SavedServiceOffer } from "../lib/local-store";
+import type { SavedCredentialEvidence, SavedProviderProfile, SavedServiceOffer, SavedTariffItem } from "../lib/local-store";
 import { supabase } from "../lib/supabase";
 import { certificationRules as fallbackCertificationRules, professionalSuggestions, providerServiceCatalog, serviceSpecialtiesAreValid, specialtyDescription, type CertificationRule } from "./provider-service-catalog";
 
@@ -30,6 +30,10 @@ function isDiagnostic(service?: string) {
 
 function defaultService(seed: string | number = Date.now()): SavedServiceOffer {
   return { id: `service-${seed}`, family: "", service: "", specialties: [], description: "", price: 0, startTime: "", endTime: "" };
+}
+
+function defaultTariffItem(seed: string | number = Date.now()): SavedTariffItem {
+  return { id: `tariff-${seed}`, trade: "", label: "", unit: "servicio", unitPrice: 0, estimatedHours: 1, enabled: true };
 }
 
 function inferredService(trade: string): SavedServiceOffer {
@@ -70,6 +74,7 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
     services: normalizeServices(initialProfile),
     certifications: initialProfile.certifications ?? [],
     credentials: initialProfile.credentials ?? [],
+    tariffItems: (initialProfile.tariffItems ?? []).filter((item) => !isDiagnostic(item.label)).slice(0, 5),
     coverageAreas: initialCoverage,
     zones: coverageLabel(initialCoverage),
     availabilityStart: initialProfile.availabilityStart ?? initialProfile.services?.find((item) => item.startTime)?.startTime ?? "08:00",
@@ -113,6 +118,14 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
 
   function updateService(id: string, patch: Partial<SavedServiceOffer>) {
     setDraft((current) => ({ ...current, services: (current.services ?? []).map((item) => item.id === id ? { ...item, ...patch } : item) }));
+  }
+
+  function updateTariffItem(id: string, patch: Partial<SavedTariffItem>) {
+    setDraft((current) => ({ ...current, tariffItems: (current.tariffItems ?? []).map((item) => item.id === id ? { ...item, ...patch } : item) }));
+  }
+
+  function removeTariffItem(id: string) {
+    setDraft((current) => ({ ...current, tariffItems: (current.tariffItems ?? []).filter((item) => item.id !== id) }));
   }
 
   function selectCity(city: string) {
@@ -230,6 +243,10 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
     if (!services.length || services.some((item) => !serviceSpecialtiesAreValid(item.family, item.specialties?.length ? item.specialties : item.service ? [item.service] : []))) return setLocalError("Elegí una familia y hasta dos especialidades válidas para cada servicio.");
     if (services.some((item) => (item.description?.trim().length ?? 0) < 10 || (item.description?.trim().length ?? 0) > 240)) return setLocalError("Describí cada servicio con entre 10 y 240 caracteres.");
     if (services.some((item) => containsContactAttempt(item.description ?? ""))) return setLocalError("No incluyas teléfonos, correos, redes ni enlaces en la descripción del servicio.");
+    const tariffItems = draft.tariffItems ?? [];
+    if (tariffItems.length > 5) return setLocalError("El tarifario interno admite hasta 5 elementos.");
+    if (tariffItems.some((item) => item.label.trim().length < 2 || item.unitPrice <= 0 || (item.estimatedHours ?? 0) <= 0)) return setLocalError("Completá el nombre, precio y horas estimadas de cada elemento del tarifario interno.");
+    if (tariffItems.some((item) => containsContactAttempt(item.label))) return setLocalError("No incluyas teléfonos, correos, redes ni enlaces en el tarifario interno.");
     const invalidCredential = (draft.credentials ?? []).find((credential) => {
       if (!credential.imageUri && !credential.privatePath) return false;
       const rule = certificationRules.find((item) => item.label === credential.certification);
@@ -239,7 +256,7 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
       const rule = certificationRules.find((item) => item.label === invalidCredential.certification);
       return setLocalError(`Completá ${rule?.numberLabel?.toLocaleLowerCase("es-AR") ?? "el número"} de ${invalidCredential.certification}.`);
     }
-    onSubmit({ ...draft, trade: draft.trade.trim().replace(/ matriculad[oa]$/i, ""), secondaryTrade: draft.secondaryTrade?.trim().replace(/ matriculad[oa]$/i, "") || undefined, zones: coverageLabel(draft.coverageAreas), availability: coverageLabel(draft.coverageAreas), skills: services.flatMap((item) => item.specialties ?? [item.service]).join(", "), services: services.map((item) => ({ ...item, startTime: draft.availabilityStart ?? "08:00", endTime: draft.availabilityEnd ?? "18:00" })) });
+    onSubmit({ ...draft, tariffItems: tariffItems.map((item) => ({ ...item, trade: item.trade.trim() || draft.trade.trim(), label: item.label.trim(), unit: item.unit.trim() || "servicio" })), trade: draft.trade.trim().replace(/ matriculad[oa]$/i, ""), secondaryTrade: draft.secondaryTrade?.trim().replace(/ matriculad[oa]$/i, "") || undefined, zones: coverageLabel(draft.coverageAreas), availability: coverageLabel(draft.coverageAreas), skills: services.flatMap((item) => item.specialties ?? [item.service]).join(", "), services: services.map((item) => ({ ...item, startTime: draft.availabilityStart ?? "08:00", endTime: draft.availabilityEnd ?? "18:00" })) });
   }
 
   return <View style={styles.card}>
@@ -338,6 +355,17 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
         })}
       </View>}
 
+      <View style={styles.servicesHeading}><View><Text style={styles.sectionTitle}>Tarifario interno</Text><Text style={styles.help}>Guardá hasta 5 tareas frecuentes con su precio y tiempo estimado. Sólo vos los verás y podrás usarlos al responder presupuestos.</Text></View><Text style={styles.freeBadge}>{(draft.tariffItems ?? []).length}/5</Text></View>
+      {(draft.tariffItems ?? []).map((item, index) => <View key={item.id} style={styles.tariffCard}>
+        <View style={styles.serviceTop}><Text style={styles.serviceNumber}>ELEMENTO {index + 1}</Text><TouchableOpacity onPress={() => removeTariffItem(item.id)}><Text style={styles.remove}>Quitar</Text></TouchableOpacity></View>
+        <TextInput value={item.label} onChangeText={(label) => updateTariffItem(item.id, { label })} placeholder="Ej. Instalación de calefactor" placeholderTextColor="#71818B" style={styles.input} />
+        <View style={[styles.fieldsRow, compact && styles.fieldsColumn]}>
+          <View style={styles.flexField}><Text style={styles.miniLabel}>PRECIO</Text><View style={styles.money}><Text style={styles.currency}>$</Text><TextInput value={item.unitPrice ? `${item.unitPrice}` : ""} onChangeText={(value) => updateTariffItem(item.id, { unitPrice: numericValue(value) })} keyboardType="numeric" placeholder="35000" placeholderTextColor="#71818B" style={styles.priceInput} /><Text style={styles.currency}>ARS</Text></View></View>
+          <View style={styles.diagnosticField}><Text style={styles.miniLabel}>HORAS ESTIMADAS</Text><TextInput value={item.estimatedHours ? `${item.estimatedHours}` : ""} onChangeText={(value) => updateTariffItem(item.id, { estimatedHours: numericValue(value) })} keyboardType="decimal-pad" placeholder="2" placeholderTextColor="#71818B" style={styles.input} /></View>
+        </View>
+      </View>)}
+      <TouchableOpacity accessibilityRole="button" disabled={(draft.tariffItems ?? []).length >= 5} style={[styles.addService, (draft.tariffItems ?? []).length >= 5 && styles.disabled]} onPress={() => { if ((draft.tariffItems ?? []).length >= 5) return; setDraft({ ...draft, tariffItems: [...(draft.tariffItems ?? []), defaultTariffItem(`${Date.now()}-${(draft.tariffItems ?? []).length}`)] }); }}><Text style={styles.addServiceText}>{(draft.tariffItems ?? []).length >= 5 ? "Límite de 5 elementos alcanzado" : "+ Agregar elemento al tarifario"}</Text></TouchableOpacity>
+
       <Text style={styles.label}>Disponibilidad horaria</Text>
       <Text style={styles.help}>El cliente sólo podrá elegir horarios dentro de este rango.</Text>
       <View style={styles.timeRow}>
@@ -396,7 +424,7 @@ function createStyles(darkMode: boolean) {
     documentPanel: { borderWidth: 1, borderColor: palette.line, borderRadius: 13, backgroundColor: palette.surface, padding: 11, marginBottom: 10, flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 10 }, documentPanelCopy: { flex: 1, minWidth: 190 }, documentPanelTitle: { color: palette.text, fontSize: 12, fontWeight: "900" }, documentPanelText: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: 3 },
     credentialModalBackdrop: { flex: 1, backgroundColor: "rgba(0, 8, 18, 0.86)", justifyContent: "center", alignItems: "center", padding: 12 }, credentialModalCard: { width: "100%", maxWidth: 780, maxHeight: "94%", borderWidth: 1, borderColor: palette.line, borderRadius: 20, backgroundColor: palette.background, padding: 16 }, credentialModalHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }, credentialModalHeading: { flex: 1 }, credentialModalEyebrow: { color: "#FF8A1F", fontSize: 9, fontWeight: "900", letterSpacing: 0.7 }, credentialModalTitle: { color: palette.text, fontSize: 21, fontWeight: "900", marginTop: 3 }, credentialModalClose: { width: 34, height: 34, borderRadius: 17, backgroundColor: palette.soft, alignItems: "center", justifyContent: "center" }, credentialModalCloseText: { color: palette.text, fontSize: 26, lineHeight: 28, fontWeight: "900" }, credentialModalScroll: { marginTop: 12 }, credentialModalContent: { paddingBottom: 4 }, credentialInstructions: { borderWidth: 1, borderColor: palette.line, borderRadius: 12, backgroundColor: palette.warning, padding: 11, marginBottom: 11 }, credentialInstructionTitle: { color: palette.warningText, fontSize: 12, fontWeight: "900", marginBottom: 5 }, credentialInstruction: { color: palette.muted, fontSize: 10, lineHeight: 15, marginTop: 3 }, credentialModalDone: { minHeight: 47, borderRadius: 11, backgroundColor: "#FF7800", alignItems: "center", justifyContent: "center", marginTop: 2 }, credentialModalDoneText: { color: "white", fontSize: 13, fontWeight: "900" },
     credentialsList: { gap: 8, marginBottom: 10 }, credentialCard: { borderWidth: 1, borderColor: palette.line, borderRadius: 13, backgroundColor: palette.surface, padding: 11 }, credentialHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: 9 }, credentialTitleWrap: { flex: 1 }, credentialTitle: { color: palette.text, fontSize: 12, fontWeight: "900" }, credentialPrivacy: { color: palette.muted, fontSize: 9, lineHeight: 13, marginTop: 2 }, credentialStatus: { color: palette.warningText, backgroundColor: palette.warning, borderRadius: 9, paddingHorizontal: 7, paddingVertical: 4, fontSize: 8, fontWeight: "900", overflow: "hidden" }, credentialVerified: { color: "#56D3A1", backgroundColor: palette.soft }, credentialRejected: { color: palette.danger }, credentialBody: { flexDirection: "row", alignItems: "stretch", gap: 10 }, credentialBodyCompact: { flexDirection: "column" }, credentialPreviewWrap: { width: 118, minHeight: 92, borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", backgroundColor: palette.input }, credentialPreview: { width: "100%", height: 92 }, credentialStored: { flex: 1, minHeight: 92, alignItems: "center", justifyContent: "center", padding: 8 }, credentialStoredIcon: { color: "#56D3A1", fontSize: 22, fontWeight: "900" }, credentialStoredText: { color: palette.muted, textAlign: "center", fontSize: 9, fontWeight: "800", marginTop: 4 }, credentialEmpty: { width: 118, minHeight: 92, alignItems: "center", justifyContent: "center", borderWidth: 1, borderStyle: "dashed", borderColor: palette.line, borderRadius: 10, backgroundColor: palette.input, padding: 8 }, credentialEmptyIcon: { color: "#49B2F5", fontSize: 25, fontWeight: "900" }, credentialEmptyText: { color: palette.muted, textAlign: "center", fontSize: 9, fontWeight: "800", marginTop: 4 }, credentialFields: { flex: 1 }, credentialUpload: { minHeight: 42, borderWidth: 1, borderColor: "#49B2F5", borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 10 }, credentialUploadText: { color: "#49B2F5", fontSize: 10, fontWeight: "900", textAlign: "center" },
-    servicesHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 2 }, freeBadge: { color: "#56D3A1", backgroundColor: palette.soft, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, fontSize: 10, fontWeight: "900" }, serviceCard: { borderWidth: 1, borderColor: palette.line, backgroundColor: palette.surface, borderRadius: 14, padding: 11, marginTop: 8 }, serviceTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 9 }, serviceNumber: { color: "#49B2F5", fontSize: 10, fontWeight: "900", letterSpacing: 0.4 }, remove: { color: palette.danger, fontSize: 10, fontWeight: "900" }, miniLabel: { color: palette.muted, fontSize: 9, fontWeight: "900", marginTop: 4, marginBottom: 5 }, descriptionHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }, counter: { color: palette.muted, fontSize: 9, fontWeight: "800" }, serviceDescription: { minHeight: 82, paddingTop: 11, textAlignVertical: "top" }, addService: { minHeight: 44, borderWidth: 1, borderStyle: "dashed", borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center", marginTop: 9 }, addServiceText: { color: "#49B2F5", fontSize: 12, fontWeight: "900" }, lockedService: { minHeight: 58, borderRadius: 11, backgroundColor: palette.soft, marginTop: 9, paddingHorizontal: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, opacity: 0.86 }, membershipNotice: { borderWidth: 1, borderColor: palette.warningText, borderRadius: 11, backgroundColor: palette.warning, marginTop: 9, padding: 11 }, lockedTitle: { color: palette.muted, fontSize: 12, fontWeight: "900" }, lockedText: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: 2 }, membershipBadge: { color: palette.warningText, fontSize: 9, fontWeight: "900", backgroundColor: palette.warning, borderRadius: 9, paddingHorizontal: 7, paddingVertical: 4 },
+    servicesHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 2 }, freeBadge: { color: "#56D3A1", backgroundColor: palette.soft, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, fontSize: 10, fontWeight: "900" }, tariffCard: { borderWidth: 1, borderColor: palette.line, backgroundColor: palette.surface, borderRadius: 14, padding: 11, marginTop: 8 }, serviceCard: { borderWidth: 1, borderColor: palette.line, backgroundColor: palette.surface, borderRadius: 14, padding: 11, marginTop: 8 }, serviceTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 9 }, serviceNumber: { color: "#49B2F5", fontSize: 10, fontWeight: "900", letterSpacing: 0.4 }, remove: { color: palette.danger, fontSize: 10, fontWeight: "900" }, miniLabel: { color: palette.muted, fontSize: 9, fontWeight: "900", marginTop: 4, marginBottom: 5 }, descriptionHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }, counter: { color: palette.muted, fontSize: 9, fontWeight: "800" }, serviceDescription: { minHeight: 82, paddingTop: 11, textAlignVertical: "top" }, addService: { minHeight: 44, borderWidth: 1, borderStyle: "dashed", borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center", marginTop: 9 }, addServiceText: { color: "#49B2F5", fontSize: 12, fontWeight: "900" }, lockedService: { minHeight: 58, borderRadius: 11, backgroundColor: palette.soft, marginTop: 9, paddingHorizontal: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, opacity: 0.86 }, membershipNotice: { borderWidth: 1, borderColor: palette.warningText, borderRadius: 11, backgroundColor: palette.warning, marginTop: 9, padding: 11 }, lockedTitle: { color: palette.muted, fontSize: 12, fontWeight: "900" }, lockedText: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: 2 }, membershipBadge: { color: palette.warningText, fontSize: 9, fontWeight: "900", backgroundColor: palette.warning, borderRadius: 9, paddingHorizontal: 7, paddingVertical: 4 },
     error: { color: palette.danger, fontSize: 12, fontWeight: "800", marginTop: 7 }, actions: { flexDirection: "row", gap: 8, marginTop: 12 }, cancel: { minHeight: 48, minWidth: 92, borderWidth: 1, borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center" }, cancelText: { color: "#49B2F5", fontWeight: "900" }, save: { flex: 1, minHeight: 48, borderRadius: 11, backgroundColor: "#FF7800", alignItems: "center", justifyContent: "center" }, saveText: { color: "white", fontWeight: "900" }, disabled: { opacity: 0.55 },
   });
 }

@@ -170,6 +170,7 @@ export type SavedTariffItem = {
   label: string;
   unit: string;
   unitPrice: number;
+  estimatedHours?: number;
   enabled: boolean;
 };
 

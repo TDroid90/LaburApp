@@ -1405,10 +1405,11 @@ export default function Home() {
         setTab("Perfil");
         return;
       }
-      const [tradesResult, offersResult, ratesResult, credentialsResult, worksResult, photosResult] = await Promise.all([
+      const [tradesResult, offersResult, ratesResult, tariffTemplateResult, credentialsResult, worksResult, photosResult] = await Promise.all([
         supabase.from("provider_services").select("trade_name, position").eq("provider_id", userId).eq("active", true).order("position"),
         supabase.from("provider_service_offers").select("id, family, specialization, specializations, description, position").eq("provider_id", userId).eq("active", true).order("position"),
         supabase.from("provider_rate_items").select("id, trade_name, label, unit, unit_price, active").eq("provider_id", userId).order("created_at"),
+        supabase.from("provider_quote_templates").select("items, active").eq("provider_id", userId).eq("name", "Tarifario interno").eq("active", true).maybeSingle(),
         supabase.from("credentials").select("id, kind, credential_number, private_path, status, updated_at").eq("provider_id", userId),
         supabase.from("provider_completed_works").select("id, service_label, description, position").eq("provider_id", userId).order("position"),
         supabase.from("provider_portfolio_items").select("id, work_id, storage_path, drive_file_id, watermarked, photo_position").eq("provider_id", userId).order("photo_position"),
@@ -1422,6 +1423,7 @@ export default function Home() {
       const primaryTrade = String(tradeRows[0]?.trade_name ?? titleTrades[0] ?? "");
       const secondaryTrade = String(tradeRows[1]?.trade_name ?? titleTrades[1] ?? "") || undefined;
       const photoRows = photosResult.data ?? [];
+      const storedTariffItems = Array.isArray(tariffTemplateResult.data?.items) ? tariffTemplateResult.data.items : [];
       const hydratedProfile: SavedProviderProfile = {
         publicId: identityResult.data?.public_id ?? undefined,
         displayName: String(identityResult.data?.full_name ?? session.name),
@@ -1471,14 +1473,25 @@ export default function Home() {
         availability: String(providerRow.availability ?? ""),
         availabilityStart,
         availabilityEnd,
-        tariffItems: (ratesResult.data ?? []).map((item) => ({
+        tariffItems: [
+          ...(ratesResult.data ?? []).map((item) => ({
           id: String(item.id),
           trade: String(item.trade_name),
           label: String(item.label),
           unit: String(item.unit),
           unitPrice: Number(item.unit_price),
           enabled: item.active !== false,
-        })),
+          })),
+          ...storedTariffItems.slice(0, 5).map((item: any, index: number) => ({
+            id: String(item.id ?? `tariff-${index}`),
+            trade: String(item.trade ?? primaryTrade),
+            label: String(item.label ?? ""),
+            unit: String(item.unit ?? "servicio"),
+            unitPrice: Number(item.unitPrice ?? item.unit_price ?? 0),
+            estimatedHours: Number(item.estimatedHours ?? item.estimated_hours ?? 1),
+            enabled: item.enabled !== false,
+          })),
+        ],
         verified: !!providerRow.verified_at,
         followersCount: Number(providerRow.followers_count ?? 0),
         published: providerRow.published === true,
@@ -2285,6 +2298,7 @@ export default function Home() {
     ];
     let photoUri = nextDraft.photoUri;
     let savedCredentials = nextDraft.credentials ?? [];
+    let savedTariffItems = nextDraft.tariffItems ?? [];
     if (supabase && !isDemoSession) {
       const {
         data: { user },
@@ -2338,6 +2352,41 @@ export default function Home() {
       if (profileSaveResult.error) {
         setProfileBusy(false);
         return setProfileError(readableProfileError(profileSaveResult.error.message));
+      }
+      const internalTariffItems = (nextDraft.tariffItems ?? []).slice(0, 5).map((item, index) => ({
+        id: item.id,
+        trade: item.trade?.trim() || nextDraft.trade.trim(),
+        label: item.label.trim(),
+        unit: item.unit?.trim() || "servicio",
+        unitPrice: item.unitPrice,
+        estimatedHours: item.estimatedHours ?? 1,
+        enabled: item.enabled !== false,
+        position: index + 1,
+      }));
+      savedTariffItems = internalTariffItems;
+      const clearTariffTemplate = await supabase
+        .from("provider_quote_templates")
+        .delete()
+        .eq("provider_id", user.id)
+        .eq("name", "Tarifario interno");
+      if (clearTariffTemplate.error) {
+        setProfileBusy(false);
+        return setProfileError(readableProfileError(clearTariffTemplate.error.message));
+      }
+      if (internalTariffItems.length) {
+        const saveTariffTemplate = await supabase.from("provider_quote_templates").insert({
+          provider_id: user.id,
+          trade_name: nextDraft.trade.trim(),
+          name: "Tarifario interno",
+          pricing_mode: "itemized",
+          items: internalTariffItems,
+          valid_days: 5,
+          active: true,
+        });
+        if (saveTariffTemplate.error) {
+          setProfileBusy(false);
+          return setProfileError(readableProfileError(saveTariffTemplate.error.message));
+        }
       }
       const savedPublicId = String(profileSaveResult.data ?? nextDraft.publicId ?? "");
       const existingCredentialsResult = await supabase
@@ -2430,7 +2479,7 @@ export default function Home() {
       ...nextDraft,
       photoUri,
       credentials: savedCredentials,
-      tariffItems,
+      tariffItems: [...tariffItems, ...savedTariffItems],
       services,
       published: true,
     };
