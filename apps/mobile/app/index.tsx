@@ -786,13 +786,14 @@ const infoPages: Record<InfoPageKey, { title: string; body: string }> = {
   certifications: { title: "Certificaciones", body: "Las insignias permiten distinguir identidad, matrículas y documentación revisada. Cada validación mostrará su alcance y vigencia." },
 };
 
-function featuredWorkFor(provider: Provider): FeaturedWork {
+function featuredWorkFor(provider: Provider): FeaturedWork | null {
   const publishedWork = provider.portfolioWorks?.find((work) => work.photoUris.length > 0);
   if (publishedWork) return {
     title: publishedWork.title,
     description: publishedWork.description,
     photoUri: publishedWork.photoUris[0],
   };
+  if (provider.providerId) return null;
   return featuredWorks[provider.name] ?? {
     title: `Trabajo de ${provider.trade}`,
     description: `Trabajo finalizado en ${provider.city}, seleccionado por el profesional como muestra destacada.`,
@@ -810,7 +811,9 @@ function publicPortfolioFor(provider: Provider): PublicPortfolioWork[] {
       photoUris: work.photos.map((photo) => photo.uri),
     }));
   }
+  if (provider.providerId) return [];
   const featured = featuredWorkFor(provider);
+  if (!featured) return [];
   const specialties = provider.skills.split(" · ");
   return [
     { id: `${provider.name}-work-1`, title: featured.title, description: featured.description, photoUris: [featured.photoUri, portfolioPhotoPool[1], portfolioPhotoPool[2]] },
@@ -3370,10 +3373,10 @@ export default function Home() {
                     <Text style={styles.badge}>✓ {provider.badge} · {provider.jobs} trabajos</Text>
                   </View>
                 </TouchableOpacity>
-                <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded }} accessibilityLabel={`${expanded ? "Ocultar" : "Ver"} trabajo destacado de ${provider.name}`} style={styles.featuredToggleButton} onPress={() => setExpandedProviderName(expanded ? null : provider.name)}>
+                {featuredWork && <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded }} accessibilityLabel={`${expanded ? "Ocultar" : "Ver"} trabajo destacado de ${provider.name}`} style={styles.featuredToggleButton} onPress={() => setExpandedProviderName(expanded ? null : provider.name)}>
                   <Text style={styles.featuredToggle}>{expanded ? "Ocultar trabajo destacado ︿" : "Ver trabajo destacado ﹀"}</Text>
-                </TouchableOpacity>
-                {expanded && <View style={styles.featuredWork}>
+                </TouchableOpacity>}
+                {expanded && featuredWork && <View style={styles.featuredWork}>
                     <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Ampliar foto de ${featuredWork.title}`} style={styles.featuredPhotoButton} onPress={() => setWorkPhoto({ provider, work: featuredWork })}>
                       <Image source={{ uri: featuredWork.photoUri }} resizeMode="cover" style={styles.featuredPhoto} />
                     </TouchableOpacity>
@@ -3933,13 +3936,20 @@ export default function Home() {
               {adminCredentialReviews.map((item) => {
                 const expanded = expandedAdminCredentialId === item.id;
                 const deadlinePassed = !!item.reviewDeadlineAt && new Date(item.reviewDeadlineAt).getTime() < Date.now();
-                const itemRegistryResult = registryResultCredentialId === item.id ? registryResult : null;
+                const storedRegistryMatches = Array.isArray(item.registryMatchData.matches) ? item.registryMatchData.matches as Array<Record<string, string>> : [];
+                const storedRegistryUrl = typeof item.registryMatchData.official_url === "string" ? item.registryMatchData.official_url : "";
+                const itemRegistryResult = registryResultCredentialId === item.id && registryResult ? registryResult : item.registryMatchStatus !== "not_checked" ? {
+                  source: item.registrySource ?? "Padrón consultado",
+                  officialUrl: storedRegistryUrl,
+                  status: item.registryMatchStatus,
+                  matches: storedRegistryMatches,
+                } satisfies RegistryLookupResult : null;
                 const statusLabel = item.status === "pending" ? "● PENDIENTE" : item.status === "verified" ? "✓ APROBADA" : item.status === "expired" ? "↻ ACTUALIZAR" : "! OBSERVADA";
                 return <View key={item.id} style={[styles.adminCredentialCard, item.status === "pending" ? styles.adminCredentialCardPending : item.status === "verified" ? styles.adminCredentialCardVerified : styles.adminCredentialCardObserved]}>
                   <TouchableOpacity accessibilityRole="button" style={styles.adminCredentialSummary} onPress={() => { setExpandedAdminCredentialId(expanded ? null : item.id); setRegistryResult(null); setRegistryResultCredentialId(null); }}>
                     <View style={styles.adminCredentialSummaryCopy}>
                       <Text style={styles.adminCredentialName}>{item.providerName}</Text>
-                      <View style={styles.adminCredentialKindRow}><Text style={styles.adminCredentialKind}>{item.kind}{item.city ? ` · ${item.city}` : ""}</Text><Text style={[styles.adminCredentialStatus, item.status === "pending" ? styles.adminCredentialStatusPending : item.status === "verified" ? styles.adminCredentialStatusVerified : styles.adminCredentialStatusObserved]}>{statusLabel}</Text></View>
+                      <View style={styles.adminCredentialKindRow}><Text style={styles.adminCredentialKind}>{item.kind}{item.city ? ` · ${item.city}` : ""}</Text><Text style={[styles.adminCredentialStatus, item.status === "pending" ? styles.adminCredentialStatusPending : item.status === "verified" ? styles.adminCredentialStatusVerified : styles.adminCredentialStatusObserved]}>{statusLabel}</Text>{item.registryMatchStatus === "matched" && <Text style={[styles.adminCredentialStatus, styles.adminCredentialStatusVerified]}>✓ PADRÓN</Text>}</View>
                       <Text style={[styles.adminCredentialDeadline, deadlinePassed && styles.adminDeadlineExpired]}>Recibido {new Date(item.createdAt).toLocaleDateString("es-AR")} · límite {item.reviewDeadlineAt ? new Date(item.reviewDeadlineAt).toLocaleDateString("es-AR") : "5 días"}</Text>
                     </View>
                     <Text style={styles.adminCredentialOpen}>{expanded ? "−" : "+"}</Text>
@@ -3967,7 +3977,7 @@ export default function Home() {
                         <Text style={styles.adminCredentialMatchTitle}>{itemRegistryResult.status === "matched" ? `✓ MATRÍCULA ${item.credentialNumber || ""} ENCONTRADA` : itemRegistryResult.status === "not_found" ? "● SIN COINCIDENCIA" : "● REVISIÓN MANUAL"}</Text>
                         <Text style={styles.adminCredentialMatchCopy}>{itemRegistryResult.status === "matched" ? `Coincide en ${itemRegistryResult.source}. Ahora podés aprobar la certificación.` : itemRegistryResult.error || itemRegistryResult.note || "Revisá la fuente oficial antes de decidir."}</Text>
                         {itemRegistryResult.matches.slice(0, 3).map((match, index) => <View key={`credential-registry-${index}`} style={styles.registryMatch}>{Object.entries(match).map(([label, value]) => value ? <Text key={label} style={styles.registryMatchText}><Text style={styles.registryMatchLabel}>{label.replace(/_/g, " ")}: </Text>{value}</Text> : null)}</View>)}
-                        <TouchableOpacity accessibilityRole="link" style={styles.adminOfficialLink} onPress={() => void openExternalUrl(itemRegistryResult.officialUrl)}><Text style={styles.adminOfficialLinkText}>Abrir fuente oficial en otra pestaña ↗</Text></TouchableOpacity>
+                        {!!itemRegistryResult.officialUrl && <TouchableOpacity accessibilityRole="link" style={styles.adminOfficialLink} onPress={() => void openExternalUrl(itemRegistryResult.officialUrl)}><Text style={styles.adminOfficialLinkText}>Abrir fuente oficial en otra pestaña ↗</Text></TouchableOpacity>}
                       </View>}
                       <View style={styles.adminDecisionRow}>
                         <TouchableOpacity style={styles.adminRejectButton} onPress={() => void submitCredentialReview(item, "rejected")}><Text style={styles.adminRejectText}>Observar / rechazar</Text></TouchableOpacity>
