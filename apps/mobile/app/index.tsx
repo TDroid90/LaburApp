@@ -593,6 +593,7 @@ type PublicProfileDetails = {
 type InfoPageKey = "terms" | "privacy" | "about" | "usage" | "certifications";
 type RequestReceipt = {
   id: string;
+  displayId: string;
   provider: string;
   photoCount: number;
   sheetSynced: boolean;
@@ -661,6 +662,19 @@ const CONTACT_WARNING = "No está permitido compartir teléfonos de contacto o e
 const FREE_WEEKLY_REQUEST_LIMIT = 3;
 const REQUEST_LIFETIME_MS = 5 * 24 * 60 * 60 * 1000;
 const CLIENT_HISTORY_MS = 183 * 24 * 60 * 60 * 1000;
+
+/**
+ * Keeps the database UUID private while giving users a short, numeric
+ * reference they can quote in chat or support requests.
+ */
+function requestDisplayId(id: string) {
+  let hash = 2166136261;
+  for (const character of id) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return String((hash >>> 0) % 1_000_000_000).padStart(9, "0");
+}
 
 async function openExternalUrl(url: string) {
   if (!/^https:\/\//i.test(url)) return;
@@ -1537,6 +1551,7 @@ export default function Home() {
         }
         return {
           id: row.id,
+          displayId: requestDisplayId(row.id),
           jobId: job?.id,
           clientId: row.client_id,
           clientName: clientProfile?.full_name ?? "Cliente",
@@ -2129,6 +2144,7 @@ export default function Home() {
 
       const nextRequest: SavedRequest = {
         id: requestId,
+        displayId: requestDisplayId(requestId),
         clientEmail: session?.email,
         providerId,
         provider: quoteProvider.name,
@@ -2163,6 +2179,7 @@ export default function Home() {
       }
       setRequestReceipt({
         id: requestId,
+        displayId: requestDisplayId(requestId),
         provider: quoteProvider.name,
         photoCount: storedPhotos.length,
         sheetSynced,
@@ -2786,7 +2803,7 @@ export default function Home() {
   function openRevisionChat(request: SavedRequest) {
     setChatRequestId(request.id);
     setChatError("");
-    setChatMessage(`Solicitud de Cambios Presupuesto ${request.id}\n`);
+    setChatMessage(`Solicitud de Cambios Presupuesto ${request.displayId ?? requestDisplayId(request.id)}\n`);
   }
 
   async function issueCompletionQr(request: SavedRequest) {
@@ -3518,6 +3535,7 @@ export default function Home() {
                       </Text>
                     </View>
                     <Text style={styles.workProvider}>{request.provider}</Text>
+                    <Text style={styles.requestId}>ID de solicitud · {request.displayId ?? requestDisplayId(request.id)}</Text>
                     <Text style={styles.trade}>{request.trade}</Text>
                     {request.status === "cancelled" && (
                       <Text style={styles.cancellationNotice}>
@@ -3810,7 +3828,7 @@ export default function Home() {
                   <View style={styles.workCardTop}>
                     <View>
                       <Text style={styles.workProvider}>{request.provider}</Text>
-                      <Text style={styles.jobId}>Trabajo #{request.id.slice(-10).toUpperCase()}</Text>
+                      <Text style={styles.jobId}>Trabajo #{request.displayId ?? requestDisplayId(request.id)}</Text>
                     </View>
                     <Text style={[styles.workStatus, presentation.tone === "green" && styles.statusGreen, presentation.tone === "blue" && styles.statusBlue, presentation.tone === "red" && styles.statusRed]}>
                       ● {presentation.label}
@@ -4829,10 +4847,7 @@ export default function Home() {
             <Text style={styles.modalTitle}>Solicitud enviada</Text>
             <Text style={styles.modalCopy}>{requestReceipt?.provider} ya puede verla y responderte desde su perfil.</Text>
             <View style={styles.receiptDetails}>
-              <Text style={styles.receiptId}>ID · {requestReceipt?.id}</Text>
-              <Text style={styles.receiptLine}>✓ Guardada en {requestReceipt?.demo ? "esta simulación" : "Supabase"}</Text>
-              <Text style={styles.receiptLine}>{requestReceipt?.sheetSynced ? "✓ Copiada en Google Sheets" : requestReceipt?.demo ? "• La cuenta demo no escribe en la hoja real" : "• Copia en Google Sheets pendiente de reintento"}</Text>
-              {!!requestReceipt?.photoCount && <Text style={styles.receiptLine}>{requestReceipt.driveSynced ? `✓ ${requestReceipt.photoCount} foto(s) optimizadas y copiadas en Drive` : `• ${requestReceipt.photoCount} foto(s) guardadas; copia en Drive pendiente`}</Text>}
+              <Text style={styles.receiptId}>ID de solicitud · {requestReceipt?.displayId}</Text>
             </View>
             <TouchableOpacity accessibilityRole="button" style={styles.modalPrimary} onPress={() => { setRequestReceipt(null); setTab("Solicitudes"); }}><Text style={styles.modalPrimaryText}>Ver mis solicitudes</Text></TouchableOpacity>
             <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => setRequestReceipt(null)}><Text style={styles.secondaryText}>Seguir buscando</Text></TouchableOpacity>
@@ -5497,6 +5512,7 @@ function createStyles(colors: ThemeColors) {
       fontWeight: "900",
       marginTop: 12,
     },
+    requestId: { color: colors.stone, fontSize: 10, marginTop: 2, letterSpacing: 0.3 },
     jobId: { color: colors.stone, fontSize: 9, marginTop: 3, letterSpacing: 0.35 },
     hiredAmount: { color: colors.green, fontSize: 13, fontWeight: "900", marginTop: 10, marginBottom: 10 },
     workDescription: { color: colors.stone, lineHeight: 20, marginTop: 10 },

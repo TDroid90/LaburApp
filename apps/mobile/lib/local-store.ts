@@ -10,6 +10,8 @@ export type SavedSession = {
 
 export type SavedRequest = {
   id: string;
+  /** Public-facing numeric identifier; id remains the private database key. */
+  displayId?: string;
   jobId?: string;
   clientId?: string;
   clientName?: string;
