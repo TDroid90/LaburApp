@@ -1162,6 +1162,8 @@ export default function Home() {
   const [chatRequestId, setChatRequestId] = useState<string | null>(null);
   const [chatMessage, setChatMessage] = useState("");
   const [chatError, setChatError] = useState("");
+  const [seenRequests, setSeenRequests] = useState<Record<string, { status: string; messageAt: string }> | null>(null);
+  const [seenRequestsLoaded, setSeenRequestsLoaded] = useState(false);
   const [reviewRequestId, setReviewRequestId] = useState<string | null>(null);
   const [reviewRating, setReviewRating] = useState(5);
   const [reviewComment, setReviewComment] = useState("");
@@ -1175,8 +1177,22 @@ export default function Home() {
   const [qrBusy, setQrBusy] = useState(false);
   const [qrScanned, setQrScanned] = useState(false);
   const [manualQrCode, setManualQrCode] = useState("");
+  const [pendingCompletionToken, setPendingCompletionToken] = useState<string | null>(null);
+  const [completionReceiptUri, setCompletionReceiptUri] = useState<string | null>(null);
+  const [completionError, setCompletionError] = useState("");
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [clientPlan, setClientPlan] = useState<"free" | "plus">("free");
+  const [membershipEndsAt, setMembershipEndsAt] = useState<string | null>(null);
+  const [accountPublicId, setAccountPublicId] = useState<string | null>(null);
+  const [subscriptionModal, setSubscriptionModal] = useState(false);
+  const [subscriptionMonths, setSubscriptionMonths] = useState<1 | 3 | 6 | 12>(1);
+  const [subscriptionReceiptUri, setSubscriptionReceiptUri] = useState<string | null>(null);
+  const [subscriptionBusy, setSubscriptionBusy] = useState(false);
+  const [subscriptionError, setSubscriptionError] = useState("");
+  const [adminPremiumId, setAdminPremiumId] = useState("");
+  const [adminPremiumAccount, setAdminPremiumAccount] = useState<{ id: string; name: string; publicId: string; premium: boolean; endsAt?: string; pendingMonths?: number; receiptUrl?: string } | null>(null);
+  const [adminPremiumBusy, setAdminPremiumBusy] = useState(false);
+  const [adminPremiumError, setAdminPremiumError] = useState("");
   const [clientPhotoBusy, setClientPhotoBusy] = useState(false);
   const reviewQualityLimit = clientPlan === "plus" ? 6 : 3;
   const [quoteBuilderRequestId, setQuoteBuilderRequestId] = useState<
@@ -1200,6 +1216,24 @@ export default function Home() {
     ? Math.round((adminPlatformMetrics.activity.jobs / adminPlatformMetrics.activity.quotes) * 100)
     : 0;
   const topAdminCity = adminPlatformMetrics?.cities[0];
+
+  useEffect(() => {
+    setSeenRequests(null);
+    setSeenRequestsLoaded(false);
+    if (!session?.email) return;
+    let cancelled = false;
+    void AsyncStorage.getItem(`laburapp:seen-requests:${session.email.toLowerCase()}`).then((saved) => {
+      if (cancelled) return;
+      try { setSeenRequests(saved ? JSON.parse(saved) : null); } catch { setSeenRequests(null); }
+      setSeenRequestsLoaded(true);
+    });
+    return () => { cancelled = true; };
+  }, [session?.email]);
+
+  useEffect(() => {
+    if (!session?.email || !seenRequests) return;
+    void AsyncStorage.setItem(`laburapp:seen-requests:${session.email.toLowerCase()}`, JSON.stringify(seenRequests));
+  }, [session?.email, seenRequests]);
 
   useEffect(() => {
     void AsyncStorage.getItem(THEME_STORAGE_KEY).then((savedTheme) => {
@@ -1344,12 +1378,10 @@ export default function Home() {
       return;
     }
     let cancelled = false;
-    setProviderDirectoryLoading(true);
     void (async () => {
       const result = await supabase.rpc("discover_published_providers");
       if (cancelled) return;
       if (result.error) {
-        setPublishedProviders([]);
         setProviderDirectoryError("No pudimos cargar los profesionales publicados. Actualizá la página en unos segundos.");
         setProviderDirectoryLoading(false);
         return;
@@ -1405,7 +1437,7 @@ export default function Home() {
           profileReviews: reviewsByProvider.get(String(row.provider_id)) ?? [],
         };
       });
-      setPublishedProviders(directory);
+      setPublishedProviders((current) => JSON.stringify(current) === JSON.stringify(directory) ? current : directory);
       setProviderDirectoryError("");
       setProviderDirectoryLoading(false);
     })();
@@ -1544,8 +1576,8 @@ export default function Home() {
         followersCount: Number(providerRow.followers_count ?? 0),
         published: providerRow.published === true,
       };
-      setProviderProfile(hydratedProfile);
-      setProfileDraft(hydratedProfile);
+      setProviderProfile((current) => JSON.stringify(current) === JSON.stringify(hydratedProfile) ? current : hydratedProfile);
+      if (!profileModal && !portfolioModal) setProfileDraft(hydratedProfile);
     })();
     return () => { cancelled = true; };
   }, [hydrated, session?.email, session?.role, isDemoSession, requestRefresh]);
@@ -1560,16 +1592,22 @@ export default function Home() {
       setCurrentUserId(currentUserId);
       await supabase.rpc("purge_expired_client_data");
       if (session.role !== "admin") {
-        const membership = await supabase
+        const [membership, identity] = await Promise.all([supabase
           .from("client_memberships")
-          .select("plan_code")
+          .select("plan_code, status, current_period_ends_at")
           .eq("client_id", currentUserId)
-          .maybeSingle();
-        if (!cancelled && membership.data?.plan_code === "plus") setClientPlan("plus");
+          .maybeSingle(), supabase.from("profiles").select("public_id").eq("id", currentUserId).maybeSingle()]);
+        if (!cancelled) {
+          const active = membership.data?.plan_code === "plus" && membership.data.status === "active"
+            && (!membership.data.current_period_ends_at || new Date(membership.data.current_period_ends_at).getTime() > Date.now());
+          setClientPlan(active ? "plus" : "free");
+          setMembershipEndsAt(membership.data?.current_period_ends_at ?? null);
+          setAccountPublicId(identity.data?.public_id ?? null);
+        }
       }
       const result = await supabase
         .from("service_requests")
-        .select("id, client_id, provider_id, description, approximate_zone, desired_at, preferred_start_time, preferred_end_time, status, created_at, expires_at, completion_verified_at, previous_status, cancellation_reason, cancelled_at, profiles!service_requests_provider_id_fkey(full_name), client:profiles!service_requests_client_id_fkey(full_name), quotes(total, scope, eta, version, pricing_mode, items, notes, valid_days, expires_at), jobs(id, completion_verified_at, updated_at), messages(id, sender_id, body, created_at, expires_at), client_request_attachments(id, storage_path, position, drive_sync_status)")
+        .select("id, client_id, provider_id, description, approximate_zone, desired_at, preferred_start_time, preferred_end_time, status, created_at, expires_at, completion_verified_at, previous_status, cancellation_reason, cancelled_at, profiles!service_requests_provider_id_fkey(full_name), client:profiles!service_requests_client_id_fkey(full_name), quotes(total, scope, eta, version, pricing_mode, items, notes, valid_days, expires_at), jobs(id, completion_verified_at, updated_at, reviews(id, rating, comment, qualities, created_at), completion_confirmations(status, receipt_path)), messages(id, sender_id, body, created_at, expires_at), client_request_attachments(id, storage_path, position, drive_sync_status)")
         .gte("created_at", new Date(Date.now() - CLIENT_HISTORY_MS).toISOString())
         .order("created_at", { ascending: false });
       if (result.error || cancelled) return;
@@ -1586,6 +1624,8 @@ export default function Home() {
         const quoteRows = Array.isArray(row.quotes) ? [...row.quotes].sort((a, b) => b.version - a.version) : [];
         const quote = quoteRows[0];
         const job = Array.isArray(row.jobs) ? row.jobs[0] : row.jobs;
+        const review = Array.isArray(job?.reviews) ? job.reviews[0] : job?.reviews;
+        const completionConfirmation = Array.isArray(job?.completion_confirmations) ? job.completion_confirmations[0] : job?.completion_confirmations;
         const activeMessages = (Array.isArray(row.messages) ? row.messages : [])
           .filter((message: any) => !message.expires_at || new Date(message.expires_at).getTime() > Date.now())
           .map((message: any) => ({
@@ -1630,6 +1670,8 @@ export default function Home() {
           expiresAt: row.expires_at,
           completedAt: job?.updated_at,
           completionVerifiedAt: row.completion_verified_at ?? job?.completion_verified_at,
+          completionAwaitingProvider: completionConfirmation?.status === "awaiting_provider",
+          completionReceiptPath: completionConfirmation?.receipt_path ?? undefined,
           status: row.status,
           previousStatus: row.previous_status ?? undefined,
           cancellationReason: row.cancellation_reason ?? undefined,
@@ -1640,12 +1682,33 @@ export default function Home() {
             amount: Number(quote.total), scope: quote.scope, eta: quote.eta ?? "", version: quote.version,
             pricingMode: quote.pricing_mode, items: quote.items ?? [], notes: quote.notes ?? "", validDays: quote.valid_days, expiresAt: quote.expires_at,
           } : undefined,
+          review: review ? {
+            id: String(review.id), rating: Number(review.rating), comment: String(review.comment ?? ""),
+            qualities: Array.isArray(review.qualities) ? review.qualities.map(String) : [],
+            createdAt: String(review.created_at),
+          } : undefined,
         };
       }));
-      if (!cancelled) setRequests((current) => [...remoteRequests, ...current.filter((local) => !remoteRequests.some((remote) => remote.id === local.id))]);
+      if (!cancelled && seenRequestsLoaded && seenRequests === null) {
+        setSeenRequests(Object.fromEntries(remoteRequests.map((request) => [request.id, {
+          status: request.status,
+          messageAt: request.messages?.at(-1)?.createdAt ?? request.createdAt,
+        }])));
+      }
+      if (!cancelled) setRequests((current) => {
+        const next = [...remoteRequests, ...current.filter((local) => !remoteRequests.some((remote) => remote.id === local.id))];
+        return JSON.stringify(current) === JSON.stringify(next) ? current : next;
+      });
     })();
     return () => { cancelled = true; };
-  }, [hydrated, session?.email, session?.role, isDemoSession, providerProfile?.displayName, providerProfile?.publicId, requestRefresh]);
+  }, [hydrated, session?.email, session?.role, isDemoSession, providerProfile?.displayName, providerProfile?.publicId, requestRefresh, seenRequestsLoaded]);
+
+  useEffect(() => {
+    if (session) return;
+    setClientPlan("free");
+    setMembershipEndsAt(null);
+    setAccountPublicId(null);
+  }, [session?.email]);
 
   useEffect(() => {
     if (!supabase || !session || isDemoSession) return;
@@ -2899,7 +2962,7 @@ export default function Home() {
   }
 
   function openRevisionChat(request: SavedRequest) {
-    setChatRequestId(request.id);
+    openRequestChat(request);
     setChatError("");
     setChatMessage(`Solicitud de Cambios Presupuesto ${request.displayId ?? requestDisplayId(request.id)}\n`);
   }
@@ -2925,42 +2988,100 @@ export default function Home() {
     }
   }
 
-  async function confirmCompletionCode(rawValue: string) {
+  function confirmCompletionCode(rawValue: string) {
     if (qrBusy || qrScanned) return;
-    setQrBusy(true);
-    setQrScanned(true);
     try {
       const match = rawValue.match(/[?&]token=([^&]+)/);
       const token = decodeURIComponent(match?.[1] ?? rawValue.trim());
+      if (!token || (token.startsWith("DEMO-") && !requests.some((request) => request.id === token.slice(5)))) throw new Error("invalid_token");
+      setQrScanned(true);
+      setPendingCompletionToken(token);
+      setCompletionError("");
+      setManualQrCode("");
+    } catch {
+      setCompletionError("No pudimos leer ese código. Volvé a escanearlo o ingresalo manualmente.");
+    }
+  }
+
+  async function pickCompletionReceipt() {
+    setCompletionError("");
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: false, quality: 0.9 });
+    if (result.canceled || !result.assets[0]) return;
+    const image = result.assets[0];
+    const optimized = await ImageManipulator.manipulateAsync(image.uri, image.width > 1600 ? [{ resize: { width: 1600 } }] : [], { compress: 0.82, format: ImageManipulator.SaveFormat.JPEG });
+    setCompletionReceiptUri(optimized.uri);
+  }
+
+  async function submitCompletionEvidence() {
+    const token = pendingCompletionToken;
+    if (!token || qrBusy) return;
+    setQrBusy(true);
+    setCompletionError("");
+    try {
       let requestId = token.startsWith("DEMO-") ? token.slice(5) : "";
+      let receiptPath: string | null = null;
       if (supabase && !isDemoSession && !token.startsWith("DEMO-")) {
-        const result = await supabase.rpc("confirm_completion_token", { raw_token: token });
+        const user = (await supabase.auth.getUser()).data.user;
+        if (!user) throw new Error("SESSION_EXPIRED");
+        if (completionReceiptUri) {
+          const blob = await (await fetch(completionReceiptUri)).blob();
+          if (blob.size > 3145728) throw new Error("IMAGE_TOO_LARGE");
+          receiptPath = `${user.id}/completion/${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}.jpg`;
+          const upload = await supabase.storage.from("private-receipts").upload(receiptPath, blob, { contentType: "image/jpeg" });
+          if (upload.error) throw upload.error;
+        }
+        const result = await supabase.rpc("confirm_completion_token", { raw_token: token, receipt_path: receiptPath });
         if (result.error) throw result.error;
         requestId = String(result.data);
+        if (receiptPath) {
+          const profile = await supabase.from("profiles").select("public_id, full_name").eq("id", user.id).single();
+          const publicId = String(profile.data?.public_id ?? user.id.slice(0, 8));
+          const fullName = String(profile.data?.full_name ?? session?.name ?? "Cliente");
+          const outbox = await supabase.from("receipt_drive_outbox").insert({
+            owner_id: user.id, receipt_kind: "completion", source_storage_path: receiptPath,
+            target_root_folder_id: driveProjectRootFolderId,
+            target_relative_path: `Clientes/${safeFolderPart(publicId)}_${safeFolderPart(fullName)}/Comprobantes`,
+            target_file_name: `${safeFolderPart(publicId)}_${new Date().toISOString().slice(0, 10)}_Trabajo_${requestDisplayId(requestId)}.jpg`,
+          });
+          if (!outbox.error) {
+            const authToken = (await supabase.auth.getSession()).data.session?.access_token;
+            if (authToken) void fetch("/api/drive-sync", { method: "POST", headers: { authorization: `Bearer ${authToken}` } }).catch(() => undefined);
+          }
+        }
       }
-      if (!requestId) throw new Error("invalid_token");
+      if (!requestId) throw new Error("INVALID_TOKEN");
       const completedAt = new Date().toISOString();
-      updateRequest(requestId, (request) => ({
-        ...request,
-        status: "completed",
-        completedAt,
-        completionVerifiedAt: completedAt,
-        messages: [...(request.messages ?? []), {
-          id: `${Date.now()}-qr`,
-          sender: "system",
-          body: "Trabajo terminado y verificado mediante QR.",
-          createdAt: completedAt,
-        }],
+      const completedWithReceipt = !!receiptPath || !!(isDemoSession && completionReceiptUri);
+      updateRequest(requestId, (request) => ({ ...request,
+        status: completedWithReceipt ? "completed" : "client_confirmation_pending",
+        completionAwaitingProvider: !completedWithReceipt,
+        completionReceiptPath: receiptPath ?? undefined,
+        completedAt: completedWithReceipt ? completedAt : undefined,
+        completionVerifiedAt: completedWithReceipt ? completedAt : undefined,
       }));
-      setManualQrCode("");
+      setPendingCompletionToken(null);
+      setCompletionReceiptUri(null);
+      setQrScanned(false);
       setTab("Contratados");
-      setRequested("Trabajo terminado. Ya podés dejar tu reseña verificada.");
-    } catch {
-      setRequested("El QR no corresponde a tu trabajo, venció o ya fue utilizado.");
-    } finally {
-      setQrBusy(false);
-      setTimeout(() => setQrScanned(false), 1200);
+      setRequested(completedWithReceipt ? "Comprobante adjuntado. Trabajo finalizado; ya podés dejar tu reseña." : "Confirmación enviada. El prestador debe confirmar la finalización antes de habilitar la reseña.");
+    } catch (error) {
+      setCompletionError(error instanceof Error && error.message === "IMAGE_TOO_LARGE"
+        ? "La captura supera 3 MB. Elegí una imagen más liviana."
+        : "No pudimos confirmar el QR. Puede haber vencido o ya haberse usado.");
+    } finally { setQrBusy(false); }
+  }
+
+  async function providerConfirmCompletion(request: SavedRequest) {
+    if (!request.jobId || !supabase || isDemoSession) {
+      updateRequest(request.id, (current) => ({ ...current, status: "completed", completionAwaitingProvider: false, completionVerifiedAt: new Date().toISOString() }));
+      return;
     }
+    setQrBusy(true);
+    const result = await supabase.rpc("provider_confirm_completion", { target_job_id: request.jobId });
+    setQrBusy(false);
+    if (result.error) return setRequested("No pudimos confirmar todavía. Verificá que el cliente haya escaneado el QR.");
+    updateRequest(request.id, (current) => ({ ...current, status: "completed", completionAwaitingProvider: false, completionVerifiedAt: new Date().toISOString() }));
+    setRequested("Finalización confirmada. El cliente ya puede dejar su reseña.");
   }
 
   function loadSimulations() {
@@ -3076,13 +3197,14 @@ export default function Home() {
   async function submitReview() {
     const request = requests.find((item) => item.id === reviewRequestId);
     setReviewError("");
+    const editing = !!request?.review && Date.now() - new Date(request.review.createdAt).getTime() < 5 * 60 * 1000;
     if (
       !request ||
       !reviewIsEligible({
         isClient: true,
         paidInApp: !!request.payment?.protected,
         status: request.status,
-        alreadyReviewed: !!request.review,
+        alreadyReviewed: !!request.review && !editing,
         completionVerified: !!request.completionVerifiedAt,
       })
     )
@@ -3091,28 +3213,34 @@ export default function Home() {
       return setReviewError("Contá brevemente cómo fue el trabajo.");
     if (reviewQualities.length > reviewQualityLimit)
       return setReviewError(`Elegí hasta ${reviewQualityLimit} cualidades.`);
-    if (supabase && !isDemoSession && request.jobId && request.providerId) {
+    let reviewId = request.review?.id;
+    if (supabase && !isDemoSession) {
+      if (!request.jobId || !request.providerId) return setReviewError("No encontramos el trabajo verificado. Actualizá la sección y volvé a intentar.");
       const userResult = await supabase.auth.getUser();
       if (!userResult.data.user) return setReviewError("Volvé a ingresar para publicar la reseña.");
-      const result = await supabase.from("reviews").insert({
-        job_id: request.jobId,
-        client_id: userResult.data.user.id,
-        provider_id: request.providerId,
-        rating: reviewRating,
-        comment: reviewComment.trim(),
-        qualities: reviewQualities,
-      });
-      if (result.error) return setReviewError("No pudimos publicar la reseña verificada.");
+      const result = editing && request.review?.id
+        ? await supabase.from("reviews").update({ rating: reviewRating, comment: reviewComment.trim(), qualities: reviewQualities }).eq("id", request.review.id).select("id").single()
+        : await supabase.from("reviews").insert({
+          job_id: request.jobId,
+          client_id: userResult.data.user.id,
+          provider_id: request.providerId,
+          rating: reviewRating,
+          comment: reviewComment.trim(),
+          qualities: reviewQualities,
+        }).select("id").single();
+      if (result.error) return setReviewError(result.error.code === "23505" ? "Ya existe una reseña para este trabajo." : "No pudimos guardar la reseña. Verificá que el QR haya quedado confirmado e intentá otra vez.");
+      reviewId = String(result.data.id);
     }
     updateRequest(request.id, (item) => ({
       ...item,
       review: {
+        id: reviewId,
         rating: reviewRating,
         comment: reviewComment.trim(),
         qualities: reviewQualities,
         price: request.quote?.amount,
         duration: request.quote?.eta,
-        createdAt: new Date().toISOString(),
+        createdAt: editing ? item.review!.createdAt : new Date().toISOString(),
       },
     }));
     setReviewRequestId(null);
@@ -3120,7 +3248,7 @@ export default function Home() {
     setReviewRating(5);
     setReviewQualities([]);
     setCustomReviewQuality("");
-    setRequested("Reseña verificada publicada.");
+    setRequested(editing ? "Reseña actualizada." : "Reseña verificada publicada.");
   }
 
   function addCustomReviewQuality() {
@@ -3183,6 +3311,95 @@ export default function Home() {
     }
   }
 
+  async function pickSubscriptionReceipt() {
+    setSubscriptionError("");
+    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: false, quality: 0.9 });
+    if (result.canceled || !result.assets[0]) return;
+    const image = result.assets[0];
+    const resized = await ImageManipulator.manipulateAsync(image.uri, image.width > 1600 ? [{ resize: { width: 1600 } }] : [], { compress: 0.82, format: ImageManipulator.SaveFormat.JPEG });
+    setSubscriptionReceiptUri(resized.uri);
+  }
+
+  async function requestSubscription() {
+    if (!supabase || !session || !subscriptionReceiptUri) return setSubscriptionError("Adjuntá una captura legible del comprobante de transferencia.");
+    setSubscriptionBusy(true);
+    setSubscriptionError("");
+    try {
+      const auth = await supabase.auth.getUser();
+      if (!auth.data.user) throw new Error("SESSION_EXPIRED");
+      const person = await supabase.from("profiles").select("public_id, full_name").eq("id", auth.data.user.id).single();
+      if (person.error) throw person.error;
+      const publicId = String(person.data.public_id);
+      const fullName = String(person.data.full_name ?? session.name);
+      const nameParts = fullName.trim().split(/\s+/);
+      const fileName = `${safeFolderPart(publicId)}_${new Date().toISOString().slice(0, 10)}_${safeFolderPart(nameParts.length > 1 ? `${nameParts.at(-1)}${nameParts.slice(0, -1).join("")}` : fullName)}.jpg`;
+      const storagePath = `${auth.data.user.id}/subscription/${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}.jpg`;
+      const image = await fetch(subscriptionReceiptUri);
+      const blob = await image.blob();
+      if (blob.size > 3145728) throw new Error("IMAGE_TOO_LARGE");
+      const upload = await supabase.storage.from("private-receipts").upload(storagePath, blob, { contentType: "image/jpeg" });
+      if (upload.error) throw upload.error;
+      const amount = ({ 1: 3500, 3: 7500, 6: 12000, 12: 15000 } as const)[subscriptionMonths];
+      const request = await supabase.from("subscription_requests").insert({
+        client_id: auth.data.user.id, plan_months: subscriptionMonths, amount_ars: amount, receipt_path: storagePath,
+      });
+      if (request.error) throw request.error;
+      const outbox = await supabase.from("receipt_drive_outbox").insert({
+        owner_id: auth.data.user.id, receipt_kind: "subscription", source_storage_path: storagePath,
+        target_root_folder_id: driveProjectRootFolderId,
+        target_relative_path: `Clientes/${safeFolderPart(publicId)}_${safeFolderPart(fullName)}/Suscripciones`,
+        target_file_name: fileName,
+      });
+      if (outbox.error) throw outbox.error;
+      const token = (await supabase.auth.getSession()).data.session?.access_token;
+      if (token) void fetch("/api/drive-sync", { method: "POST", headers: { authorization: `Bearer ${token}` } }).catch(() => undefined);
+      setSubscriptionModal(false);
+      setSubscriptionReceiptUri(null);
+      setRequested("Comprobante recibido. Premium se habilita cuando administración verifica la transferencia.");
+    } catch (error) {
+      setSubscriptionError(error instanceof Error && error.message === "IMAGE_TOO_LARGE"
+        ? "La captura supera 3 MB. Elegí una imagen más liviana y legible."
+        : "No pudimos registrar el comprobante. Tus datos siguen acá para reintentar.");
+    } finally { setSubscriptionBusy(false); }
+  }
+
+  async function lookupPremiumAccount() {
+    if (!supabase || session?.role !== "admin") return;
+    setAdminPremiumBusy(true);
+    setAdminPremiumError("");
+    setAdminPremiumAccount(null);
+    try {
+      const account = await supabase.from("profiles").select("id, public_id, full_name").eq("public_id", adminPremiumId.trim().toUpperCase()).maybeSingle();
+      if (account.error || !account.data) throw new Error("NOT_FOUND");
+      const [membership, requestsResult] = await Promise.all([
+        supabase.from("client_memberships").select("plan_code, status, current_period_ends_at").eq("client_id", account.data.id).maybeSingle(),
+        supabase.from("subscription_requests").select("plan_months, receipt_path").eq("client_id", account.data.id).eq("status", "pending").order("created_at", { ascending: false }).limit(1),
+      ]);
+      const pending = requestsResult.data?.[0];
+      const signed = pending?.receipt_path ? await supabase.storage.from("private-receipts").createSignedUrl(pending.receipt_path, 600) : null;
+      setAdminPremiumAccount({ id: account.data.id, name: account.data.full_name, publicId: account.data.public_id,
+        premium: membership.data?.plan_code === "plus" && membership.data?.status === "active" && (!membership.data.current_period_ends_at || new Date(membership.data.current_period_ends_at).getTime() > Date.now()),
+        endsAt: membership.data?.current_period_ends_at ?? undefined,
+        pendingMonths: pending?.plan_months,
+        receiptUrl: signed?.data?.signedUrl,
+      });
+    } catch { setAdminPremiumError("No encontramos ese ID. Revisá el identificador de la cuenta."); }
+    finally { setAdminPremiumBusy(false); }
+  }
+
+  async function togglePremiumAccount() {
+    if (!supabase || session?.role !== "admin" || !adminPremiumAccount) return;
+    setAdminPremiumBusy(true);
+    setAdminPremiumError("");
+    const result = await supabase.rpc("admin_set_premium_by_public_id", {
+      target_public_id: adminPremiumAccount.publicId, enable_premium: !adminPremiumAccount.premium,
+    });
+    setAdminPremiumBusy(false);
+    if (result.error) return setAdminPremiumError("No pudimos modificar Premium. Verificá la transferencia y reintentá.");
+    void lookupPremiumAccount();
+    void loadAdminPlatformMetrics();
+  }
+
   const chatRequest =
     requests.find((request) => request.id === chatRequestId) ?? null;
   const reviewRequest =
@@ -3233,8 +3450,33 @@ export default function Home() {
   }
   function unreadMessagesFor(request: SavedRequest) {
     const viewer = requestViewerRole(request);
-    return (request.messages ?? []).filter((message) => message.sender !== "system" && message.sender !== viewer).length;
+    const lastSeen = seenRequests?.[request.id]?.messageAt ?? (seenRequests ? "" : new Date().toISOString());
+    return (request.messages ?? []).filter((message) => message.sender !== "system" && message.sender !== viewer && message.createdAt > lastSeen).length;
   }
+  function markRequestSeen(request: SavedRequest, includeMessages = false) {
+    setSeenRequests((current) => ({ ...(current ?? {}), [request.id]: {
+      status: request.status,
+      messageAt: includeMessages ? request.messages?.at(-1)?.createdAt ?? new Date().toISOString() : current?.[request.id]?.messageAt ?? request.createdAt,
+    } }));
+  }
+  function openRequestChat(request: SavedRequest) {
+    setChatRequestId(request.id);
+    setChatError("");
+    markRequestSeen(request, true);
+  }
+  useEffect(() => {
+    if (tab !== "Solicitudes" || !seenRequests) return;
+    const changed = requests.filter((request) => seenRequests[request.id]?.status !== request.status);
+    if (changed.length) setSeenRequests((current) => ({ ...(current ?? {}), ...Object.fromEntries(changed.map((request) => [request.id, {
+      status: request.status, messageAt: current?.[request.id]?.messageAt ?? request.createdAt,
+    }])) }));
+  }, [tab, requests, seenRequests]);
+  useEffect(() => {
+    if (!chatRequestId || !seenRequests) return;
+    const request = requests.find((item) => item.id === chatRequestId);
+    const latestMessageAt = request?.messages?.at(-1)?.createdAt;
+    if (request && latestMessageAt && latestMessageAt > (seenRequests[request.id]?.messageAt ?? "")) markRequestSeen(request, true);
+  }, [chatRequestId, requests, seenRequests]);
   const participantRequests = requests.filter((request) => {
     if (session?.role === "admin") return true;
     if (request.viewerRole) return true;
@@ -3264,10 +3506,9 @@ export default function Home() {
   const weeklyRequestCount = participantRequests.filter(
     (request) => requestViewerRole(request) === "client" && new Date(request.createdAt).getTime() >= startOfCurrentWeek() && request.status !== "cancelled",
   ).length;
-  const requestNotificationCount = workRequests.filter((request) =>
-    (requestViewerRole(request) === "provider" && (request.status === "request_sent" || request.status === "quote_revision_requested")) ||
-    (requestViewerRole(request) === "client" && (request.status === "quote_sent" || request.status === "quote_revision_requested")),
-  ).length + participantRequests.filter((request) => unreadMessagesFor(request) > 0).length;
+  const requestNotificationCount = seenRequests ? workRequests.filter((request) =>
+    seenRequests[request.id]?.status !== request.status || unreadMessagesFor(request) > 0,
+  ).length : 0;
   const latestProfileReviews = (providerProfile?.profileReviews ?? [])
     .slice()
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
@@ -3503,10 +3744,7 @@ export default function Home() {
                 <Text style={styles.guestPreviewCopy}>Te mostramos una selección breve. Para pedir presupuestos y ver todas las funciones necesitás una cuenta.</Text>
               </View>
             )}
-            {providerDirectoryLoading && (
-              <View style={styles.empty}><Text style={styles.heroCopy}>Cargando profesionales publicados…</Text></View>
-            )}
-            {!!providerDirectoryError && (
+            {!!providerDirectoryError && publishedProviders.length === 0 && !providerDirectoryLoading && (
               <View style={styles.empty}><Text style={styles.modalError}>{providerDirectoryError}</Text></View>
             )}
             {visibleProviders.map((provider) => {
@@ -3854,17 +4092,23 @@ export default function Home() {
                         {!!request.review.qualities?.length && (
                           <Text style={styles.reviewQualitiesText}>{request.review.qualities.join(" · ")}</Text>
                         )}
-                        <Text style={styles.verifiedReview}>
-                          ✓ Reseña de un trabajo pagado en LaburApp
-                        </Text>
+                        <Text style={styles.verifiedReview}>✓ Reseña verificada por finalización con QR</Text>
+                        {requestViewerRole(request) === "client" && Date.now() - new Date(request.review.createdAt).getTime() < 5 * 60 * 1000 && (
+                          <TouchableOpacity accessibilityRole="button" onPress={() => {
+                            setReviewRequestId(request.id);
+                            setReviewRating(request.review!.rating);
+                            setReviewComment(request.review!.comment);
+                            setReviewQualities(request.review!.qualities ?? []);
+                            setReviewError("");
+                          }}><Text style={styles.cardLink}>Editar reseña · 5 minutos desde su publicación</Text></TouchableOpacity>
+                        )}
                       </View>
                     )}
                     <View style={styles.cardLinks}>
                       <TouchableOpacity
                         accessibilityRole="button"
                         onPress={() => {
-                          setChatRequestId(request.id);
-                          setChatError("");
+                          openRequestChat(request);
                         }}
                       >
                         <Text style={[styles.cardLink, unreadMessagesFor(request) > 0 && styles.chatPendingLink]}>
@@ -3969,14 +4213,16 @@ export default function Home() {
                   {!!request.zone && <Text style={styles.workMeta}>Zona: {request.zone}</Text>}
                   {!!request.desiredAt && <Text style={styles.workMeta}>Disponibilidad: {request.desiredAt}</Text>}
                   {!!request.quote && <Text style={styles.hiredAmount}>Presupuesto: ${request.quote.amount.toLocaleString("es-AR")}</Text>}
-                  {requestViewerRole(request) === "provider" && !completedStatuses.has(request.status) && <TouchableOpacity accessibilityRole="button" disabled={qrBusy} style={styles.primaryActionFull} onPress={() => void issueCompletionQr(request)}><Text style={styles.primaryActionText}>{qrBusy ? "Generando QR…" : "Trabajo terminado · Mostrar QR"}</Text></TouchableOpacity>}
+                  {requestViewerRole(request) === "provider" && request.completionAwaitingProvider && <TouchableOpacity accessibilityRole="button" disabled={qrBusy} style={styles.primaryActionFull} onPress={() => void providerConfirmCompletion(request)}><Text style={styles.primaryActionText}>{qrBusy ? "Confirmando…" : "Confirmar finalización sin comprobante"}</Text></TouchableOpacity>}
+                  {requestViewerRole(request) === "provider" && !completedStatuses.has(request.status) && !request.completionAwaitingProvider && <TouchableOpacity accessibilityRole="button" disabled={qrBusy} style={styles.primaryActionFull} onPress={() => void issueCompletionQr(request)}><Text style={styles.primaryActionText}>{qrBusy ? "Generando QR…" : "Trabajo terminado · Mostrar QR"}</Text></TouchableOpacity>}
+                  {requestViewerRole(request) === "client" && request.completionAwaitingProvider && <Text style={styles.nextStepText}>Esperando que el prestador confirme la finalización. La reseña se habilita después.</Text>}
                   {completedStatuses.has(request.status) && <Text style={styles.completedVerified}>✓ Finalización confirmada por QR</Text>}
-                  {requestViewerRole(request) === "client" && completedStatuses.has(request.status) && !request.review ? (
+                  {requestViewerRole(request) === "client" && !!request.completionVerifiedAt && completedStatuses.has(request.status) && !request.review ? (
                     <TouchableOpacity accessibilityRole="button" style={styles.primaryActionFull} onPress={() => { setReviewRequestId(request.id); setReviewError(""); }}>
                       <Text style={styles.primaryActionText}>Dejar reseña</Text>
                     </TouchableOpacity>
                   ) : request.review ? (
-                    <Text style={styles.verifiedReview}>✓ Reseña publicada</Text>
+                    <View><Text style={styles.verifiedReview}>✓ Reseña publicada</Text>{requestViewerRole(request) === "client" && Date.now() - new Date(request.review.createdAt).getTime() < 5 * 60 * 1000 && <TouchableOpacity accessibilityRole="button" onPress={() => { setReviewRequestId(request.id); setReviewRating(request.review!.rating); setReviewComment(request.review!.comment); setReviewQualities(request.review!.qualities ?? []); setReviewError(""); }}><Text style={styles.cardLink}>Editar reseña (5 minutos)</Text></TouchableOpacity>}</View>
                   ) : <Text style={styles.nextStepText}>Coordiná el trabajo y esperá el QR al finalizar.</Text>}
                 </View>
               );
@@ -4037,6 +4283,23 @@ export default function Home() {
               </View>
               {!!topAdminCity && <Text style={styles.adminSegmentCopy}>Mayor comunidad: <Text style={styles.adminSegmentStrong}>{topAdminCity.city}</Text> · {topAdminCity.users} usuarios · {topAdminCity.providers} prestadores. Publicados: {adminPlatformMetrics?.users.published_providers ?? 0} · Verificados: {adminPlatformMetrics?.users.verified_providers ?? 0}.</Text>}
               {!!adminPlatformMetrics?.cities.length && <View style={styles.adminCityRow}>{adminPlatformMetrics.cities.map((item) => <Text key={item.city} style={styles.adminCityChip}>{item.city}: {item.users} / P {item.providers}</Text>)}</View>}
+            </View>
+            <View style={styles.providerPanel}>
+              <Text style={styles.panelEyebrow}>SUSCRIPCIONES POR TRANSFERENCIA</Text>
+              <Text style={styles.adminModuleTitle}>Habilitar Premium por ID</Text>
+              <Text style={styles.adminModuleCopy}>Buscá el ID público de la cuenta, revisá el comprobante y recién después marcá Premium. Sin comprobante pendiente, la activación manual dura un mes.</Text>
+              <View style={styles.customQualityRow}>
+                <TextInput value={adminPremiumId} onChangeText={setAdminPremiumId} autoCapitalize="characters" placeholder="LP000001" placeholderTextColor="#71818B" style={[styles.modalInput, styles.customQualityInput]} onSubmitEditing={() => void lookupPremiumAccount()} />
+                <TouchableOpacity accessibilityRole="button" style={styles.customQualityButton} onPress={() => void lookupPremiumAccount()} disabled={adminPremiumBusy}><Text style={styles.customQualityButtonText}>Buscar</Text></TouchableOpacity>
+              </View>
+              {!!adminPremiumError && <Text style={styles.modalError}>{adminPremiumError}</Text>}
+              {adminPremiumAccount && <View style={styles.workCard}>
+                <Text style={styles.workProvider}>{adminPremiumAccount.name} · {adminPremiumAccount.publicId}</Text>
+                <Text style={styles.adminModuleCopy}>{adminPremiumAccount.pendingMonths ? `Transferencia pendiente · plan de ${adminPremiumAccount.pendingMonths} meses` : "Sin comprobante pendiente"}</Text>
+                {!!adminPremiumAccount.receiptUrl && <TouchableOpacity accessibilityRole="link" onPress={() => void openExternalUrl(adminPremiumAccount.receiptUrl!)}><Text style={styles.cardLink}>Ver comprobante privado ↗</Text></TouchableOpacity>}
+                {!!adminPremiumAccount.endsAt && <Text style={styles.adminModuleCopy}>Vence: {new Date(adminPremiumAccount.endsAt).toLocaleDateString("es-AR")}</Text>}
+                <TouchableOpacity accessibilityRole="checkbox" accessibilityState={{ checked: adminPremiumAccount.premium, disabled: adminPremiumBusy }} disabled={adminPremiumBusy} style={styles.secondaryButton} onPress={() => void togglePremiumAccount()}><Text style={styles.secondaryText}>{adminPremiumAccount.premium ? "☑ PREMIUM? · habilitado" : "□ PREMIUM? · habilitar"}</Text></TouchableOpacity>
+              </View>}
             </View>
             <View style={styles.adminMetrics}>
               {[
@@ -4207,6 +4470,7 @@ export default function Home() {
                       )}
                     </View>
                     <Text style={styles.clientJobsCount}>{session.role === "provider" ? `${contractedRequests.length} trabajos gestionados` : `${clientHistory.length} trabajos contratados en los últimos 6 meses`}</Text>
+                    {!!accountPublicId && <Text style={styles.clientJobsCount}>ID de cuenta: {accountPublicId}</Text>}
                     {isDemoSession && <Text style={styles.localBadge}>Cuenta de demostración</Text>}
                   </View>
                   {session.role !== "admin" && (
@@ -4227,6 +4491,11 @@ export default function Home() {
                     </TouchableOpacity>
                   )}
                 </View>
+                {session.role !== "admin" && <View style={styles.providerPanel}>
+                  <View style={styles.workCardTop}><View><Text style={styles.panelEyebrow}>SUSCRIPCIÓN</Text><Text style={styles.adminModuleTitle}>{clientPlan === "plus" ? "Premium activo" : "Conocé Premium"}</Text></View><Text style={styles.publishedBadge}>{clientPlan === "plus" ? "PREMIUM" : "GRATIS"}</Text></View>
+                  {!!membershipEndsAt && clientPlan === "plus" && <Text style={styles.adminModuleCopy}>Vigente hasta {new Date(membershipEndsAt).toLocaleDateString("es-AR")}.</Text>}
+                  <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => { setSubscriptionError(""); setSubscriptionModal(true); }}><Text style={styles.secondaryText}>Ver planes y solicitar suscripción</Text></TouchableOpacity>
+                </View>}
                 {hasProviderProfile && followersVisible && (
                   <View style={styles.followersPanel}>
                     <View style={styles.workCardTop}>
@@ -4719,6 +4988,8 @@ export default function Home() {
                 value={authPassword}
                 onChangeText={setAuthPassword}
                 secureTextEntry
+                returnKeyType={authMode === "login" ? "go" : "next"}
+                onSubmitEditing={authMode === "login" ? () => void submitAuth() : undefined}
                 placeholder={authMode === "login" ? "Contraseña" : "Contraseña segura (12 caracteres mínimo)"}
                 placeholderTextColor="#71818B"
                 style={styles.modalInput}
@@ -5021,6 +5292,37 @@ export default function Home() {
           </View>
         </View>
       </AppModal>
+      <AppModal visible={pendingCompletionToken !== null} onRequestClose={() => { setPendingCompletionToken(null); setQrScanned(false); }}>
+        <View style={styles.modalBackdrop}><View style={[styles.modalCard, styles.reviewModalCard]}>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar confirmación" style={styles.modalClose} onPress={() => { setPendingCompletionToken(null); setQrScanned(false); }}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+          <ScrollView style={styles.reviewModalScroll} contentContainerStyle={styles.reviewModalContent} keyboardShouldPersistTaps="handled">
+            <Text style={styles.modalTitle}>Confirmar trabajo</Text>
+            <Text style={styles.modalCopy}>Si tenés el comprobante de transferencia en tu celular, adjuntalo ahora. Usá una captura legible, con importe, fecha y datos de la operación claros.</Text>
+            <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => void pickCompletionReceipt()}><Text style={styles.secondaryText}>{completionReceiptUri ? "✓ Comprobante adjunto · cambiar" : "Adjuntar comprobante"}</Text></TouchableOpacity>
+            {!!completionReceiptUri && <Image source={{ uri: completionReceiptUri }} resizeMode="contain" style={{ width: "100%", height: 160 }} />}
+            <Text style={styles.modalCopy}>Si no lo tenés a mano, podés continuar: el prestador tendrá que confirmar la finalización antes de que puedas dejar una reseña.</Text>
+            {!!completionError && <Text style={styles.modalError}>{completionError}</Text>}
+            <TouchableOpacity accessibilityRole="button" disabled={qrBusy} style={[styles.modalPrimary, qrBusy && styles.buttonDisabled]} onPress={() => void submitCompletionEvidence()}><Text style={styles.modalPrimaryText}>{qrBusy ? "Confirmando…" : completionReceiptUri ? "Confirmar con comprobante" : "Continuar sin comprobante"}</Text></TouchableOpacity>
+          </ScrollView>
+        </View></View>
+      </AppModal>
+      <AppModal visible={subscriptionModal} onRequestClose={() => setSubscriptionModal(false)}>
+        <View style={styles.modalBackdrop}><View style={[styles.modalCard, styles.reviewModalCard]}>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar suscripción" style={styles.modalClose} onPress={() => setSubscriptionModal(false)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+          <ScrollView style={styles.reviewModalScroll} contentContainerStyle={styles.reviewModalContent} keyboardShouldPersistTaps="handled">
+            <Text style={styles.modalTitle}>Suscripción Premium</Text>
+            <Text style={styles.modalCopy}>Elegí un período. El pago es únicamente por transferencia; Premium se activa después de verificar tu comprobante.</Text>
+            <Text style={styles.modalCopy}>Los datos bancarios todavía no están publicados en la app. No transfieras a cuentas que no hayan sido confirmadas por LaburApp.</Text>
+            {([ [1, 3500], [3, 7500], [6, 12000], [12, 15000] ] as const).map(([months, price]) => <TouchableOpacity key={months} accessibilityRole="radio" accessibilityState={{ selected: subscriptionMonths === months }} style={[styles.roleChoice, subscriptionMonths === months && styles.roleChoiceActive]} onPress={() => setSubscriptionMonths(months)}><Text style={styles.roleChoiceText}>{subscriptionMonths === months ? "◉" : "○"} {months} {months === 1 ? "mes" : "meses"} · ${price.toLocaleString("es-AR")}</Text></TouchableOpacity>)}
+            <Text style={styles.modalLabel}>Comprobante de transferencia</Text>
+            <Text style={styles.modalCopy}>Adjuntá una captura legible, bien iluminada, con fecha, importe y datos de la operación visibles. Nunca incluyas contraseñas ni códigos.</Text>
+            <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => void pickSubscriptionReceipt()}><Text style={styles.secondaryText}>{subscriptionReceiptUri ? "✓ Captura seleccionada · cambiar" : "Adjuntar captura"}</Text></TouchableOpacity>
+            {!!subscriptionReceiptUri && <Image source={{ uri: subscriptionReceiptUri }} resizeMode="contain" style={{ width: "100%", height: 180 }} />}
+            {!!subscriptionError && <Text style={styles.modalError}>{subscriptionError}</Text>}
+            <TouchableOpacity accessibilityRole="button" disabled={subscriptionBusy || !subscriptionReceiptUri} style={[styles.modalPrimary, (subscriptionBusy || !subscriptionReceiptUri) && styles.buttonDisabled]} onPress={() => void requestSubscription()}><Text style={styles.modalPrimaryText}>{subscriptionBusy ? "Enviando…" : "Enviar comprobante"}</Text></TouchableOpacity>
+          </ScrollView>
+        </View></View>
+      </AppModal>
       <AppModal
         visible={chatRequest !== null}
         onRequestClose={() => setChatRequestId(null)}
@@ -5125,7 +5427,7 @@ export default function Home() {
               <Text style={styles.modalCloseText}>×</Text>
             </TouchableOpacity>
             <ScrollView style={styles.reviewModalScroll} contentContainerStyle={styles.reviewModalContent} keyboardShouldPersistTaps="handled">
-            <Text style={styles.modalTitle}>Calificá el trabajo</Text>
+            <Text style={styles.modalTitle}>{reviewRequest?.review ? "Editá tu reseña" : "Calificá el trabajo"}</Text>
             <Text style={styles.modalCopy}>
               {reviewRequest
                 ? `Tu experiencia con ${reviewRequest.provider}`
@@ -5207,7 +5509,7 @@ export default function Home() {
               style={styles.modalPrimary}
               onPress={() => void submitReview()}
             >
-              <Text style={styles.modalPrimaryText}>Publicar reseña</Text>
+              <Text style={styles.modalPrimaryText}>{reviewRequest?.review ? "Guardar cambios" : "Publicar reseña"}</Text>
             </TouchableOpacity>
             </ScrollView>
           </View>

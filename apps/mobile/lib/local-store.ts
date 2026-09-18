@@ -29,6 +29,8 @@ export type SavedRequest = {
   expiresAt?: string;
   completedAt?: string;
   completionVerifiedAt?: string;
+  completionAwaitingProvider?: boolean;
+  completionReceiptPath?: string;
   attachments?: SavedRequestPhoto[];
   status: JobStatus;
   previousStatus?: JobStatus;
@@ -43,9 +45,12 @@ export type SavedRequest = {
   };
   messages?: SavedMessage[];
   review?: {
+    id?: string;
     rating: number;
     comment: string;
     qualities?: string[];
+    price?: number;
+    duration?: string;
     createdAt: string;
   };
 };

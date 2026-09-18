@@ -63,8 +63,8 @@ async function uploadToDrive(token, parentId, name, sourceResponse) {
   return uploaded.json();
 }
 
-function supabaseRequest(url, serviceKey, path, options = {}) {
-  return fetch(`${url}/rest/v1/${path}`, {
+async function supabaseRequest(url, serviceKey, path, options = {}) {
+  const response = await fetch(`${url}/rest/v1/${path}`, {
     ...options,
     headers: {
       apikey: serviceKey,
@@ -74,6 +74,8 @@ function supabaseRequest(url, serviceKey, path, options = {}) {
       ...(options.headers ?? {}),
     },
   });
+  if (!response.ok) throw new Error(`No pudimos actualizar la copia privada (${response.status}).`);
+  return response;
 }
 
 export default async function handler(req, res) {
@@ -103,11 +105,18 @@ export default async function handler(req, res) {
       sourceBucket: "request-photos",
       targetTable: "client_request_attachments",
     },
+    {
+      table: "receipt_drive_outbox",
+      ownerColumn: "owner_id",
+      sourceBucket: "private-receipts",
+      targetTable: null,
+      extraSelect: ",receipt_kind",
+    },
   ];
   const rows = [];
   for (const queue of queueDefinitions) {
     const rowsUrl = new URL(`${supabaseUrl}/rest/v1/${queue.table}`);
-    rowsUrl.searchParams.set("select", `id,${queue.ownerColumn},source_storage_path,target_root_folder_id,target_relative_path,target_file_name,attempts`);
+    rowsUrl.searchParams.set("select", `id,${queue.ownerColumn},source_storage_path,target_root_folder_id,target_relative_path,target_file_name,attempts${queue.extraSelect ?? ""}`);
     rowsUrl.searchParams.set(queue.ownerColumn, `eq.${user.id}`);
     rowsUrl.searchParams.set("status", "in.(pending,failed)");
     rowsUrl.searchParams.set("order", "created_at.asc");
@@ -131,11 +140,13 @@ export default async function handler(req, res) {
       if (!sourceResponse.ok) throw new Error("No pudimos recuperar la imagen optimizada.");
       const driveFile = await uploadToDrive(token, folderId, row.target_file_name, sourceResponse);
       await supabaseRequest(supabaseUrl, serviceKey, `${row.table}?id=eq.${row.id}`, { method: "PATCH", body: JSON.stringify({ status: "synced", drive_file_id: driveFile.id, last_error: null, updated_at: new Date().toISOString() }) });
-      await supabaseRequest(supabaseUrl, serviceKey, `${row.targetTable}?storage_path=eq.${encodeURIComponent(row.source_storage_path)}`, { method: "PATCH", body: JSON.stringify({ drive_sync_status: "synced", drive_file_id: driveFile.id }) });
+      const targetTable = row.targetTable ?? (row.receipt_kind === "subscription" ? "subscription_requests" : "completion_confirmations");
+      const targetColumn = row.targetTable ? "storage_path" : "receipt_path";
+      await supabaseRequest(supabaseUrl, serviceKey, `${targetTable}?${targetColumn}=eq.${encodeURIComponent(row.source_storage_path)}`, { method: "PATCH", body: JSON.stringify({ drive_sync_status: "synced", drive_file_id: driveFile.id }) });
       synced += 1;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Error inesperado al copiar la imagen.";
-      await supabaseRequest(supabaseUrl, serviceKey, `${row.table}?id=eq.${row.id}`, { method: "PATCH", body: JSON.stringify({ status: "failed", last_error: message, updated_at: new Date().toISOString() }) });
+      try { await supabaseRequest(supabaseUrl, serviceKey, `${row.table}?id=eq.${row.id}`, { method: "PATCH", body: JSON.stringify({ status: "failed", last_error: message, updated_at: new Date().toISOString() }) }); } catch { /* El intento se reanudará en la próxima sincronización. */ }
       failed += 1;
     }
   }
