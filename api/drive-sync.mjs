@@ -29,6 +29,11 @@ function driveName(value) {
   return String(value).replace(/'/g, "\\'");
 }
 
+function safeFolderPart(value) {
+  return String(value).normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "Cliente";
+}
+
 async function ensureFolder(token, parentId, name) {
   const query = `'${driveName(parentId)}' in parents and name='${driveName(name)}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
   const searchUrl = new URL("https://www.googleapis.com/drive/v3/files");
@@ -92,6 +97,15 @@ export default async function handler(req, res) {
   if (!googleEmail || !googlePrivateKey) return json(res, 503, { error: "La copia quedó en espera: falta conectar la credencial permanente de Google Drive." });
 
   const token = await googleAccessToken(googleEmail, googlePrivateKey);
+  const profileResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?select=public_id,full_name&id=eq.${encodeURIComponent(user.id)}&limit=1`, {
+    headers: { apikey: serviceKey, authorization: `Bearer ${serviceKey}` },
+  });
+  if (!profileResponse.ok) return json(res, 502, { error: "No pudimos identificar la carpeta privada del usuario." });
+  const profile = (await profileResponse.json())[0];
+  if (!profile?.public_id) return json(res, 404, { error: "La cuenta no tiene identificador público." });
+  const accountFolder = `Clientes/${safeFolderPart(profile.public_id)}_${safeFolderPart(profile.full_name)}`;
+  const nameParts = String(profile.full_name ?? "Cliente").trim().split(/\s+/);
+  const surnameName = safeFolderPart(nameParts.length > 1 ? `${nameParts.at(-1)}${nameParts.slice(0, -1).join("")}` : nameParts[0]);
   const queueDefinitions = [
     {
       table: "drive_media_outbox",
@@ -116,7 +130,7 @@ export default async function handler(req, res) {
   const rows = [];
   for (const queue of queueDefinitions) {
     const rowsUrl = new URL(`${supabaseUrl}/rest/v1/${queue.table}`);
-    rowsUrl.searchParams.set("select", `id,${queue.ownerColumn},source_storage_path,target_root_folder_id,target_relative_path,target_file_name,attempts${queue.extraSelect ?? ""}`);
+    rowsUrl.searchParams.set("select", `id,${queue.ownerColumn},source_storage_path,target_root_folder_id,target_relative_path,target_file_name,attempts,created_at${queue.extraSelect ?? ""}`);
     rowsUrl.searchParams.set(queue.ownerColumn, `eq.${user.id}`);
     rowsUrl.searchParams.set("status", "in.(pending,failed)");
     rowsUrl.searchParams.set("order", "created_at.asc");
@@ -131,14 +145,22 @@ export default async function handler(req, res) {
   for (const row of rows) {
     try {
       await supabaseRequest(supabaseUrl, serviceKey, `${row.table}?id=eq.${row.id}`, { method: "PATCH", body: JSON.stringify({ status: "processing", attempts: row.attempts + 1, last_error: null, updated_at: new Date().toISOString() }) });
+      const relativePath = row.receipt_kind
+        ? `${accountFolder}/${row.receipt_kind === "subscription" ? "Suscripciones" : "Comprobantes"}`
+        : row.target_relative_path;
+      const fileName = row.receipt_kind === "subscription"
+        ? `${safeFolderPart(profile.public_id)}_${String(row.created_at).slice(0, 10)}_${surnameName}.jpg`
+        : row.receipt_kind === "completion"
+          ? `${safeFolderPart(profile.public_id)}_${String(row.created_at).slice(0, 10)}_Trabajo_${row.id}.jpg`
+          : row.target_file_name;
       let folderId = row.target_root_folder_id;
-      for (const segment of row.target_relative_path.split("/").filter(Boolean)) folderId = await ensureFolder(token, folderId, segment);
+      for (const segment of relativePath.split("/").filter(Boolean)) folderId = await ensureFolder(token, folderId, segment);
       const sourcePath = row.source_storage_path.split("/").map(encodeURIComponent).join("/");
       const sourceResponse = await fetch(`${supabaseUrl}/storage/v1/object/${row.sourceBucket}/${sourcePath}`, {
         headers: { apikey: serviceKey, authorization: `Bearer ${serviceKey}` },
       });
       if (!sourceResponse.ok) throw new Error("No pudimos recuperar la imagen optimizada.");
-      const driveFile = await uploadToDrive(token, folderId, row.target_file_name, sourceResponse);
+      const driveFile = await uploadToDrive(token, folderId, fileName, sourceResponse);
       await supabaseRequest(supabaseUrl, serviceKey, `${row.table}?id=eq.${row.id}`, { method: "PATCH", body: JSON.stringify({ status: "synced", drive_file_id: driveFile.id, last_error: null, updated_at: new Date().toISOString() }) });
       const targetTable = row.targetTable ?? (row.receipt_kind === "subscription" ? "subscription_requests" : "completion_confirmations");
       const targetColumn = row.targetTable ? "storage_path" : "receipt_path";
