@@ -5411,10 +5411,6 @@ export default function Home() {
               <Text style={styles.subscriptionAlias}>CA: ALSEMA.BBVA <Text style={styles.subscriptionAliasCheck}>✓</Text></Text>
               <View style={styles.subscriptionBankDetails}>
                 <View>
-                  <Text style={styles.subscriptionBankDetailLabel}>Tipo de cuenta</Text>
-                  <Text style={styles.subscriptionBankDetailValue}>Caja de Ahorro en $</Text>
-                </View>
-                <View>
                   <Text style={styles.subscriptionBankDetailLabel}>Número de cuenta</Text>
                   <Text selectable style={styles.subscriptionBankDetailValue}>228-35388/8</Text>
                 </View>
