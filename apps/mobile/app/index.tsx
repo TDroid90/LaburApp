@@ -660,6 +660,16 @@ type AdminPlatformMetrics = {
   cities: Array<{ city: string; users: number; providers: number }>;
 };
 
+type AdminSubscriptionRequest = {
+  id: string;
+  publicId: string;
+  name: string;
+  planMonths: number;
+  amountArs: number;
+  receiptPath: string;
+  createdAt: string;
+};
+
 const CONTACT_WARNING = "No está permitido compartir teléfonos de contacto o emails.";
 const FREE_WEEKLY_REQUEST_LIMIT = 3;
 const REQUEST_LIFETIME_MS = 5 * 24 * 60 * 60 * 1000;
@@ -1193,6 +1203,9 @@ export default function Home() {
   const [adminPremiumAccount, setAdminPremiumAccount] = useState<{ id: string; name: string; publicId: string; premium: boolean; endsAt?: string; pendingMonths?: number; receiptUrl?: string } | null>(null);
   const [adminPremiumBusy, setAdminPremiumBusy] = useState(false);
   const [adminPremiumError, setAdminPremiumError] = useState("");
+  const [adminSubscriptionRequests, setAdminSubscriptionRequests] = useState<AdminSubscriptionRequest[]>([]);
+  const [adminSubscriptionsLoading, setAdminSubscriptionsLoading] = useState(true);
+  const [adminSubscriptionsError, setAdminSubscriptionsError] = useState("");
   const [clientPhotoBusy, setClientPhotoBusy] = useState(false);
   const reviewQualityLimit = clientPlan === "plus" ? 6 : 3;
   const [quoteBuilderRequestId, setQuoteBuilderRequestId] = useState<
@@ -1719,6 +1732,7 @@ export default function Home() {
       .on("postgres_changes", { event: "*", schema: "public", table: "quotes" }, () => setRequestRefresh((current) => current + 1))
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, () => setRequestRefresh((current) => current + 1))
       .on("postgres_changes", { event: "*", schema: "public", table: "credentials" }, () => setRequestRefresh((current) => current + 1))
+      .on("postgres_changes", { event: "*", schema: "public", table: "subscription_requests" }, () => setRequestRefresh((current) => current + 1))
       .subscribe();
     const refreshTimer = setInterval(() => setRequestRefresh((current) => current + 1), 3000);
     return () => { clearInterval(refreshTimer); void realtimeClient.removeChannel(channel); };
@@ -1729,6 +1743,47 @@ export default function Home() {
     void loadAdminCredentialReviews();
     void loadAdminPlatformMetrics();
   }, [tab, session?.role, isDemoSession]);
+
+  useEffect(() => {
+    if (tab !== "Panel" || session?.role !== "admin" || isDemoSession) return;
+    void loadAdminSubscriptionRequests(true);
+  }, [tab, session?.role, isDemoSession, requestRefresh]);
+
+  async function loadAdminSubscriptionRequests(quiet = false) {
+    if (!supabase || session?.role !== "admin" || isDemoSession) return;
+    if (!quiet) setAdminSubscriptionsLoading(true);
+    const result = await supabase.from("subscription_requests")
+      .select("id, client_id, plan_months, amount_ars, receipt_path, created_at")
+      .eq("status", "pending").order("created_at", { ascending: true }).limit(50);
+    if (result.error) {
+      setAdminSubscriptionsError("No pudimos cargar los comprobantes. Reintentá.");
+      setAdminSubscriptionsLoading(false);
+      return;
+    }
+    const rows = result.data ?? [];
+    const clientIds = [...new Set(rows.map((row) => row.client_id))];
+    const profiles = clientIds.length
+      ? await supabase.from("profiles").select("id, public_id, full_name").in("id", clientIds)
+      : { data: [], error: null };
+    if (profiles.error) {
+      setAdminSubscriptionsError("No pudimos identificar a quienes enviaron comprobantes. Reintentá.");
+      setAdminSubscriptionsLoading(false);
+      return;
+    }
+    const byId = new Map((profiles.data ?? []).map((profile) => [profile.id, profile]));
+    setAdminSubscriptionRequests(rows.map((row) => {
+      const profile = byId.get(row.client_id);
+      return {
+        id: row.id,
+        publicId: profile?.public_id ?? "ID no disponible",
+        name: profile?.full_name ?? "Cuenta sin nombre",
+        planMonths: row.plan_months, amountArs: row.amount_ars,
+        receiptPath: row.receipt_path, createdAt: row.created_at,
+      };
+    }));
+    setAdminSubscriptionsError("");
+    setAdminSubscriptionsLoading(false);
+  }
 
   async function loadAdminPlatformMetrics() {
     if (!supabase || session?.role !== "admin" || isDemoSession) return;
@@ -3355,7 +3410,7 @@ export default function Home() {
       if (token) void fetch("/api/drive-sync", { method: "POST", headers: { authorization: `Bearer ${token}` } }).catch(() => undefined);
       setSubscriptionModal(false);
       setSubscriptionReceiptUri(null);
-      setRequested("Comprobante recibido. Premium se habilita cuando administración verifica la transferencia.");
+      setRequested("Comprobante recibido. Verificaremos la transferencia y activaremos Premium en un plazo de hasta 72 horas.");
     } catch (error) {
       setSubscriptionError(error instanceof Error && error.message === "IMAGE_TOO_LARGE"
         ? "La captura supera 3 MB. Elegí una imagen más liviana y legible."
@@ -3363,13 +3418,15 @@ export default function Home() {
     } finally { setSubscriptionBusy(false); }
   }
 
-  async function lookupPremiumAccount() {
+  async function lookupPremiumAccount(targetPublicId = adminPremiumId) {
     if (!supabase || session?.role !== "admin") return;
+    const normalizedId = targetPublicId.trim().toUpperCase();
+    setAdminPremiumId(normalizedId);
     setAdminPremiumBusy(true);
     setAdminPremiumError("");
     setAdminPremiumAccount(null);
     try {
-      const account = await supabase.from("profiles").select("id, public_id, full_name").eq("public_id", adminPremiumId.trim().toUpperCase()).maybeSingle();
+      const account = await supabase.from("profiles").select("id, public_id, full_name").eq("public_id", normalizedId).maybeSingle();
       if (account.error || !account.data) throw new Error("NOT_FOUND");
       const [membership, requestsResult] = await Promise.all([
         supabase.from("client_memberships").select("plan_code, status, current_period_ends_at").eq("client_id", account.data.id).maybeSingle(),
@@ -3398,6 +3455,18 @@ export default function Home() {
     if (result.error) return setAdminPremiumError("No pudimos modificar Premium. Verificá la transferencia y reintentá.");
     void lookupPremiumAccount();
     void loadAdminPlatformMetrics();
+    void loadAdminSubscriptionRequests();
+  }
+
+  async function openAdminSubscriptionReceipt(receiptPath: string) {
+    if (!supabase || session?.role !== "admin") return;
+    const signed = await supabase.storage.from("private-receipts").createSignedUrl(receiptPath, 600);
+    if (signed.error || !signed.data?.signedUrl) {
+      setAdminSubscriptionsError("No pudimos abrir el comprobante. Reintentá.");
+      return;
+    }
+    setAdminSubscriptionsError("");
+    void openExternalUrl(signed.data.signedUrl);
   }
 
   const chatRequest =
@@ -4287,7 +4356,27 @@ export default function Home() {
             <View style={styles.providerPanel}>
               <Text style={styles.panelEyebrow}>SUSCRIPCIONES POR TRANSFERENCIA</Text>
               <Text style={styles.adminModuleTitle}>Habilitar Premium por ID</Text>
-              <Text style={styles.adminModuleCopy}>Buscá el ID público de la cuenta, revisá el comprobante y recién después marcá Premium. Sin comprobante pendiente, la activación manual dura un mes.</Text>
+              <Text style={styles.adminModuleCopy}>Quien paga encuentra su ID en Perfil. Los comprobantes enviados aparecen acá con nombre, ID, plan y fecha. Confirmá la transferencia en BBVA antes de activar Premium.</Text>
+              <View style={styles.adminSubscriptionList}>
+                <View style={styles.adminQueueHeader}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.panelEyebrow}>COMPROBANTES PENDIENTES · {adminSubscriptionRequests.length}</Text>
+                    <Text style={styles.adminModuleCopy}>Revisá el archivo y corroborá el ingreso del dinero.</Text>
+                  </View>
+                  <TouchableOpacity accessibilityRole="button" disabled={adminSubscriptionsLoading} style={styles.adminRefresh} onPress={() => void loadAdminSubscriptionRequests()}><Text style={styles.adminRefreshText}>{adminSubscriptionsLoading ? "Actualizando…" : "Actualizar"}</Text></TouchableOpacity>
+                </View>
+                {!!adminSubscriptionsError && <Text style={styles.modalError}>{adminSubscriptionsError}</Text>}
+                {!adminSubscriptionsLoading && !adminSubscriptionRequests.length && <Text style={styles.adminModuleCopy}>No hay comprobantes pendientes.</Text>}
+                {adminSubscriptionRequests.map((item) => <View key={item.id} style={styles.adminSubscriptionItem}>
+                  <Text style={styles.workProvider}>{item.name} · {item.publicId}</Text>
+                  <Text style={styles.adminModuleCopy}>{item.planMonths} {item.planMonths === 1 ? "mes" : "meses"} · ${item.amountArs.toLocaleString("es-AR")} · Recibido {new Date(item.createdAt).toLocaleString("es-AR")}</Text>
+                  <View style={styles.adminSubscriptionActions}>
+                    <TouchableOpacity accessibilityRole="link" style={styles.adminRefresh} onPress={() => void openAdminSubscriptionReceipt(item.receiptPath)}><Text style={styles.adminRefreshText}>Ver comprobante ↗</Text></TouchableOpacity>
+                    <TouchableOpacity accessibilityRole="button" style={styles.adminRefresh} onPress={() => void lookupPremiumAccount(item.publicId)}><Text style={styles.adminRefreshText}>Revisar y habilitar</Text></TouchableOpacity>
+                  </View>
+                </View>)}
+              </View>
+              <Text style={styles.adminModuleCopy}>¿Tenés un ID concreto? Buscalo acá. Sin comprobante pendiente, la activación manual dura un mes.</Text>
               <View style={styles.customQualityRow}>
                 <TextInput value={adminPremiumId} onChangeText={setAdminPremiumId} autoCapitalize="characters" placeholder="LP000001" placeholderTextColor="#71818B" style={[styles.modalInput, styles.customQualityInput]} onSubmitEditing={() => void lookupPremiumAccount()} />
                 <TouchableOpacity accessibilityRole="button" style={styles.customQualityButton} onPress={() => void lookupPremiumAccount()} disabled={adminPremiumBusy}><Text style={styles.customQualityButtonText}>Buscar</Text></TouchableOpacity>
@@ -4301,18 +4390,22 @@ export default function Home() {
                 <TouchableOpacity accessibilityRole="checkbox" accessibilityState={{ checked: adminPremiumAccount.premium, disabled: adminPremiumBusy }} disabled={adminPremiumBusy} style={styles.secondaryButton} onPress={() => void togglePremiumAccount()}><Text style={styles.secondaryText}>{adminPremiumAccount.premium ? "☑ PREMIUM? · habilitado" : "□ PREMIUM? · habilitar"}</Text></TouchableOpacity>
               </View>}
             </View>
-            <View style={styles.adminMetrics}>
-              {[
-                ["Revisiones pendientes", `${adminCredentialReviews.filter((item) => item.status === "pending").length}`],
-                ["Plazo superado", `${adminCredentialReviews.filter((item) => item.reviewDeadlineAt && new Date(item.reviewDeadlineAt).getTime() < Date.now()).length}`],
-                ["Archivos disponibles", `${adminCredentialReviews.filter((item) => item.signedUrl).length}`],
-                ["Padrones oficiales", "3"],
-              ].map(([label, value]) => (
-                <View key={label} style={styles.adminMetric}>
-                  <Text style={styles.panelEyebrow}>{label}</Text>
-                  <Text style={styles.adminMetricValue}>{value}</Text>
-                </View>
-              ))}
+            <View style={styles.providerPanel}>
+              <Text style={styles.panelEyebrow}>REVISIÓN DE CERTIFICACIONES</Text>
+              <Text style={styles.adminModuleTitle}>Estado de verificaciones</Text>
+              <View style={styles.adminMetrics}>
+                {[
+                  ["Revisiones pendientes", `${adminCredentialReviews.filter((item) => item.status === "pending").length}`],
+                  ["Plazo superado", `${adminCredentialReviews.filter((item) => item.reviewDeadlineAt && new Date(item.reviewDeadlineAt).getTime() < Date.now()).length}`],
+                  ["Archivos disponibles", `${adminCredentialReviews.filter((item) => item.signedUrl).length}`],
+                  ["Padrones oficiales", "3"],
+                ].map(([label, value]) => (
+                  <View key={label} style={styles.adminMetric}>
+                    <Text style={styles.panelEyebrow}>{label}</Text>
+                    <Text style={styles.adminMetricValue}>{value}</Text>
+                  </View>
+                ))}
+              </View>
             </View>
             <View style={styles.providerPanel}>
               <Text style={styles.panelEyebrow}>CONSULTA DE MATRÍCULAS</Text>
@@ -5311,9 +5404,15 @@ export default function Home() {
           <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar suscripción" style={styles.modalClose} onPress={() => setSubscriptionModal(false)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
           <ScrollView style={styles.reviewModalScroll} contentContainerStyle={styles.reviewModalContent} keyboardShouldPersistTaps="handled">
             <Text style={styles.modalTitle}>Suscripción Premium</Text>
-            <Text style={styles.modalCopy}>Elegí un período. El pago es únicamente por transferencia; Premium se activa después de verificar tu comprobante.</Text>
-            <Text style={styles.modalCopy}>Los datos bancarios todavía no están publicados en la app. No transfieras a cuentas que no hayan sido confirmadas por LaburApp.</Text>
-            {([ [1, 3500], [3, 7500], [6, 12000], [12, 15000] ] as const).map(([months, price]) => <TouchableOpacity key={months} accessibilityRole="radio" accessibilityState={{ selected: subscriptionMonths === months }} style={[styles.roleChoice, subscriptionMonths === months && styles.roleChoiceActive]} onPress={() => setSubscriptionMonths(months)}><Text style={styles.roleChoiceText}>{subscriptionMonths === months ? "◉" : "○"} {months} {months === 1 ? "mes" : "meses"} · ${price.toLocaleString("es-AR")}</Text></TouchableOpacity>)}
+            <Text style={styles.modalCopy}>Elegí un período. El pago es únicamente por transferencia. Premium se activa después de verificar tu comprobante; la comprobación puede demorar hasta 72 horas.</Text>
+            {!!accountPublicId && <Text style={styles.subscriptionAccountId}>Tu ID de cuenta: {accountPublicId}</Text>}
+            <View style={styles.subscriptionBankCard}>
+              <Text style={styles.panelEyebrow}>CUENTA PARA TRANSFERIR · BBVA</Text>
+              <Text style={styles.subscriptionAlias}>CA: ALSEMA.BBVA <Text style={styles.subscriptionAliasCheck}>✓</Text></Text>
+              <Text style={styles.adminModuleCopy}>Antes de confirmar, comprobá en tu banco que el alias y los datos del destinatario sean correctos.</Text>
+            </View>
+            {([ [1, 3500], [3, 7500], [6, 12000], [12, 15000] ] as const).map(([months, price]) => <TouchableOpacity key={months} accessibilityRole="radio" accessibilityState={{ selected: subscriptionMonths === months }} style={[styles.subscriptionPlanChoice, subscriptionMonths === months && styles.roleChoiceActive]} onPress={() => setSubscriptionMonths(months)}><Text style={[styles.roleChoiceText, subscriptionMonths === months && styles.roleChoiceTextActive]}>{subscriptionMonths === months ? "◉" : "○"} {months} {months === 1 ? "mes" : "meses"}</Text><Text style={styles.subscriptionPlanPrice}>${price.toLocaleString("es-AR")}</Text></TouchableOpacity>)}
+            <Text style={styles.subscriptionReceiptReminder}>RECORDÁ ADJUNTAR EL COMPROBANTE</Text>
             <Text style={styles.modalLabel}>Comprobante de transferencia</Text>
             <Text style={styles.modalCopy}>Adjuntá una captura legible, bien iluminada, con fecha, importe y datos de la operación visibles. Nunca incluyas contraseñas ni códigos.</Text>
             <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => void pickSubscriptionReceipt()}><Text style={styles.secondaryText}>{subscriptionReceiptUri ? "✓ Captura seleccionada · cambiar" : "Adjuntar captura"}</Text></TouchableOpacity>
@@ -6466,6 +6565,9 @@ function createStyles(colors: ThemeColors) {
     adminViewButtonText: { color: "white", fontSize: 11, fontWeight: "900" },
     adminViewHelp: { color: colors.stone, fontSize: 10, marginTop: 7, marginBottom: 10 },
     adminMetrics: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+    adminSubscriptionList: { backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.line, borderRadius: 14, padding: 13, gap: 10, marginTop: 12, marginBottom: 14 },
+    adminSubscriptionItem: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 12 },
+    adminSubscriptionActions: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 7 },
     adminMetric: {
       flexGrow: 1,
       flexBasis: 150,
@@ -6835,6 +6937,13 @@ function createStyles(colors: ThemeColors) {
     },
     roleChoiceText: { color: colors.stone, fontSize: 12, fontWeight: "800" },
     roleChoiceTextActive: { color: colors.navy },
+    subscriptionAccountId: { color: colors.blue, fontSize: 12, fontWeight: "900", marginBottom: 10 },
+    subscriptionBankCard: { backgroundColor: colors.successSurface, borderWidth: 1, borderColor: colors.green, borderRadius: 12, padding: 13, marginBottom: 13 },
+    subscriptionAlias: { color: colors.navy, fontSize: 18, fontWeight: "900", marginTop: 5, marginBottom: 5 },
+    subscriptionAliasCheck: { color: colors.green, fontSize: 21, fontWeight: "900" },
+    subscriptionPlanChoice: { minHeight: 48, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderWidth: 1, borderColor: colors.line, borderRadius: 10, paddingHorizontal: 14, marginBottom: 7 },
+    subscriptionPlanPrice: { color: colors.navy, fontSize: 13, fontWeight: "900" },
+    subscriptionReceiptReminder: { color: colors.orange, fontSize: 12, fontWeight: "900", marginTop: 9, marginBottom: 5 },
     singleAccountNote: { color: colors.stone, fontSize: 12, lineHeight: 18, marginBottom: 14 },
     termsRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 },
     checkbox: { color: colors.orange, fontSize: 22, marginRight: 7 },
