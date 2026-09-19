@@ -5409,6 +5409,20 @@ export default function Home() {
             <View style={styles.subscriptionBankCard}>
               <Text style={styles.panelEyebrow}>CUENTA PARA TRANSFERIR · BBVA</Text>
               <Text style={styles.subscriptionAlias}>CA: ALSEMA.BBVA <Text style={styles.subscriptionAliasCheck}>✓</Text></Text>
+              <View style={styles.subscriptionBankDetails}>
+                <View>
+                  <Text style={styles.subscriptionBankDetailLabel}>Tipo de cuenta</Text>
+                  <Text style={styles.subscriptionBankDetailValue}>Caja de Ahorro en $</Text>
+                </View>
+                <View>
+                  <Text style={styles.subscriptionBankDetailLabel}>Número de cuenta</Text>
+                  <Text selectable style={styles.subscriptionBankDetailValue}>228-35388/8</Text>
+                </View>
+                <View>
+                  <Text style={styles.subscriptionBankDetailLabel}>CBU</Text>
+                  <Text selectable style={styles.subscriptionBankDetailValue}>0170228840000035538882</Text>
+                </View>
+              </View>
               <Text style={styles.adminModuleCopy}>Antes de confirmar, comprobá en tu banco que el alias y los datos del destinatario sean correctos.</Text>
             </View>
             {([ [1, 3500], [3, 7500], [6, 12000], [12, 15000] ] as const).map(([months, price]) => <TouchableOpacity key={months} accessibilityRole="radio" accessibilityState={{ selected: subscriptionMonths === months }} style={[styles.subscriptionPlanChoice, subscriptionMonths === months && styles.roleChoiceActive]} onPress={() => setSubscriptionMonths(months)}><Text style={[styles.roleChoiceText, subscriptionMonths === months && styles.roleChoiceTextActive]}>{subscriptionMonths === months ? "◉" : "○"} {months} {months === 1 ? "mes" : "meses"}</Text><Text style={styles.subscriptionPlanPrice}>${price.toLocaleString("es-AR")}</Text></TouchableOpacity>)}
@@ -6941,6 +6955,9 @@ function createStyles(colors: ThemeColors) {
     subscriptionBankCard: { backgroundColor: colors.successSurface, borderWidth: 1, borderColor: colors.green, borderRadius: 12, padding: 13, marginBottom: 13 },
     subscriptionAlias: { color: colors.navy, fontSize: 18, fontWeight: "900", marginTop: 5, marginBottom: 5 },
     subscriptionAliasCheck: { color: colors.green, fontSize: 21, fontWeight: "900" },
+    subscriptionBankDetails: { borderTopWidth: 1, borderTopColor: colors.line, gap: 8, paddingTop: 10, marginTop: 5, marginBottom: 10 },
+    subscriptionBankDetailLabel: { color: colors.stone, fontSize: 10, fontWeight: "700" },
+    subscriptionBankDetailValue: { color: colors.navy, fontSize: 12, fontWeight: "800", marginTop: 2 },
     subscriptionPlanChoice: { minHeight: 48, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderWidth: 1, borderColor: colors.line, borderRadius: 10, paddingHorizontal: 14, marginBottom: 7 },
     subscriptionPlanPrice: { color: colors.navy, fontSize: 13, fontWeight: "900" },
     subscriptionReceiptReminder: { color: colors.orange, fontSize: 12, fontWeight: "900", marginTop: 9, marginBottom: 5 },
