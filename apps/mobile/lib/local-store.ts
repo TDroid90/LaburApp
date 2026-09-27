@@ -189,7 +189,7 @@ export type LocalAppState = {
   providerProfile: SavedProviderProfile | null;
 };
 
-const STORAGE_KEY = "laburapp.demo.v1";
+export const STORAGE_KEY = "laburapp.demo.v1";
 const emptyState: LocalAppState = { session: null, requests: [], providerProfile: null };
 const FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000;
 const durableRequestStatuses = new Set(["quote_accepted", "payment_pending", "payment_authorized", "funds_held", "scheduled", "in_progress", "completion_proposed", "client_confirmation_pending", "completed", "funds_released", "disputed", "refunded"]);
@@ -259,4 +259,14 @@ export async function loadLocalState(): Promise<LocalAppState> {
 
 export async function saveLocalState(state: LocalAppState) {
   await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+
+export function localAccountStorageKeys(email?: string | null) {
+  const keys = [STORAGE_KEY, "laburapp:last-tab"];
+  if (email) keys.push(`laburapp:seen-requests:${email.toLowerCase()}`);
+  return keys;
+}
+
+export async function clearLocalAccountData(email?: string | null) {
+  await AsyncStorage.multiRemove(localAccountStorageKeys(email));
 }

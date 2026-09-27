@@ -2,8 +2,6 @@ import crypto from "node:crypto";
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
-const DEFAULT_PROJECT_ROOT_FOLDER_ID = "1Y8lNj4zpDXRA_ASUn0GCRmbtI9TE2QfI";
-const DEFAULT_PROFESSIONALS_FOLDER_ID = "1YyLePscAWsVX8O9aIKaQTaMHSPpMq3ZD";
 
 function json(res, status, body) {
   res.status(status).json(body);
@@ -11,6 +9,12 @@ function json(res, status, body) {
 
 function base64url(value) {
   return Buffer.from(typeof value === "string" ? value : JSON.stringify(value)).toString("base64url");
+}
+
+function safeSecretEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left ?? ""));
+  const rightBuffer = Buffer.from(String(right ?? ""));
+  return leftBuffer.length === rightBuffer.length && crypto.timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 async function googleAccessToken(clientEmail, privateKey) {
@@ -44,7 +48,7 @@ function hasUnsafePathPart(value) {
 
 function validateQueueRow(row, userId, profileFolder) {
   if (row[row.ownerColumn] !== userId) throw new Error("La cola no pertenece a la sesión.");
-  if (row.target_root_folder_id !== row.allowedRoot) throw new Error("Raíz de Drive no autorizada.");
+  if (row.target_root_folder_id !== null) throw new Error("La raíz de Drive debe resolverse en el servidor.");
   if (hasUnsafePathPart(row.source_storage_path) || !row.source_storage_path.startsWith(`${userId}/`)) {
     throw new Error("Ruta de origen no autorizada.");
   }
@@ -82,6 +86,46 @@ async function ensureFolder(token, parentId, name) {
   return (await created.json()).id;
 }
 
+async function findFolder(token, parentId, name) {
+  const query = `'${driveName(parentId)}' in parents and name='${driveName(name)}' and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const searchUrl = new URL("https://www.googleapis.com/drive/v3/files");
+  searchUrl.searchParams.set("q", query);
+  searchUrl.searchParams.set("fields", "files(id,name)");
+  searchUrl.searchParams.set("pageSize", "2");
+  searchUrl.searchParams.set("supportsAllDrives", "true");
+  searchUrl.searchParams.set("includeItemsFromAllDrives", "true");
+  const found = await fetch(searchUrl, { headers: { authorization: `Bearer ${token}` } });
+  if (!found.ok) throw new Error("No pudimos consultar la carpeta de limpieza en Drive.");
+  const files = (await found.json()).files ?? [];
+  if (files.length > 1) throw new Error("La ruta de limpieza es ambigua.");
+  return files[0]?.id ?? null;
+}
+
+async function isDescendantOfRoot(token, fileId, rootId) {
+  let current = fileId;
+  for (let depth = 0; depth < 32; depth += 1) {
+    if (current === rootId) return true;
+    const response = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(current)}?fields=id,parents,trashed&supportsAllDrives=true`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error("No pudimos verificar la ubicación del archivo en Drive.");
+    const file = await response.json();
+    if (file.trashed || !file.parents?.length) return false;
+    if (file.parents.includes(rootId)) return true;
+    current = file.parents[0];
+  }
+  return false;
+}
+
+async function deleteDriveFile(token, fileId) {
+  const response = await fetch(`https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?supportsAllDrives=true`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!response.ok && response.status !== 404) throw new Error(`Drive rechazó la limpieza (${response.status}).`);
+}
+
 async function uploadToDrive(token, parentId, name, sourceResponse) {
   const form = new FormData();
   form.append("metadata", new Blob([JSON.stringify({ name, parents: [parentId] })], { type: "application/json" }));
@@ -110,20 +154,79 @@ async function supabaseRequest(url, serviceKey, path, options = {}) {
   return response;
 }
 
+async function processDriveCleanup({ supabaseUrl, serviceKey, token, projectRootFolderId, professionalsFolderId }) {
+  const rowsResponse = await fetch(`${supabaseUrl}/rest/v1/drive_cleanup_outbox?select=id,root_kind,drive_file_id,relative_path,attempts&status=in.(pending,failed)&order=created_at.asc&limit=25`, {
+    headers: { apikey: serviceKey, authorization: `Bearer ${serviceKey}` },
+  });
+  if (!rowsResponse.ok) throw new Error("No pudimos leer la cola de limpieza de Drive.");
+  const rows = await rowsResponse.json();
+  let completed = 0;
+  let failed = 0;
+  for (const row of rows) {
+    try {
+      await supabaseRequest(supabaseUrl, serviceKey, `drive_cleanup_outbox?id=eq.${row.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "processing", attempts: row.attempts + 1, last_error: null, updated_at: new Date().toISOString() }),
+      });
+      const rootId = row.root_kind === "professionals" ? professionalsFolderId : row.root_kind === "project" ? projectRootFolderId : null;
+      if (!rootId) throw new Error("Raíz de limpieza no autorizada.");
+      let targetId = row.drive_file_id || null;
+      if (targetId) {
+        const isWithinRoot = await isDescendantOfRoot(token, targetId, rootId);
+        if (isWithinRoot === false) throw new Error("El archivo no pertenece a la raíz autorizada.");
+        if (isWithinRoot === null) targetId = null;
+      }
+      if (!targetId && row.relative_path) {
+        if (hasUnsafePathPart(row.relative_path)) throw new Error("Ruta de limpieza no autorizada.");
+        let folderId = rootId;
+        for (const segment of row.relative_path.split("/").filter(Boolean)) {
+          folderId = await findFolder(token, folderId, segment);
+          if (!folderId) break;
+        }
+        targetId = folderId;
+      }
+      if (targetId) await deleteDriveFile(token, targetId);
+      await supabaseRequest(supabaseUrl, serviceKey, `drive_cleanup_outbox?id=eq.${row.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "completed", last_error: null, updated_at: new Date().toISOString() }),
+      });
+      completed += 1;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Error inesperado al limpiar Drive.";
+      try {
+        await supabaseRequest(supabaseUrl, serviceKey, `drive_cleanup_outbox?id=eq.${row.id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ status: "failed", last_error: message, updated_at: new Date().toISOString() }),
+        });
+      } catch { /* El cron reintentará el registro. */ }
+      failed += 1;
+    }
+  }
+  return { processed: rows.length, completed, failed };
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return json(res, 405, { error: "Método no permitido." });
   const supabaseUrl = process.env.SUPABASE_URL || process.env.EXPO_PUBLIC_SUPABASE_URL;
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
   if (!supabaseUrl || !serviceKey) return json(res, 503, { error: "Falta configurar Supabase en el sincronizador." });
-  const bearer = req.headers.authorization ?? "";
-  const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, { headers: { apikey: serviceKey, authorization: bearer } });
-  if (!userResponse.ok) return json(res, 401, { error: "Sesión inválida." });
-  const user = await userResponse.json();
   const googleEmail = process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT_EMAIL;
   const googlePrivateKey = process.env.GOOGLE_DRIVE_PRIVATE_KEY;
   if (!googleEmail || !googlePrivateKey) return json(res, 503, { error: "La copia quedó en espera: falta conectar la credencial permanente de Google Drive." });
+  const projectRootFolderId = process.env.GOOGLE_DRIVE_PROJECT_ROOT_FOLDER_ID;
+  const professionalsFolderId = process.env.GOOGLE_DRIVE_PROFESSIONALS_FOLDER_ID;
+  if (!projectRootFolderId || !professionalsFolderId) return json(res, 503, { error: "Falta configurar las carpetas de Drive para este ambiente." });
 
   const token = await googleAccessToken(googleEmail, googlePrivateKey);
+  const bearer = req.headers.authorization ?? "";
+  const cronSecret = process.env.CRON_SECRET;
+  if (cronSecret && safeSecretEqual(bearer, `Bearer ${cronSecret}`)) {
+    const cleanup = await processDriveCleanup({ supabaseUrl, serviceKey, token, projectRootFolderId, professionalsFolderId });
+    return json(res, cleanup.failed ? 207 : 200, cleanup);
+  }
+  const userResponse = await fetch(`${supabaseUrl}/auth/v1/user`, { headers: { apikey: serviceKey, authorization: bearer } });
+  if (!userResponse.ok) return json(res, 401, { error: "Sesión inválida." });
+  const user = await userResponse.json();
   const profileResponse = await fetch(`${supabaseUrl}/rest/v1/profiles?select=public_id,full_name&id=eq.${encodeURIComponent(user.id)}&limit=1`, {
     headers: { apikey: serviceKey, authorization: `Bearer ${serviceKey}` },
   });
@@ -132,8 +235,6 @@ export default async function handler(req, res) {
   if (!profile?.public_id) return json(res, 404, { error: "La cuenta no tiene identificador público." });
   const profileFolder = `${safeFolderPart(profile.public_id)}_${safeFolderPart(profile.full_name)}`;
   const accountFolder = `Clientes/${profileFolder}`;
-  const projectRootFolderId = process.env.GOOGLE_DRIVE_PROJECT_ROOT_FOLDER_ID || DEFAULT_PROJECT_ROOT_FOLDER_ID;
-  const professionalsFolderId = process.env.GOOGLE_DRIVE_PROFESSIONALS_FOLDER_ID || DEFAULT_PROFESSIONALS_FOLDER_ID;
   const nameParts = String(profile.full_name ?? "Cliente").trim().split(/\s+/);
   const surnameName = safeFolderPart(nameParts.length > 1 ? `${nameParts.at(-1)}${nameParts.slice(0, -1).join("")}` : nameParts[0]);
   const queueDefinitions = [
@@ -189,7 +290,7 @@ export default async function handler(req, res) {
         : row.receipt_kind === "completion"
           ? `${safeFolderPart(profile.public_id)}_${String(row.created_at).slice(0, 10)}_Trabajo_${row.id}.jpg`
           : row.target_file_name;
-      let folderId = row.target_root_folder_id;
+      let folderId = row.allowedRoot;
       for (const segment of relativePath.split("/").filter(Boolean)) folderId = await ensureFolder(token, folderId, segment);
       const sourcePath = row.source_storage_path.split("/").map(encodeURIComponent).join("/");
       const sourceResponse = await fetch(`${supabaseUrl}/storage/v1/object/${row.sourceBucket}/${sourcePath}`, {

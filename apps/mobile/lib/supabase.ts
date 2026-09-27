@@ -25,6 +25,10 @@ const authStorage = Platform.OS === "web"
       randomBytes: (length) => crypto.getRandomValues(new Uint8Array(length)),
     });
 
+const authStorageKey = supabaseUrl
+  ? `sb-${new URL(supabaseUrl).hostname.split(".")[0]}-auth-token`
+  : null;
+
 export const supabase = supabaseUrl && supabaseAnonKey
   ? createClient(supabaseUrl, supabaseAnonKey, {
       auth: {
@@ -37,3 +41,7 @@ export const supabase = supabaseUrl && supabaseAnonKey
   : null;
 
 export const backendMode = supabase ? "supabase" : "local-demo";
+
+export async function clearPersistedSupabaseSession() {
+  if (authStorageKey) await authStorage.removeItem(authStorageKey);
+}

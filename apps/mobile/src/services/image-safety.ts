@@ -41,11 +41,9 @@ export function pickedImageError(asset: PickedImageDescriptor, policy: ImagePoli
   }
   return null;
 }
-
 export function longestSideResize(width: number, height: number, maximum: number) {
   if (width <= maximum && height <= maximum) return [];
   return width >= height
     ? [{ resize: { width: maximum } }]
     : [{ resize: { height: maximum } }];
 }
-

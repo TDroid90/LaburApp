@@ -89,4 +89,3 @@ $$;
 
 revoke all on function public.discover_published_reviews() from public;
 grant execute on function public.discover_published_reviews() to anon, authenticated;
-

@@ -68,3 +68,6 @@ content_path = "./supabase/templates/password-changed.html"
 
 [storage]
 enabled = true
+
+[functions.delete-account]
+verify_jwt = true

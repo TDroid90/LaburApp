@@ -276,7 +276,12 @@ delete from public.client_memberships where client_id = '10000000-0000-0000-0000
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '10000000-0000-0000-0000-000000000004', true);
 select set_config('request.jwt.claim.role', 'authenticated', true);
-select is((select count(*) from public.profiles), 4::bigint, 'real admin can read all profiles');
+select is((select count(*) from public.profiles where id in (
+  '10000000-0000-0000-0000-000000000001',
+  '10000000-0000-0000-0000-000000000002',
+  '10000000-0000-0000-0000-000000000003',
+  '10000000-0000-0000-0000-000000000004'
+)), 4::bigint, 'real admin can read every seeded profile even when staging contains tombstones');
 select is((select count(*) from public.reviews), 3::bigint, 'real admin can read all raw reviews');
 select ok(pg_temp.statement_fails($sql$
   select * from public.admin_set_premium_by_public_id('LP999999', true)

@@ -63,4 +63,3 @@ En staging, ejecutar con cuentas descartables:
 - logout invalida la sesión local y refresh persiste correctamente tras reinicio.
 
 Registrar fecha, plataforma, destinatario y resultado. No copiar tokens completos en tickets o capturas.
-

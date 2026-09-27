@@ -96,4 +96,3 @@ La eliminación del polling de 3 s reduce consultas y renders; Tesseract conserv
 ## Gate pendiente
 
 Antes de release candidate faltan: dominio HTTPS, variables EAS por entorno, migraciones y pruebas en staging, configuración Auth/SMTP/rate limits/CAPTCHA, cron y monitoreo, QA nativo de fuente/lector de pantalla, build EAS preview instalado, prueba de Drive staging y resolución/aceptación formal de las dependencias moderadas restantes.
-

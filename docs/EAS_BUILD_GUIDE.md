@@ -1,6 +1,6 @@
 # Guía de builds EAS
 
-Fecha: 2026-09-24. Esta guía prepara builds internas y de producción; no autoriza publicar ni reemplaza el gate de `PRODUCTION_READINESS.md`.
+Fecha: 2026-09-26. Esta guía prepara builds internas y de producción; no autoriza publicar ni reemplaza el gate de `PRODUCTION_READINESS.md`.
 
 ## Perfiles
 
@@ -18,7 +18,7 @@ eas build --platform android --profile preview
 eas build --platform android --profile production
 ```
 
-No se ejecutó ninguno durante Fase 4. El perfil `production` usa versionado remoto y `autoIncrement`. EAS administra la firma remota; ningún keystore de producción debe guardarse en Git. El guard nativo impide que un release Gradle local quede firmado silenciosamente con `debug.keystore`.
+En Fase 7 se inició un Preview real contra staging. El perfil `production` usa versionado remoto y `autoIncrement`. EAS administra la firma remota; ningún keystore de producción debe guardarse en Git. El guard nativo impide que un release Gradle local quede firmado silenciosamente con `debug.keystore`.
 
 ## Variables esperadas en EAS
 
@@ -53,6 +53,8 @@ Configurar por entorno y nunca copiar valores secretos al repositorio:
 | `SHEETS_WEBHOOK_URL`, `SHEETS_WEBHOOK_SECRET` | SECRET/SERVER ONLY | opcional | opcional | opcional |
 | `CRON_SECRET` | SECRET/SERVER ONLY | local | staging | producción |
 | `ADMIN_BASIC_USER`, `ADMIN_BASIC_PASSWORD` | SECRET/SERVER ONLY | local | staging | producción |
+
+Estado Preview: `EXPO_PUBLIC_SUPABASE_URL` apunta a `sdxvavgmvuyxtklrjxby`; la clave pública está configurada como sensitive. No se cargaron `service_role`, credenciales Drive, admin ni cron en EAS mobile. `EXPO_PUBLIC_APP_URL` permanece sin inventar hasta contar con dominio.
 
 Toda variable `EXPO_PUBLIC_*` termina embebida en el cliente y **no puede contener secretos**. Las credenciales service-role, Drive, cron, admin y webhooks no deben llevar ese prefijo ni configurarse como variables del bundle móvil. Los perfiles EAS ya fuerzan demo desactivada en preview/production.
 

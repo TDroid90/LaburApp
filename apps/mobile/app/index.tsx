@@ -36,6 +36,7 @@ import {
   submitCustomQuote,
 } from "../lib/demo-flow";
 import {
+  clearLocalAccountData,
   loadLocalState,
   saveLocalState,
   SavedCredentialEvidence,
@@ -57,7 +58,7 @@ import {
   publicAppUrl,
   webAuthRedirectUrl,
 } from "../lib/public-app-url";
-import { supabase } from "../lib/supabase";
+import { clearPersistedSupabaseSession, supabase } from "../lib/supabase";
 import { AppShell } from "../src/layouts/AppShell";
 import { useRequestSync } from "../src/hooks/useRequestSync";
 import { useResponsiveLayout } from "../src/layouts/useResponsiveLayout";
@@ -1026,8 +1027,6 @@ const cityChoices = [
   "Almanza",
   "Ushuaia",
 ];
-const driveProfessionalsFolderId = "1YyLePscAWsVX8O9aIKaQTaMHSPpMq3ZD";
-const driveProjectRootFolderId = "1Y8lNj4zpDXRA_ASUn0GCRmbtI9TE2QfI";
 const GUEST_PREVIEW_MS = 15_000;
 
 function readableProfileError(message: string) {
@@ -1209,6 +1208,7 @@ export default function Home() {
   const qrScanLockRef = useRef(false);
   const sessionRef = useRef<SavedSession | null>(null);
   const intentionalSignOutRef = useRef(false);
+  const suppressLocalSaveRef = useRef(false);
   const [clientPlan, setClientPlan] = useState<"free" | "plus">("free");
   const [membershipEndsAt, setMembershipEndsAt] = useState<string | null>(null);
   const [accountPublicId, setAccountPublicId] = useState<string | null>(null);
@@ -1219,6 +1219,11 @@ export default function Home() {
   const [subscriptionReceiptUri, setSubscriptionReceiptUri] = useState<string | null>(null);
   const [subscriptionBusy, setSubscriptionBusy] = useState(false);
   const [subscriptionError, setSubscriptionError] = useState("");
+  const [deleteAccountModal, setDeleteAccountModal] = useState(false);
+  const [deleteAccountPassword, setDeleteAccountPassword] = useState("");
+  const [deleteAccountConfirmation, setDeleteAccountConfirmation] = useState("");
+  const [deleteAccountBusy, setDeleteAccountBusy] = useState(false);
+  const [deleteAccountError, setDeleteAccountError] = useState("");
   const [adminPremiumId, setAdminPremiumId] = useState("");
   const [adminPremiumAccount, setAdminPremiumAccount] = useState<{ id: string; name: string; publicId: string; premium: boolean; endsAt?: string; pendingMonths?: number; receiptUrl?: string } | null>(null);
   const [adminPremiumBusy, setAdminPremiumBusy] = useState(false);
@@ -1449,6 +1454,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!hydrated) return;
+    if (suppressLocalSaveRef.current) return;
     saveLocalState({ session, requests, providerProfile: session?.role === "admin" ? null : providerProfile }).catch(() =>
       setRequested("No pudimos guardar los cambios en este dispositivo."),
     );
@@ -2249,6 +2255,7 @@ export default function Home() {
       role: resolvedRole,
       photoUri,
     };
+    suppressLocalSaveRef.current = false;
     setSession(nextSession);
     setSignedInName(name);
     if (authMode === "register")
@@ -2271,6 +2278,7 @@ export default function Home() {
 
   function loginDemoAccount(account: SavedSession) {
     if (!demoAccessEnabled) return;
+    suppressLocalSaveRef.current = false;
     setSession(account);
     setSignedInName(account.name);
     setAuthMode(null);
@@ -2432,7 +2440,6 @@ export default function Home() {
                 client_id: userData.user.id,
                 request_id: requestId,
                 source_storage_path: storagePath,
-                target_root_folder_id: driveProjectRootFolderId,
                 target_relative_path: requestFolder,
                 target_file_name: `SOL_${requestId.slice(0, 8).toUpperCase()}_foto_${index + 1}.jpg`,
               });
@@ -2979,7 +2986,6 @@ export default function Home() {
             provider_id: user.id,
             completed_work_id: insertedWork.data.id,
             source_storage_path: storagePath,
-            target_root_folder_id: driveProfessionalsFolderId,
             target_relative_path: driveWorkFolder,
             target_file_name: driveFileName,
           });
@@ -3056,6 +3062,50 @@ export default function Home() {
     setGuestGateLocked(false);
     setTab("Inicio");
     setRequested("Cerraste sesión en este dispositivo.");
+  }
+
+  async function deleteAccount() {
+    if (!supabase || !session || isDemoSession || deleteAccountBusy) return;
+    if (deleteAccountConfirmation.trim() !== "ELIMINAR") {
+      return setDeleteAccountError("Escribí ELIMINAR para confirmar.");
+    }
+    if (!deleteAccountPassword) return setDeleteAccountError("Ingresá tu contraseña actual.");
+    setDeleteAccountBusy(true);
+    setDeleteAccountError("");
+    const email = session.email;
+    try {
+      const result = await supabase.functions.invoke("delete-account", {
+        body: { password: deleteAccountPassword, confirmation: "ELIMINAR" },
+      });
+      if (result.error || result.data?.deleted !== true) {
+        throw new Error("DELETE_FAILED");
+      }
+      suppressLocalSaveRef.current = true;
+      intentionalSignOutRef.current = true;
+      await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+      await clearPersistedSupabaseSession();
+      await clearLocalAccountData(email);
+      setSession(null);
+      setCurrentUserId(null);
+      setSignedInName(null);
+      setProviderProfile(null);
+      setRequests([]);
+      setSeenRequests(null);
+      setAccountPublicId(null);
+      setClientPlan("free");
+      setMembershipEndsAt(null);
+      setTab("Inicio");
+      setDeleteAccountModal(false);
+      setDeleteAccountPassword("");
+      setDeleteAccountConfirmation("");
+      setGuestGateLocked(true);
+      setAuthMode("login");
+      setRequested("Tu cuenta y tus datos personales fueron eliminados.");
+    } catch {
+      setDeleteAccountError("No pudimos completar la eliminación. Verificá tu contraseña y reintentá; no mostraremos éxito hasta terminar.");
+    } finally {
+      setDeleteAccountBusy(false);
+    }
   }
 
   function showAdminPreview(role: "client" | "provider") {
@@ -3279,7 +3329,6 @@ export default function Home() {
           const fullName = String(profile.data?.full_name ?? session?.name ?? "Cliente");
           const outbox = await supabase.from("receipt_drive_outbox").insert({
             owner_id: user.id, receipt_kind: "completion", source_storage_path: receiptPath,
-            target_root_folder_id: driveProjectRootFolderId,
             target_relative_path: `Clientes/${safeFolderPart(publicId)}_${safeFolderPart(fullName)}/Comprobantes`,
             target_file_name: `${safeFolderPart(publicId)}_${new Date().toISOString().slice(0, 10)}_Trabajo_${requestDisplayId(requestId)}.jpg`,
           });
@@ -3623,7 +3672,6 @@ export default function Home() {
       if (request.error) throw request.error;
       const outbox = await supabase.from("receipt_drive_outbox").insert({
         owner_id: auth.data.user.id, receipt_kind: "subscription", source_storage_path: storagePath,
-        target_root_folder_id: driveProjectRootFolderId,
         target_relative_path: `Clientes/${safeFolderPart(publicId)}_${safeFolderPart(fullName)}/Suscripciones`,
         target_file_name: fileName,
       });
@@ -5122,6 +5170,11 @@ export default function Home() {
                 <TouchableOpacity accessibilityRole="button" style={styles.logoutButton} onPress={signOut}>
                   <Text style={styles.logoutText}>Cerrar sesión</Text>
                 </TouchableOpacity>
+                {session.role !== "admin" && !isDemoSession && (
+                  <TouchableOpacity accessibilityRole="button" style={styles.deleteAccountButton} onPress={() => { setDeleteAccountError(""); setDeleteAccountModal(true); }}>
+                    <Text style={styles.deleteAccountButtonText}>Eliminar cuenta</Text>
+                  </TouchableOpacity>
+                )}
               </>
             )}
           </View>
@@ -5747,6 +5800,25 @@ export default function Home() {
             <TouchableOpacity accessibilityRole="button" disabled={subscriptionBusy || !subscriptionReceiptUri} style={[styles.modalPrimary, (subscriptionBusy || !subscriptionReceiptUri) && styles.buttonDisabled]} onPress={() => void requestSubscription()}><Text style={styles.modalPrimaryText}>{subscriptionBusy ? "Enviando…" : "Enviar comprobante"}</Text></TouchableOpacity>
           </ScrollView>
         </View></View>
+      </AppModal>
+      <AppModal visible={deleteAccountModal} onRequestClose={() => { if (!deleteAccountBusy) setDeleteAccountModal(false); }}>
+        <KeyboardAvoidingView style={styles.authKeyboardFrame} behavior={Platform.OS === "ios" ? "padding" : "height"}>
+          <View style={styles.modalBackdrop}><View style={[styles.modalCard, styles.reviewModalCard]}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar eliminación de cuenta" disabled={deleteAccountBusy} style={styles.modalClose} onPress={() => setDeleteAccountModal(false)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+            <ScrollView style={styles.reviewModalScroll} contentContainerStyle={styles.reviewModalContent} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
+              <Text style={styles.modalTitle}>Eliminar cuenta</Text>
+              <Text style={styles.modalCopy}>Esta acción elimina tu acceso, archivos privados, perfil público y datos personales. El historial contractual o financiero imprescindible se conserva sin tus datos identificatorios.</Text>
+              <Text style={styles.modalCopy}>La acción es permanente. Ingresá tu contraseña actual y escribí ELIMINAR.</Text>
+              <TextInput accessibilityLabel="Contraseña actual" secureTextEntry autoCapitalize="none" value={deleteAccountPassword} onChangeText={setDeleteAccountPassword} placeholder="Contraseña actual" placeholderTextColor="#71818B" style={styles.modalInput} />
+              <TextInput accessibilityLabel="Confirmación de eliminación" autoCapitalize="characters" value={deleteAccountConfirmation} onChangeText={setDeleteAccountConfirmation} placeholder="Escribí ELIMINAR" placeholderTextColor="#71818B" style={styles.modalInput} />
+              {!!deleteAccountError && <Text style={styles.modalError}>{deleteAccountError}</Text>}
+              <TouchableOpacity accessibilityRole="button" disabled={deleteAccountBusy || deleteAccountConfirmation.trim() !== "ELIMINAR" || !deleteAccountPassword} style={[styles.deleteAccountConfirm, (deleteAccountBusy || deleteAccountConfirmation.trim() !== "ELIMINAR" || !deleteAccountPassword) && styles.buttonDisabled]} onPress={() => void deleteAccount()}>
+                <Text style={styles.deleteAccountConfirmText}>{deleteAccountBusy ? "Eliminando de forma segura…" : "Eliminar mi cuenta definitivamente"}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity accessibilityRole="button" disabled={deleteAccountBusy} style={styles.secondaryButton} onPress={() => setDeleteAccountModal(false)}><Text style={styles.secondaryText}>Cancelar</Text></TouchableOpacity>
+            </ScrollView>
+          </View></View>
+        </KeyboardAvoidingView>
       </AppModal>
       <AppModal
         visible={chatRequest !== null}
@@ -6888,6 +6960,10 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     providerInviteTitle: { color: "white", fontSize: 20, fontWeight: "900" },
     logoutButton: { alignSelf: "center", padding: 14, marginTop: 13 },
     logoutText: { color: colors.danger, fontWeight: "800" },
+    deleteAccountButton: { alignSelf: "center", minHeight: 44, justifyContent: "center", paddingHorizontal: 14, marginBottom: 14 },
+    deleteAccountButtonText: { color: colors.danger, fontSize: 12, fontWeight: "800", textDecorationLine: "underline" },
+    deleteAccountConfirm: { minHeight: 50, borderRadius: 12, backgroundColor: colors.danger, alignItems: "center", justifyContent: "center", paddingHorizontal: 14, marginTop: 8 },
+    deleteAccountConfirmText: { color: "white", fontWeight: "900", textAlign: "center" },
     adminViewSwitcher: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 },
     adminViewButton: { flexGrow: 1, minHeight: 44, borderRadius: 12, borderWidth: 1, borderColor: colors.blue, backgroundColor: colors.brandNavy, alignItems: "center", justifyContent: "center", paddingHorizontal: 14 },
     adminViewButtonText: { color: "white", fontSize: 11, fontWeight: "900" },

@@ -28,7 +28,6 @@ alter table public.drive_media_outbox add constraint drive_media_outbox_paths_ch
   and target_file_name not like '%/%'
   and target_file_name not like E'%\\%'
 ) not valid;
-
 drop policy if exists "prestador registra copia en drive" on public.drive_media_outbox;
 create policy "prestador registra copia en drive" on public.drive_media_outbox for insert to authenticated
 with check (
@@ -103,4 +102,3 @@ alter table public.receipt_drive_outbox add constraint receipt_drive_paths_check
   and target_file_name not like '%/%'
   and target_file_name not like E'%\\%'
 ) not valid;
-

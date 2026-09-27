@@ -20,4 +20,3 @@ describe("image safety", () => {
     expect(longestSideResize(800, 1200, 1600)).toEqual([]);
   });
 });
-

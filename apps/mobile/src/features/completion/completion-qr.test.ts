@@ -18,4 +18,3 @@ describe("completion QR parser", () => {
     expect(() => parseCompletionToken(value)).toThrow("INVALID_COMPLETION_TOKEN");
   });
 });
-

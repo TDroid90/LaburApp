@@ -124,4 +124,3 @@ Fecha: 2026-09-23. Fuente: migraciones aplicadas en Supabase local y `pg_policie
 - `authenticated`: allowlist explícita de negocio; las RPC administrativas vuelven a validar `user_roles`.
 - `purge_expired_client_data()` y `apply_annual_credential_review_due()`: sólo `service_role`.
 - Funciones trigger: no tienen EXECUTE para `anon` ni `authenticated`.
-

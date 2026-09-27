@@ -115,4 +115,3 @@ drop trigger if exists enforce_service_request_transition on public.service_requ
 create trigger enforce_service_request_transition
 before update on public.service_requests
 for each row execute function public.enforce_service_request_transition();
-
