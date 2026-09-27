@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
+const DEFAULT_PROJECT_ROOT_FOLDER_ID = "1Y8lNj4zpDXRA_ASUn0GCRmbtI9TE2QfI";
+const DEFAULT_PROFESSIONALS_FOLDER_ID = "1YyLePscAWsVX8O9aIKaQTaMHSPpMq3ZD";
 
 function json(res, status, body) {
   res.status(status).json(body);
@@ -32,6 +34,31 @@ function driveName(value) {
 function safeFolderPart(value) {
   return String(value).normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .replace(/[^a-zA-Z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "Cliente";
+}
+
+function hasUnsafePathPart(value) {
+  const text = String(value ?? "");
+  return !text || text.startsWith("/") || text.includes("\\") || text.includes("//")
+    || text.split("/").some((part) => !part || part === "." || part === ".." || /[\u0000-\u001f]/.test(part));
+}
+
+function validateQueueRow(row, userId, profileFolder) {
+  if (row[row.ownerColumn] !== userId) throw new Error("La cola no pertenece a la sesión.");
+  if (row.target_root_folder_id !== row.allowedRoot) throw new Error("Raíz de Drive no autorizada.");
+  if (hasUnsafePathPart(row.source_storage_path) || !row.source_storage_path.startsWith(`${userId}/`)) {
+    throw new Error("Ruta de origen no autorizada.");
+  }
+  if (hasUnsafePathPart(row.target_relative_path)) throw new Error("Ruta de destino no autorizada.");
+  if (!row.target_file_name || /[\\/\u0000-\u001f]/.test(row.target_file_name)) {
+    throw new Error("Nombre de archivo no autorizado.");
+  }
+  if (row.table === "drive_media_outbox" && !row.target_relative_path.startsWith(`${profileFolder}/Trabajos/`)) {
+    throw new Error("Carpeta profesional no autorizada.");
+  }
+  if (row.table === "client_drive_media_outbox") {
+    const expected = `Clientes/${profileFolder}/Solicitudes/SOL_${String(row.request_id).slice(0, 8).toUpperCase()}`;
+    if (row.target_relative_path !== expected) throw new Error("Carpeta de solicitud no autorizada.");
+  }
 }
 
 async function ensureFolder(token, parentId, name) {
@@ -103,7 +130,10 @@ export default async function handler(req, res) {
   if (!profileResponse.ok) return json(res, 502, { error: "No pudimos identificar la carpeta privada del usuario." });
   const profile = (await profileResponse.json())[0];
   if (!profile?.public_id) return json(res, 404, { error: "La cuenta no tiene identificador público." });
-  const accountFolder = `Clientes/${safeFolderPart(profile.public_id)}_${safeFolderPart(profile.full_name)}`;
+  const profileFolder = `${safeFolderPart(profile.public_id)}_${safeFolderPart(profile.full_name)}`;
+  const accountFolder = `Clientes/${profileFolder}`;
+  const projectRootFolderId = process.env.GOOGLE_DRIVE_PROJECT_ROOT_FOLDER_ID || DEFAULT_PROJECT_ROOT_FOLDER_ID;
+  const professionalsFolderId = process.env.GOOGLE_DRIVE_PROFESSIONALS_FOLDER_ID || DEFAULT_PROFESSIONALS_FOLDER_ID;
   const nameParts = String(profile.full_name ?? "Cliente").trim().split(/\s+/);
   const surnameName = safeFolderPart(nameParts.length > 1 ? `${nameParts.at(-1)}${nameParts.slice(0, -1).join("")}` : nameParts[0]);
   const queueDefinitions = [
@@ -112,18 +142,23 @@ export default async function handler(req, res) {
       ownerColumn: "provider_id",
       sourceBucket: "portfolio",
       targetTable: "provider_portfolio_items",
+      allowedRoot: professionalsFolderId,
+      extraSelect: ",completed_work_id",
     },
     {
       table: "client_drive_media_outbox",
       ownerColumn: "client_id",
       sourceBucket: "request-photos",
       targetTable: "client_request_attachments",
+      allowedRoot: projectRootFolderId,
+      extraSelect: ",request_id",
     },
     {
       table: "receipt_drive_outbox",
       ownerColumn: "owner_id",
       sourceBucket: "private-receipts",
       targetTable: null,
+      allowedRoot: projectRootFolderId,
       extraSelect: ",receipt_kind",
     },
   ];
@@ -145,6 +180,7 @@ export default async function handler(req, res) {
   for (const row of rows) {
     try {
       await supabaseRequest(supabaseUrl, serviceKey, `${row.table}?id=eq.${row.id}`, { method: "PATCH", body: JSON.stringify({ status: "processing", attempts: row.attempts + 1, last_error: null, updated_at: new Date().toISOString() }) });
+      validateQueueRow(row, user.id, profileFolder);
       const relativePath = row.receipt_kind
         ? `${accountFolder}/${row.receipt_kind === "subscription" ? "Suscripciones" : "Comprobantes"}`
         : row.target_relative_path;

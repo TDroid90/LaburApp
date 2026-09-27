@@ -16,6 +16,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "LaburApp · Administración",
   description: "Panel privado de operaciones de LaburApp",
+  robots: { index: false, follow: false, nocache: true },
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

@@ -1,23 +1,27 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Image,
+  Keyboard,
+  KeyboardAvoidingView,
   Modal,
   Platform,
-  SafeAreaView,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
-  useWindowDimensions,
   View,
 } from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import * as Clipboard from "expo-clipboard";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as Linking from "expo-linking";
+import Head from "expo-router/head";
 import QRCode from "react-native-qrcode-svg";
 import { containsContactAttempt, containsPriceAttempt, reviewIsEligible } from "@laburapp/shared";
 import { PortfolioEditor } from "../components/PortfolioEditor";
@@ -45,7 +49,21 @@ import {
   SavedSession,
 } from "../lib/local-store";
 import { enqueueMirrorEvent, flushMirrorEvents } from "../lib/mirror-events";
+import { resilientRead, safeRemoteErrorMessage, withTimeout } from "../lib/network-resilience";
+import {
+  backendApiUrl,
+  isAllowedNativeRecoveryUrl,
+  nativeRecoveryRedirectUrl,
+  publicAppUrl,
+  webAuthRedirectUrl,
+} from "../lib/public-app-url";
 import { supabase } from "../lib/supabase";
+import { AppShell } from "../src/layouts/AppShell";
+import { useRequestSync } from "../src/hooks/useRequestSync";
+import { useResponsiveLayout } from "../src/layouts/useResponsiveLayout";
+import { isDemoAccessEnabled, passwordSecurityError, readableAuthError, shouldClearSessionOnAuthEvent } from "../src/features/auth/auth-helpers";
+import { parseCompletionToken } from "../src/features/completion/completion-qr";
+import { DOCUMENT_IMAGE_POLICY, longestSideResize, PHOTO_IMAGE_POLICY, pickedImageError } from "../src/services/image-safety";
 
 const providers = [
   {
@@ -672,6 +690,7 @@ type AdminSubscriptionRequest = {
 
 const CONTACT_WARNING = "No está permitido compartir teléfonos de contacto o emails.";
 const FREE_WEEKLY_REQUEST_LIMIT = 3;
+const PREMIUM_WEEKLY_REQUEST_LIMIT = 7;
 const REQUEST_LIFETIME_MS = 5 * 24 * 60 * 60 * 1000;
 const CLIENT_HISTORY_MS = 183 * 24 * 60 * 60 * 1000;
 
@@ -994,8 +1013,12 @@ const darkColors: typeof lightColors = {
 };
 type ThemeColors = typeof lightColors;
 const THEME_STORAGE_KEY = "laburapp-color-theme";
+const LAST_TAB_STORAGE_KEY = "laburapp:last-tab";
 const officialWordmark = require("../assets/brand/laburapp-wordmark-clean.png");
-const demoAccessEnabled = process.env.EXPO_PUBLIC_DEMO_ACCESS === "true";
+const demoAccessEnabled = isDemoAccessEnabled(
+  process.env.EXPO_PUBLIC_DEMO_ACCESS,
+  process.env.EXPO_PUBLIC_APP_ENV,
+);
 const cityChoices = [
   "San Sebastián",
   "Río Grande",
@@ -1007,30 +1030,6 @@ const driveProfessionalsFolderId = "1YyLePscAWsVX8O9aIKaQTaMHSPpMq3ZD";
 const driveProjectRootFolderId = "1Y8lNj4zpDXRA_ASUn0GCRmbtI9TE2QfI";
 const GUEST_PREVIEW_MS = 15_000;
 
-function passwordSecurityError(value: string) {
-  if (value.length < 12) return "La contraseña debe tener al menos 12 caracteres.";
-  if (!/[a-záéíóúñ]/.test(value) || !/[A-ZÁÉÍÓÚÑ]/.test(value))
-    return "Incluí al menos una mayúscula y una minúscula.";
-  if (!/\d/.test(value) || !/[^A-Za-zÁÉÍÓÚáéíóúÑñ0-9]/.test(value))
-    return "Incluí al menos un número y un símbolo.";
-  return null;
-}
-
-function readableAuthError(message: string) {
-  const normalized = message.toLowerCase();
-  if (normalized.includes("invalid login credentials"))
-    return "El correo o la contraseña no son correctos.";
-  if (normalized.includes("email not confirmed"))
-    return "Confirmá tu correo antes de ingresar.";
-  if (normalized.includes("user already registered"))
-    return "Ya existe una cuenta con ese correo.";
-  if (normalized.includes("rate limit") || normalized.includes("too many requests"))
-    return "Hiciste varios intentos seguidos. Esperá unos minutos y volvé a probar.";
-  if (normalized.includes("password should be") || normalized.includes("weak password"))
-    return "La contraseña no cumple los requisitos de seguridad.";
-  return "No pudimos completar el acceso. Volvé a intentarlo.";
-}
-
 function readableProfileError(message: string) {
   const normalized = message.toLowerCase();
   if (normalized.includes("auth_required") || normalized.includes("jwt") || normalized.includes("row-level security"))
@@ -1038,7 +1037,7 @@ function readableProfileError(message: string) {
   if (normalized.includes("invalid_city")) return "Elegí una ciudad válida de la lista.";
   if (normalized.includes("invalid_availability")) return "Revisá el horario: el final debe ser posterior al inicio.";
   if (normalized.includes("invalid_trade")) return "Elegí al menos un oficio o profesión.";
-  if (normalized.includes("free_service_limit")) return "El plan gratis permite hasta 2 servicios.";
+  if (normalized.includes("service_limit")) return "Tu plan alcanzó el límite de servicios publicados.";
   if (normalized.includes("duplicate") || normalized.includes("unique"))
     return "Hay un dato repetido en el perfil. Revisalo y volvé a guardar.";
   return "No pudimos guardar el perfil. Tus datos siguen en pantalla para que vuelvas a intentarlo.";
@@ -1063,6 +1062,15 @@ function AppModal({
   onRequestClose: () => void;
   children: ReactNode;
 }) {
+  useEffect(() => {
+    if (!visible || Platform.OS !== "web" || typeof document === "undefined") return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onRequestClose();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [onRequestClose, visible]);
+
   if (!visible) return null;
   if (Platform.OS === "web") return <>{children}</>;
   return (
@@ -1078,11 +1086,12 @@ function AppModal({
 }
 
 export default function Home() {
-  const { width } = useWindowDimensions();
+  const responsive = useResponsiveLayout();
+  const insets = useSafeAreaInsets();
   const linkingUrl = Linking.useLinkingURL();
   const [darkMode, setDarkMode] = useState(true);
   const colors = darkMode ? darkColors : lightColors;
-  const styles = useMemo(() => createStyles(colors), [darkMode]);
+  const styles = useMemo(() => createStyles(colors, insets.top, insets.bottom), [darkMode, insets.top, insets.bottom]);
   const [query, setQuery] = useState("");
   const [providerSort, setProviderSort] = useState<ProviderSort>("recent");
   const [cityFilter, setCityFilter] = useState("Todas");
@@ -1130,6 +1139,8 @@ export default function Home() {
   const [publishedProviders, setPublishedProviders] = useState<Provider[]>([]);
   const [providerDirectoryLoading, setProviderDirectoryLoading] = useState(true);
   const [providerDirectoryError, setProviderDirectoryError] = useState("");
+  const [requestsLoading, setRequestsLoading] = useState(false);
+  const [requestsError, setRequestsError] = useState("");
   const [hydrated, setHydrated] = useState(false);
   const [authName, setAuthName] = useState("");
   const [authEmail, setAuthEmail] = useState("");
@@ -1172,6 +1183,7 @@ export default function Home() {
   const [chatRequestId, setChatRequestId] = useState<string | null>(null);
   const [chatMessage, setChatMessage] = useState("");
   const [chatError, setChatError] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
   const [seenRequests, setSeenRequests] = useState<Record<string, { status: string; messageAt: string }> | null>(null);
   const [seenRequestsLoaded, setSeenRequestsLoaded] = useState(false);
   const [reviewRequestId, setReviewRequestId] = useState<string | null>(null);
@@ -1180,8 +1192,10 @@ export default function Home() {
   const [reviewQualities, setReviewQualities] = useState<string[]>([]);
   const [customReviewQuality, setCustomReviewQuality] = useState("");
   const [reviewError, setReviewError] = useState("");
+  const [reviewBusy, setReviewBusy] = useState(false);
   const [appealReview, setAppealReview] = useState<SavedProfileReview | null>(null);
   const [appealReason, setAppealReason] = useState("");
+  const [appealBusy, setAppealBusy] = useState(false);
   const [acceptQuoteRequestId, setAcceptQuoteRequestId] = useState<string | null>(null);
   const [completionQr, setCompletionQr] = useState<{ requestId: string; value: string } | null>(null);
   const [qrBusy, setQrBusy] = useState(false);
@@ -1191,10 +1205,16 @@ export default function Home() {
   const [completionReceiptUri, setCompletionReceiptUri] = useState<string | null>(null);
   const [completionError, setCompletionError] = useState("");
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const [cameraAvailable, setCameraAvailable] = useState<boolean | null>(null);
+  const qrScanLockRef = useRef(false);
+  const sessionRef = useRef<SavedSession | null>(null);
+  const intentionalSignOutRef = useRef(false);
   const [clientPlan, setClientPlan] = useState<"free" | "plus">("free");
   const [membershipEndsAt, setMembershipEndsAt] = useState<string | null>(null);
   const [accountPublicId, setAccountPublicId] = useState<string | null>(null);
   const [subscriptionModal, setSubscriptionModal] = useState(false);
+  const [aliasCopied, setAliasCopied] = useState(false);
+  const [comparePlansOpen, setComparePlansOpen] = useState(false);
   const [subscriptionMonths, setSubscriptionMonths] = useState<1 | 3 | 6 | 12>(1);
   const [subscriptionReceiptUri, setSubscriptionReceiptUri] = useState<string | null>(null);
   const [subscriptionBusy, setSubscriptionBusy] = useState(false);
@@ -1208,10 +1228,12 @@ export default function Home() {
   const [adminSubscriptionsError, setAdminSubscriptionsError] = useState("");
   const [clientPhotoBusy, setClientPhotoBusy] = useState(false);
   const reviewQualityLimit = clientPlan === "plus" ? 6 : 3;
+  const weeklyRequestLimit = clientPlan === "plus" ? PREMIUM_WEEKLY_REQUEST_LIMIT : FREE_WEEKLY_REQUEST_LIMIT;
   const [quoteBuilderRequestId, setQuoteBuilderRequestId] = useState<
     string | null
   >(null);
-  const compactHeader = width < 720;
+  const [quoteBuilderBusy, setQuoteBuilderBusy] = useState(false);
+  const compactHeader = responsive.isCompact;
   const authButtonLabel = signedInName
     ? `Hola, ${signedInName.split(" ")[0]}`
     : "Ingresar";
@@ -1222,6 +1244,12 @@ export default function Home() {
       ? ["Inicio", "Panel"]
       : ["Inicio", "Solicitudes", "QR", "Contratados", "Perfil"];
   const isDemoSession = session?.email.endsWith("@laburapp.demo") ?? false;
+  const requestSync = useRequestSync({
+    client: supabase,
+    enabled: !!session && !isDemoSession,
+    userKey: currentUserId ?? session?.role ?? "account",
+    onRefresh: () => setRequestRefresh((current) => current + 1),
+  });
   const requestToQuoteRate = adminPlatformMetrics?.activity.requests
     ? Math.round((adminPlatformMetrics.activity.quotes / adminPlatformMetrics.activity.requests) * 100)
     : 0;
@@ -1229,6 +1257,22 @@ export default function Home() {
     ? Math.round((adminPlatformMetrics.activity.jobs / adminPlatformMetrics.activity.quotes) * 100)
     : 0;
   const topAdminCity = adminPlatformMetrics?.cities[0];
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void CameraView.isAvailableAsync()
+      .then((available) => {
+        if (!cancelled) setCameraAvailable(available);
+      })
+      .catch(() => {
+        if (!cancelled) setCameraAvailable(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     setSeenRequests(null);
@@ -1291,14 +1335,29 @@ export default function Home() {
         (!saved.providerProfile || !saved.providerProfile.portfolioWorks?.length)
           ? createDemoProviderProfile(restoredSession.name)
           : restoredSession?.role === "provider" ? saved.providerProfile : null;
+      const lastTab = await AsyncStorage.getItem(LAST_TAB_STORAGE_KEY);
+      if (restoredSession && lastTab && ["Inicio", "Solicitudes", "Contratados", "Perfil", "QR", "Panel"].includes(lastTab)) {
+        setTab(restoredSession.role === "admin" && lastTab === "Perfil" ? "Panel" : lastTab);
+      }
       setSession(restoredSession);
       setSignedInName(restoredSession?.name ?? null);
       setRequests(restoredSession ? saved.requests : []);
       setProviderProfile(restoredProviderProfile);
       if (restoredProviderProfile) setProfileDraft(restoredProviderProfile);
       setHydrated(true);
+    }).catch(() => {
+      setSession(null);
+      setSignedInName(null);
+      setRequests([]);
+      setProviderProfile(null);
+      setRequested("No pudimos restaurar los datos guardados. Podés volver a ingresar.");
+      setHydrated(true);
     });
   }, []);
+
+  useEffect(() => {
+    if (hydrated && session) void AsyncStorage.setItem(LAST_TAB_STORAGE_KEY, tab);
+  }, [hydrated, session?.email, tab]);
 
   useEffect(() => {
     if (!hydrated || session) {
@@ -1322,12 +1381,25 @@ export default function Home() {
         setAuthPasswordConfirm("");
         setAuthMode("update-password");
       }
+      if (shouldClearSessionOnAuthEvent(event, sessionRef.current?.email)) {
+        const intentional = intentionalSignOutRef.current;
+        intentionalSignOutRef.current = false;
+        setSession(null);
+        setSignedInName(null);
+        setCurrentUserId(null);
+        setRequests([]);
+        setProviderProfile(null);
+        setTab("Inicio");
+        setAuthMode("login");
+        setRequested(intentional ? "Sesión cerrada." : "Tu sesión venció. Ingresá nuevamente para continuar.");
+      }
     });
     return () => data.subscription.unsubscribe();
   }, []);
 
   useEffect(() => {
-    if (!supabase || !linkingUrl || Platform.OS === "web" || processedRecoveryUrl === linkingUrl) return;
+    if (!supabase || !linkingUrl || Platform.OS === "web" || processedRecoveryUrl === linkingUrl
+      || !isAllowedNativeRecoveryUrl(linkingUrl)) return;
     const parsed = Linking.parse(linkingUrl);
     const code = typeof parsed.queryParams?.code === "string" ? parsed.queryParams.code : null;
     const isRecovery = parsed.path === "recover-password" || parsed.queryParams?.type === "recovery";
@@ -1391,8 +1463,18 @@ export default function Home() {
       return;
     }
     let cancelled = false;
+    const client = supabase;
     void (async () => {
-      const result = await supabase.rpc("discover_published_providers");
+      let result;
+      try {
+        result = await resilientRead(() => Promise.resolve(client.rpc("discover_published_providers")));
+      } catch (error) {
+        if (!cancelled) {
+          setProviderDirectoryError(safeRemoteErrorMessage(error));
+          setProviderDirectoryLoading(false);
+        }
+        return;
+      }
       if (cancelled) return;
       if (result.error) {
         setProviderDirectoryError("No pudimos cargar los profesionales publicados. Actualizá la página en unos segundos.");
@@ -1401,23 +1483,28 @@ export default function Home() {
       }
       const providerRows = result.data ?? [];
       const providerIds = providerRows.map((row: any) => String(row.provider_id)).filter(Boolean);
-      const reviewsResult = providerIds.length
-        ? await supabase.from("reviews").select("id, provider_id, rating, comment, qualities, created_at").in("provider_id", providerIds).is("moderated_at", null).order("created_at", { ascending: false })
-        : { data: [] as any[] };
+      let reviewsResult: { data: any[] | null } = { data: [] };
+      if (providerIds.length) {
+        try {
+          reviewsResult = await resilientRead(() => Promise.resolve(client.rpc("discover_published_reviews")));
+        } catch {
+          // Las reseñas complementan el directorio: una caída temporal no debe ocultar profesionales.
+        }
+      }
       const reviewsByProvider = new Map<string, SavedProfileReview[]>();
       for (const row of reviewsResult.data ?? []) {
-        const providerId = String((row as any).provider_id ?? "");
-        if (!providerId) continue;
-        const list = reviewsByProvider.get(providerId) ?? [];
+        const providerPublicId = String((row as any).provider_public_id ?? "");
+        if (!providerPublicId) continue;
+        const list = reviewsByProvider.get(providerPublicId) ?? [];
         if (list.length < 3) list.push({
-          id: String((row as any).id),
+          id: `${providerPublicId}-${String((row as any).created_at ?? "review")}`,
           authorName: "Cliente verificado",
           rating: Number((row as any).rating ?? 0),
           comment: String((row as any).comment ?? ""),
           qualities: Array.isArray((row as any).qualities) ? (row as any).qualities.map(String) : [],
           createdAt: String((row as any).created_at ?? ""),
         });
-        reviewsByProvider.set(providerId, list);
+        reviewsByProvider.set(providerPublicId, list);
       }
       const directory = providerRows.map((row: any): Provider => {
         const publishedWorks: PublicPortfolioWork[] = (Array.isArray(row.works) ? row.works : []).map((work: any) => ({
@@ -1425,7 +1512,7 @@ export default function Home() {
           title: String(work.title ?? "Trabajo realizado"),
           description: String(work.description ?? ""),
           photoUris: (Array.isArray(work.photos) ? work.photos : []).map((storagePath: string) =>
-            supabase!.storage.from("portfolio").getPublicUrl(String(storagePath)).data.publicUrl,
+            client.storage.from("portfolio").getPublicUrl(String(storagePath)).data.publicUrl,
           ),
         }));
         const tradeTitle = String(row.trade_title ?? "Servicio profesional");
@@ -1447,13 +1534,18 @@ export default function Home() {
           availabilityStart: String(row.availability_start ?? "08:00").slice(0, 5),
           availabilityEnd: String(row.availability_end ?? "18:00").slice(0, 5),
           portfolioWorks: publishedWorks,
-          profileReviews: reviewsByProvider.get(String(row.provider_id)) ?? [],
+          profileReviews: reviewsByProvider.get(String(row.public_id)) ?? [],
         };
       });
       setPublishedProviders((current) => JSON.stringify(current) === JSON.stringify(directory) ? current : directory);
       setProviderDirectoryError("");
       setProviderDirectoryLoading(false);
-    })();
+    })().catch((error) => {
+      if (!cancelled) {
+        setProviderDirectoryError(safeRemoteErrorMessage(error));
+        setProviderDirectoryLoading(false);
+      }
+    });
     return () => { cancelled = true; };
   }, [hydrated, isDemoSession, requestRefresh, providerProfile?.published]);
 
@@ -1591,25 +1683,32 @@ export default function Home() {
       };
       setProviderProfile((current) => JSON.stringify(current) === JSON.stringify(hydratedProfile) ? current : hydratedProfile);
       if (!profileModal && !portfolioModal) setProfileDraft(hydratedProfile);
-    })();
+    })().catch(() => {
+      if (!cancelled) setProfileError("No pudimos actualizar tu perfil. Reintentá en unos segundos.");
+    });
     return () => { cancelled = true; };
   }, [hydrated, session?.email, session?.role, isDemoSession, requestRefresh]);
 
   useEffect(() => {
     if (!hydrated || !session || !supabase || isDemoSession) return;
     let cancelled = false;
+    const client = supabase;
     void (async () => {
-      const userResult = await supabase.auth.getUser();
+      setRequestsLoading(true);
+      setRequestsError("");
+      const userResult = await client.auth.getUser();
       const currentUserId = userResult.data.user?.id;
-      if (!currentUserId || cancelled) return;
+      if (!currentUserId || cancelled) {
+        if (!cancelled) setRequestsLoading(false);
+        return;
+      }
       setCurrentUserId(currentUserId);
-      await supabase.rpc("purge_expired_client_data");
       if (session.role !== "admin") {
-        const [membership, identity] = await Promise.all([supabase
+        const [membership, identity] = await Promise.all([client
           .from("client_memberships")
           .select("plan_code, status, current_period_ends_at")
           .eq("client_id", currentUserId)
-          .maybeSingle(), supabase.from("profiles").select("public_id").eq("id", currentUserId).maybeSingle()]);
+          .maybeSingle(), client.from("profiles").select("public_id").eq("id", currentUserId).maybeSingle()]);
         if (!cancelled) {
           const active = membership.data?.plan_code === "plus" && membership.data.status === "active"
             && (!membership.data.current_period_ends_at || new Date(membership.data.current_period_ends_at).getTime() > Date.now());
@@ -1618,21 +1717,40 @@ export default function Home() {
           setAccountPublicId(identity.data?.public_id ?? null);
         }
       }
-      const result = await supabase
-        .from("service_requests")
-        .select("id, client_id, provider_id, description, approximate_zone, desired_at, preferred_start_time, preferred_end_time, status, created_at, expires_at, completion_verified_at, previous_status, cancellation_reason, cancelled_at, profiles!service_requests_provider_id_fkey(full_name), client:profiles!service_requests_client_id_fkey(full_name), quotes(total, scope, eta, version, pricing_mode, items, notes, valid_days, expires_at), jobs(id, completion_verified_at, updated_at, reviews(id, rating, comment, qualities, created_at), completion_confirmations(status, receipt_path)), messages(id, sender_id, body, created_at, expires_at), client_request_attachments(id, storage_path, position, drive_sync_status)")
-        .gte("created_at", new Date(Date.now() - CLIENT_HISTORY_MS).toISOString())
-        .order("created_at", { ascending: false });
-      if (result.error || cancelled) return;
+      let result;
+      try {
+        result = await resilientRead(() => Promise.resolve(client
+          .from("service_requests")
+          .select("id, client_id, provider_id, description, approximate_zone, desired_at, preferred_start_time, preferred_end_time, status, created_at, expires_at, completion_verified_at, previous_status, cancellation_reason, cancelled_at, quotes(total, scope, eta, version, pricing_mode, items, notes, valid_days, expires_at), jobs(id, completion_verified_at, updated_at, reviews(id, rating, comment, qualities, created_at), completion_confirmations(status, receipt_path)), messages(id, sender_id, body, created_at, expires_at), client_request_attachments(id, storage_path, position, drive_sync_status)")
+          .gte("created_at", new Date(Date.now() - CLIENT_HISTORY_MS).toISOString())
+          .order("created_at", { ascending: false })));
+      } catch (error) {
+        if (!cancelled) {
+          setRequestsError(safeRemoteErrorMessage(error));
+          setRequestsLoading(false);
+        }
+        return;
+      }
+      if (cancelled) return;
+      if (result.error) {
+        setRequestsError("No pudimos actualizar tus solicitudes. Reintentá.");
+        setRequestsLoading(false);
+        return;
+      }
       const providerIds = Array.from(new Set((result.data ?? []).map((row: any) => row.provider_id)));
+      const participantIds = Array.from(new Set((result.data ?? []).flatMap((row: any) => [row.client_id, row.provider_id])));
+      const profileSummaries = participantIds.length
+        ? await client.rpc("get_visible_profile_summaries", { target_ids: participantIds })
+        : { data: [] as any[] };
+      const profileNames = new Map<string, string>((profileSummaries.data ?? []).map((profile: any) => [String(profile.id), String(profile.full_name)]));
       const tradesResult = providerIds.length
-        ? await supabase.from("provider_services").select("provider_id, trade_name, position").in("provider_id", providerIds).order("position")
+        ? await client.from("provider_services").select("provider_id, trade_name, position").in("provider_id", providerIds).order("position")
         : { data: [] };
       const trades = new Map<string, string>();
       for (const row of tradesResult.data ?? []) if (!trades.has(row.provider_id)) trades.set(row.provider_id, row.trade_name);
       const remoteRequests: SavedRequest[] = await Promise.all((result.data ?? []).map(async (row: any) => {
-        const profile = Array.isArray(row.profiles) ? row.profiles[0] : row.profiles;
-        const clientProfile = Array.isArray(row.client) ? row.client[0] : row.client;
+        const providerName = profileNames.get(String(row.provider_id));
+        const clientName = profileNames.get(String(row.client_id));
         const viewerRole: "client" | "provider" = row.provider_id === currentUserId ? "provider" : "client";
         const quoteRows = Array.isArray(row.quotes) ? [...row.quotes].sort((a, b) => b.version - a.version) : [];
         const quote = quoteRows[0];
@@ -1655,7 +1773,7 @@ export default function Home() {
           : [];
         const attachments: SavedRequestPhoto[] = [];
         for (const attachment of attachmentRows) {
-          const signed = await supabase!.storage.from("request-photos").createSignedUrl(attachment.storage_path, 5 * 24 * 60 * 60);
+          const signed = await client.storage.from("request-photos").createSignedUrl(attachment.storage_path, 5 * 24 * 60 * 60);
           if (signed.data?.signedUrl) attachments.push({
             id: attachment.id,
             uri: signed.data.signedUrl,
@@ -1668,11 +1786,11 @@ export default function Home() {
           displayId: requestDisplayId(row.id),
           jobId: job?.id,
           clientId: row.client_id,
-          clientName: clientProfile?.full_name ?? "Cliente",
+          clientName: clientName ?? "Cliente",
           providerId: row.provider_id,
           viewerRole,
           clientEmail: viewerRole === "client" ? session.email : undefined,
-          provider: profile?.full_name ?? providerProfile?.displayName ?? "Profesional",
+          provider: providerName ?? providerProfile?.displayName ?? "Profesional",
           trade: trades.get(row.provider_id) ?? "Servicio profesional",
           description: row.description,
           zone: row.approximate_zone ?? "",
@@ -1708,11 +1826,20 @@ export default function Home() {
           messageAt: request.messages?.at(-1)?.createdAt ?? request.createdAt,
         }])));
       }
-      if (!cancelled) setRequests((current) => {
-        const next = [...remoteRequests, ...current.filter((local) => !remoteRequests.some((remote) => remote.id === local.id))];
-        return JSON.stringify(current) === JSON.stringify(next) ? current : next;
-      });
-    })();
+      if (!cancelled) {
+        setRequests((current) => {
+          const next = [...remoteRequests, ...current.filter((local) => !remoteRequests.some((remote) => remote.id === local.id))];
+          return JSON.stringify(current) === JSON.stringify(next) ? current : next;
+        });
+        setRequestsError("");
+        setRequestsLoading(false);
+      }
+    })().catch((error) => {
+      if (!cancelled) {
+        setRequestsError(safeRemoteErrorMessage(error));
+        setRequestsLoading(false);
+      }
+    });
     return () => { cancelled = true; };
   }, [hydrated, session?.email, session?.role, isDemoSession, providerProfile?.displayName, providerProfile?.publicId, requestRefresh, seenRequestsLoaded]);
 
@@ -1722,21 +1849,6 @@ export default function Home() {
     setMembershipEndsAt(null);
     setAccountPublicId(null);
   }, [session?.email]);
-
-  useEffect(() => {
-    if (!supabase || !session || isDemoSession) return;
-    const realtimeClient = supabase;
-    const channel = realtimeClient
-      .channel(`requests-${session.email}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "service_requests" }, () => setRequestRefresh((current) => current + 1))
-      .on("postgres_changes", { event: "*", schema: "public", table: "quotes" }, () => setRequestRefresh((current) => current + 1))
-      .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, () => setRequestRefresh((current) => current + 1))
-      .on("postgres_changes", { event: "*", schema: "public", table: "credentials" }, () => setRequestRefresh((current) => current + 1))
-      .on("postgres_changes", { event: "*", schema: "public", table: "subscription_requests" }, () => setRequestRefresh((current) => current + 1))
-      .subscribe();
-    const refreshTimer = setInterval(() => setRequestRefresh((current) => current + 1), 3000);
-    return () => { clearInterval(refreshTimer); void realtimeClient.removeChannel(channel); };
-  }, [session?.email, isDemoSession]);
 
   useEffect(() => {
     if (tab !== "Panel" || session?.role !== "admin" || isDemoSession) return;
@@ -1806,8 +1918,8 @@ export default function Home() {
       const payload = await response.json();
       if (!response.ok) throw new Error(payload.error ?? "No pudimos leer las métricas.");
       setAdminPlatformMetrics(payload as AdminPlatformMetrics);
-    } catch (error) {
-      setAdminReviewError(error instanceof Error ? error.message : "No pudimos leer las métricas reales.");
+    } catch {
+      setAdminReviewError("No pudimos leer las métricas reales. Reintentá.");
     }
     setAdminMetricsLoading(false);
   }
@@ -1824,7 +1936,7 @@ export default function Home() {
       .limit(50);
     if (result.error) {
       setAdminReviewsLoading(false);
-      setAdminReviewError(result.error.message);
+      setAdminReviewError("No pudimos cargar las revisiones pendientes. Reintentá.");
       return;
     }
     const rows = result.data ?? [];
@@ -1912,8 +2024,8 @@ export default function Home() {
               : `${payload.source} requiere una revisión manual.`,
         });
       }
-    } catch (error) {
-      setAdminReviewError(error instanceof Error ? error.message : "No pudimos consultar el padrón.");
+    } catch {
+      setAdminReviewError("No pudimos consultar el padrón. Reintentá o abrí la fuente oficial.");
     } finally {
       setRegistryBusy(false);
     }
@@ -1929,7 +2041,7 @@ export default function Home() {
       const worker = await createWorker("spa");
       let recognition;
       try {
-        recognition = await worker.recognize(item.signedUrl);
+        recognition = await withTimeout(worker.recognize(item.signedUrl), 30_000);
       } finally {
         await worker.terminate();
       }
@@ -1971,7 +2083,7 @@ export default function Home() {
     });
     if (result.error) {
       setAdminReviewsLoading(false);
-      return setAdminReviewError(result.error.message);
+      return setAdminReviewError("No pudimos guardar la revisión. Reintentá.");
     }
     setExpandedAdminCredentialId(null);
     setRegistryResult(null);
@@ -1986,14 +2098,24 @@ export default function Home() {
   }
 
   async function submitAuth() {
+    if (authBusy) return;
     setAuthError("");
+    if (!supabase && !demoAccessEnabled) {
+      return setAuthError("El acceso no está configurado en esta instalación.");
+    }
     if (authMode === "update-password") {
       const securityError = passwordSecurityError(authPassword);
       if (securityError) return setAuthError(securityError);
       if (authPassword !== authPasswordConfirm) return setAuthError("Las contraseñas no coinciden.");
       if (!supabase) return setAuthError("La recuperación requiere conexión con la base segura.");
       setAuthBusy(true);
-      const result = await supabase.auth.updateUser({ password: authPassword });
+      let result;
+      try {
+        result = await withTimeout(Promise.resolve(supabase.auth.updateUser({ password: authPassword })), 15_000);
+      } catch (error) {
+        setAuthBusy(false);
+        return setAuthError(safeRemoteErrorMessage(error));
+      }
       if (!result.error) await supabase.rpc("complete_password_change");
       setAuthBusy(false);
       if (result.error) return setAuthError(readableAuthError(result.error.message));
@@ -2012,16 +2134,22 @@ export default function Home() {
       return setAuthError("Ingresá un correo válido.");
     if (authMode === "recovery") {
       setAuthBusy(true);
-      const { error } = supabase
-        ? await supabase.auth.resetPasswordForEmail(
-            authEmail.trim().toLowerCase(),
-            {
-              redirectTo: Platform.OS === "web"
-                ? (typeof window !== "undefined" ? window.location.origin : process.env.EXPO_PUBLIC_APP_URL ?? "https://laburapp-iota.vercel.app")
-                : Linking.createURL("recover-password"),
-            },
-          )
-        : { error: null };
+      let error = null;
+      try {
+        ({ error } = supabase
+          ? await withTimeout(Promise.resolve(supabase.auth.resetPasswordForEmail(
+              authEmail.trim().toLowerCase(),
+              {
+                redirectTo: Platform.OS === "web"
+                  ? webAuthRedirectUrl(typeof window !== "undefined" ? window.location.origin : undefined)
+                  : nativeRecoveryRedirectUrl(),
+              },
+            )), 15_000)
+          : { error: null });
+      } catch (remoteError) {
+        setAuthBusy(false);
+        return setAuthError(safeRemoteErrorMessage(remoteError));
+      }
       setAuthBusy(false);
       if (error) return setAuthError(readableAuthError(error.message));
       setAuthMode(guestGateLocked ? "login" : null);
@@ -2052,19 +2180,24 @@ export default function Home() {
     let photoUri: string | undefined;
     let mustChangePassword = false;
     if (supabase) {
-      const result =
-        authMode === "register"
-          ? await supabase.auth.signUp({
+      let result;
+      try {
+        result = authMode === "register"
+          ? await withTimeout(Promise.resolve(supabase.auth.signUp({
               email: authEmail.trim().toLowerCase(),
               password: authPassword,
               options: {
                 data: { full_name: name, role: "client", city: authCity },
               },
-            })
-          : await supabase.auth.signInWithPassword({
+            })), 15_000)
+          : await withTimeout(Promise.resolve(supabase.auth.signInWithPassword({
               email: authEmail.trim().toLowerCase(),
               password: authPassword,
-            });
+            })), 15_000);
+      } catch (error) {
+        setAuthBusy(false);
+        return setAuthError(safeRemoteErrorMessage(error));
+      }
       if (result.error) {
         setAuthBusy(false);
         return setAuthError(readableAuthError(result.error.message));
@@ -2103,10 +2236,12 @@ export default function Home() {
       const demo = demoAccounts.find(
         (account) => account.email === authEmail.trim().toLowerCase(),
       );
-      if (demo) {
-        name = demo.name;
-        resolvedRole = demo.role;
+      if (!demo) {
+        setAuthBusy(false);
+        return setAuthError("El correo o la contraseña no son correctos.");
       }
+      name = demo.name;
+      resolvedRole = demo.role;
     }
     const nextSession: SavedSession = {
       name,
@@ -2135,6 +2270,7 @@ export default function Home() {
   }
 
   function loginDemoAccount(account: SavedSession) {
+    if (!demoAccessEnabled) return;
     setSession(account);
     setSignedInName(account.name);
     setAuthMode(null);
@@ -2165,12 +2301,11 @@ export default function Home() {
       if (result.canceled) return;
       const optimizedPhotos: SavedRequestPhoto[] = [];
       for (const asset of result.assets.slice(0, remaining)) {
-        const resize = asset.width >= asset.height
-          ? { width: Math.min(asset.width, 1280) }
-          : { height: Math.min(asset.height, 1280) };
+        const validationError = pickedImageError(asset, PHOTO_IMAGE_POLICY);
+        if (validationError) throw new Error(validationError);
         const optimized = await ImageManipulator.manipulateAsync(
           asset.uri,
-          [{ resize }],
+          longestSideResize(asset.width, asset.height, 1280),
           { compress: 0.62, format: ImageManipulator.SaveFormat.JPEG },
         );
         optimizedPhotos.push({
@@ -2181,13 +2316,13 @@ export default function Home() {
         });
       }
       setQuotePhotos((current) => [...current, ...optimizedPhotos].slice(0, 3));
-    } catch {
-      setQuoteError("No pudimos preparar las fotos. Probá nuevamente con imágenes JPG o PNG.");
+    } catch (error) {
+      setQuoteError(error instanceof Error && error.message ? error.message : "No pudimos preparar las fotos. Probá nuevamente con imágenes JPG o PNG.");
     }
   }
 
   async function submitQuote() {
-    if (!quoteProvider) return;
+    if (!quoteProvider || quoteBusy) return;
     setQuoteError("");
     const weeklyRequests = requests.filter(
       (request) =>
@@ -2195,9 +2330,11 @@ export default function Home() {
         new Date(request.createdAt).getTime() >= startOfCurrentWeek() &&
         request.status !== "cancelled",
     ).length;
-    if (clientPlan === "free" && weeklyRequests >= FREE_WEEKLY_REQUEST_LIMIT)
+    if (weeklyRequests >= weeklyRequestLimit)
       return setQuoteError(
-        "Ya usaste tus 3 solicitudes gratuitas de esta semana. Para pedir más necesitás la suscripción Cliente Plus.",
+        clientPlan === "plus"
+          ? "Ya usaste tus 7 solicitudes Premium de esta semana. El cupo se renueva al comenzar la próxima semana."
+          : "Ya usaste tus 3 solicitudes gratuitas de esta semana. Para pedir más necesitás Premium.",
       );
     if (quoteDescription.trim().length < 10)
       return setQuoteError("Contanos un poco más (mínimo 10 caracteres).");
@@ -2249,7 +2386,9 @@ export default function Home() {
           result = await supabase.from("service_requests").insert(compatiblePayload).select("id").single();
         }
         if (result.error) throw new Error(
-          result.error.message.includes("FREE_WEEKLY_REQUEST_LIMIT")
+          result.error.message.includes("PREMIUM_WEEKLY_REQUEST_LIMIT")
+            ? "Ya usaste tus 7 solicitudes Premium de esta semana. El cupo se renueva la próxima semana."
+            : result.error.message.includes("FREE_WEEKLY_REQUEST_LIMIT")
             ? "Ya usaste tus 3 solicitudes gratuitas de esta semana. Para pedir más necesitás Cliente Plus."
             : result.error.message.toLowerCase().includes("row-level security")
               ? "Tu sesión venció. Volvé a ingresar antes de enviar la solicitud."
@@ -2272,6 +2411,7 @@ export default function Home() {
             try {
               const response = await fetch(photo.uri);
               const blob = await response.blob();
+              if (blob.size > 4 * 1024 * 1024) throw new Error("IMAGE_TOO_LARGE");
               const storagePath = `${userData.user.id}/${requestId}/foto-${index + 1}.jpg`;
               const upload = await supabase.storage.from("request-photos").upload(storagePath, blob, {
                 contentType: "image/jpeg",
@@ -2308,8 +2448,7 @@ export default function Home() {
             const authState = await supabase.auth.getSession();
             const accessToken = authState.data.session?.access_token;
             if (accessToken) {
-              const appUrl = process.env.EXPO_PUBLIC_APP_URL ?? "https://laburapp-iota.vercel.app";
-              const syncResponse = await fetch(Platform.OS === "web" ? "/api/drive-sync" : `${appUrl}/api/drive-sync`, {
+              const syncResponse = await fetch(backendApiUrl("/api/drive-sync", Platform.OS === "web"), {
                 method: "POST",
                 headers: { authorization: `Bearer ${accessToken}` },
               });
@@ -2375,7 +2514,7 @@ export default function Home() {
       setQuoteEndTime("18:00");
       setQuoteTimePicker(null);
     } catch (error) {
-      setQuoteError(error instanceof Error ? error.message : "No pudimos enviar la solicitud.");
+      setQuoteError(safeRemoteErrorMessage(error, "No pudimos enviar la solicitud. Reintentá."));
     } finally {
       setQuoteBusy(false);
     }
@@ -2448,10 +2587,11 @@ export default function Home() {
   }
 
   async function saveProviderProfile(nextDraft: SavedProviderProfile) {
+    if (profileBusy) return;
     setProfileDraft(nextDraft);
     setProfileError("");
     setProfileBusy(true);
-    const services = (nextDraft.services ?? []).slice(0, 2);
+    const services = (nextDraft.services ?? []).slice(0, clientPlan === "plus" ? 6 : 2);
     const diagnosticPrice = nextDraft.diagnosticPrice ?? 0;
     const tariffItems = [
       {
@@ -2477,6 +2617,10 @@ export default function Home() {
       if (photoUri?.startsWith("data:")) {
         const photoResponse = await fetch(photoUri);
         const photoBlob = await photoResponse.blob();
+        if (photoBlob.size > 4 * 1024 * 1024) {
+          setProfileBusy(false);
+          return setProfileError("La foto de perfil sigue siendo demasiado pesada. Elegí otra imagen.");
+        }
         const photoPath = `${user.id}/avatar-${Date.now()}.jpg`;
         const { error: uploadError } = await supabase.storage
           .from("profile-photos")
@@ -2592,6 +2736,10 @@ export default function Home() {
         if (credential.imageUri && (!privatePath || credential.imageUri.startsWith("data:") || credential.imageUri.startsWith("file:") || credential.imageUri.startsWith("blob:"))) {
           const photoResponse = await fetch(credential.imageUri);
           const photoBlob = await photoResponse.blob();
+          if (photoBlob.size > 6 * 1024 * 1024) {
+            setProfileBusy(false);
+            return setProfileError(`El comprobante de ${credential.certification} sigue siendo demasiado pesado. Elegí una imagen más liviana.`);
+          }
           const safeCertification = credential.certification
             .normalize("NFD")
             .replace(/[\u0300-\u036f]/g, "")
@@ -2695,10 +2843,11 @@ export default function Home() {
   }
 
   async function savePortfolioWorks(nextWorks: SavedPortfolioWork[]) {
+    if (portfolioBusy) return;
     setPortfolioError("");
     setPortfolioBusy(true);
     const trimmedWorks = nextWorks
-      .slice(0, 3)
+      .slice(0, clientPlan === "plus" ? 6 : 3)
       .map((work) => ({ ...work, description: work.description.trim() }));
     if (!supabase || isDemoSession) {
       setProviderProfile((current) =>
@@ -2709,6 +2858,7 @@ export default function Home() {
       setRequested("Trabajos realizados guardados.");
       return;
     }
+    try {
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -2724,7 +2874,7 @@ export default function Home() {
       .single();
     if (profileResult.error) {
       setPortfolioBusy(false);
-      setPortfolioError(profileResult.error.message);
+      setPortfolioError("No pudimos preparar tu portfolio. Reintentá.");
       return;
     }
     const publicId = String(profileResult.data.public_id);
@@ -2735,7 +2885,7 @@ export default function Home() {
       .eq("provider_id", user.id);
     if (oldItemsResult.error) {
       setPortfolioBusy(false);
-      setPortfolioError(oldItemsResult.error.message);
+      setPortfolioError("No pudimos leer tu portfolio actual. Reintentá.");
       return;
     }
     const oldPaths = (oldItemsResult.data ?? [])
@@ -2752,9 +2902,7 @@ export default function Home() {
     if (deleteItems.error || deleteWorks.error) {
       setPortfolioBusy(false);
       setPortfolioError(
-        deleteItems.error?.message ??
-          deleteWorks.error?.message ??
-          "No pudimos actualizar el portfolio.",
+          "No pudimos actualizar el portfolio. Reintentá.",
       );
       return;
     }
@@ -2779,7 +2927,7 @@ export default function Home() {
         .single();
       if (insertedWork.error) {
         setPortfolioBusy(false);
-        setPortfolioError(insertedWork.error.message);
+        setPortfolioError(insertedWork.error.message.includes("PORTFOLIO_LIMIT") ? "Alcanzaste el límite de trabajos publicados de tu plan." : "No pudimos guardar uno de los trabajos. Reintentá.");
         return;
       }
       const storedPhotos = [];
@@ -2800,7 +2948,7 @@ export default function Home() {
           });
         if (uploadResult.error) {
           setPortfolioBusy(false);
-          setPortfolioError(uploadResult.error.message);
+          setPortfolioError("No pudimos subir una de las fotos. Reintentá.");
           return;
         }
         const publicUrl = supabase.storage
@@ -2821,7 +2969,7 @@ export default function Home() {
           });
         if (portfolioItem.error) {
           setPortfolioBusy(false);
-          setPortfolioError(portfolioItem.error.message);
+          setPortfolioError("No pudimos vincular una de las fotos. Reintentá.");
           return;
         }
         const driveFileName = `${workCode}_foto_${photoIndex + 1}.jpg`;
@@ -2837,7 +2985,7 @@ export default function Home() {
           });
         if (outboxResult.error) {
           setPortfolioBusy(false);
-          setPortfolioError(outboxResult.error.message);
+          setPortfolioError("Guardamos la foto, pero no pudimos preparar su copia. Reintentá.");
           return;
         }
         storedPhotos.push({
@@ -2868,8 +3016,7 @@ export default function Home() {
       const authState = await supabase.auth.getSession();
       const accessToken = authState.data.session?.access_token;
       if (accessToken) {
-        const appUrl = process.env.EXPO_PUBLIC_APP_URL ?? "https://laburapp-iota.vercel.app";
-        const syncResponse = await fetch(Platform.OS === "web" ? "/api/drive-sync" : `${appUrl}/api/drive-sync`, {
+        const syncResponse = await fetch(backendApiUrl("/api/drive-sync", Platform.OS === "web"), {
           method: "POST",
           headers: { authorization: `Bearer ${accessToken}` },
         });
@@ -2888,10 +3035,19 @@ export default function Home() {
         ? "Portfolio guardado y copiado en Drive."
         : "Portfolio guardado. La copia en Drive quedó en espera y se puede reintentar.",
     );
+    } catch (error) {
+      setPortfolioBusy(false);
+      setPortfolioError(safeRemoteErrorMessage(error, "No pudimos guardar el portfolio. Reintentá."));
+    }
   }
 
   function signOut() {
-    if (supabase) void supabase.auth.signOut();
+    if (supabase && session && !isDemoSession) {
+      intentionalSignOutRef.current = true;
+      void supabase.auth.signOut().catch(() => {
+        intentionalSignOutRef.current = false;
+      });
+    }
     setSession(null);
     setCurrentUserId(null);
     setSignedInName(null);
@@ -3023,6 +3179,7 @@ export default function Home() {
   }
 
   async function issueCompletionQr(request: SavedRequest) {
+    if (qrBusy) return;
     setQrBusy(true);
     try {
       let token = `DEMO-${request.id}`;
@@ -3043,28 +3200,56 @@ export default function Home() {
     }
   }
 
-  function confirmCompletionCode(rawValue: string) {
-    if (qrBusy || qrScanned) return;
+  function resetCompletionScan() {
+    qrScanLockRef.current = false;
+    setPendingCompletionToken(null);
+    setCompletionReceiptUri(null);
+    setCompletionError("");
+    setQrScanned(false);
+  }
+
+  async function requestQrCameraPermission() {
+    setCompletionError("");
     try {
-      const match = rawValue.match(/[?&]token=([^&]+)/);
-      const token = decodeURIComponent(match?.[1] ?? rawValue.trim());
-      if (!token || (token.startsWith("DEMO-") && !requests.some((request) => request.id === token.slice(5)))) throw new Error("invalid_token");
+      if (cameraPermission?.canAskAgain === false) {
+        await Linking.openSettings();
+        return;
+      }
+      await requestCameraPermission();
+    } catch {
+      setCompletionError("No pudimos abrir el permiso de cámara. Revisalo desde Ajustes.");
+    }
+  }
+
+  function confirmCompletionCode(rawValue: string) {
+    if (qrBusy || qrScanned || qrScanLockRef.current) return;
+    qrScanLockRef.current = true;
+    try {
+      const token = parseCompletionToken(rawValue);
+      if (token.startsWith("DEMO-") && !requests.some((request) => request.id === token.slice(5))) throw new Error("invalid_token");
       setQrScanned(true);
       setPendingCompletionToken(token);
       setCompletionError("");
       setManualQrCode("");
     } catch {
+      qrScanLockRef.current = false;
       setCompletionError("No pudimos leer ese código. Volvé a escanearlo o ingresalo manualmente.");
     }
   }
 
   async function pickCompletionReceipt() {
     setCompletionError("");
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: false, quality: 0.9 });
-    if (result.canceled || !result.assets[0]) return;
-    const image = result.assets[0];
-    const optimized = await ImageManipulator.manipulateAsync(image.uri, image.width > 1600 ? [{ resize: { width: 1600 } }] : [], { compress: 0.82, format: ImageManipulator.SaveFormat.JPEG });
-    setCompletionReceiptUri(optimized.uri);
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: false, quality: 0.9 });
+      if (result.canceled || !result.assets[0]) return;
+      const image = result.assets[0];
+      const validationError = pickedImageError(image, DOCUMENT_IMAGE_POLICY);
+      if (validationError) throw new Error(validationError);
+      const optimized = await ImageManipulator.manipulateAsync(image.uri, longestSideResize(image.width, image.height, 1600), { compress: 0.82, format: ImageManipulator.SaveFormat.JPEG });
+      setCompletionReceiptUri(optimized.uri);
+    } catch (error) {
+      setCompletionError(error instanceof Error && error.message ? error.message : "No pudimos abrir esa imagen. Probá con otra captura guardada en el teléfono.");
+    }
   }
 
   async function submitCompletionEvidence() {
@@ -3117,16 +3302,20 @@ export default function Home() {
       setPendingCompletionToken(null);
       setCompletionReceiptUri(null);
       setQrScanned(false);
+      qrScanLockRef.current = false;
       setTab("Contratados");
       setRequested(completedWithReceipt ? "Comprobante adjuntado. Trabajo finalizado; ya podés dejar tu reseña." : "Confirmación enviada. El prestador debe confirmar la finalización antes de habilitar la reseña.");
     } catch (error) {
       setCompletionError(error instanceof Error && error.message === "IMAGE_TOO_LARGE"
         ? "La captura supera 3 MB. Elegí una imagen más liviana."
         : "No pudimos confirmar el QR. Puede haber vencido o ya haberse usado.");
-    } finally { setQrBusy(false); }
+    } finally {
+      setQrBusy(false);
+    }
   }
 
   async function providerConfirmCompletion(request: SavedRequest) {
+    if (qrBusy) return;
     if (!request.jobId || !supabase || isDemoSession) {
       updateRequest(request.id, (current) => ({ ...current, status: "completed", completionAwaitingProvider: false, completionVerifiedAt: new Date().toISOString() }));
       return;
@@ -3150,7 +3339,8 @@ export default function Home() {
   }
 
   async function sendModularQuote(draft: Omit<SavedQuote, "version">) {
-    if (!quoteBuilderRequestId) return;
+    if (!quoteBuilderRequestId || quoteBuilderBusy) return;
+    setQuoteBuilderBusy(true);
     const request = requests.find((item) => item.id === quoteBuilderRequestId);
     try {
       const validDays = Math.min(draft.validDays ?? 5, 5);
@@ -3194,10 +3384,13 @@ export default function Home() {
       setRequested("Presupuesto modular enviado al cliente.");
     } catch {
       setRequested("No se pudo enviar: el estado de la solicitud cambió.");
+    } finally {
+      setQuoteBuilderBusy(false);
     }
   }
 
   async function sendChatMessage() {
+    if (chatBusy) return;
     const body = chatMessage.trim();
     setChatError("");
     if (!chatRequestId || !body)
@@ -3212,6 +3405,8 @@ export default function Home() {
       return setChatError(
         "Los precios sólo se envían mediante un presupuesto. Usá el chat para consultar el alcance del servicio.",
       );
+    setChatBusy(true);
+    try {
     const messageExpiry = new Date(Date.now() + REQUEST_LIFETIME_MS).toISOString();
     const message: SavedMessage = {
       id: `${Date.now()}-${session?.role ?? "client"}`,
@@ -3247,9 +3442,13 @@ export default function Home() {
           "Mensaje enviado dentro de LaburApp (contenido no copiado por privacidad)",
       });
     setChatMessage("");
+    } finally {
+      setChatBusy(false);
+    }
   }
 
   async function submitReview() {
+    if (reviewBusy) return;
     const request = requests.find((item) => item.id === reviewRequestId);
     setReviewError("");
     const editing = !!request?.review && Date.now() - new Date(request.review.createdAt).getTime() < 5 * 60 * 1000;
@@ -3268,6 +3467,8 @@ export default function Home() {
       return setReviewError("Contá brevemente cómo fue el trabajo.");
     if (reviewQualities.length > reviewQualityLimit)
       return setReviewError(`Elegí hasta ${reviewQualityLimit} cualidades.`);
+    setReviewBusy(true);
+    try {
     let reviewId = request.review?.id;
     if (supabase && !isDemoSession) {
       if (!request.jobId || !request.providerId) return setReviewError("No encontramos el trabajo verificado. Actualizá la sección y volvé a intentar.");
@@ -3304,6 +3505,9 @@ export default function Home() {
     setReviewQualities([]);
     setCustomReviewQuality("");
     setRequested(editing ? "Reseña actualizada." : "Reseña verificada publicada.");
+    } finally {
+      setReviewBusy(false);
+    }
   }
 
   function addCustomReviewQuality() {
@@ -3319,8 +3523,11 @@ export default function Home() {
   }
 
   async function submitReviewAppeal() {
+    if (appealBusy) return;
     if (!appealReview) return;
     if (appealReason.trim().length < 5) return setRequested("Contá brevemente por qué querés apelar la reseña.");
+    setAppealBusy(true);
+    try {
     if (supabase && !isDemoSession) {
       const userResult = await supabase.auth.getUser();
       if (!userResult.data.user) return setRequested("Volvé a ingresar para enviar la apelación.");
@@ -3337,6 +3544,9 @@ export default function Home() {
     setAppealReview(null);
     setAppealReason("");
     setRequested("Apelación enviada a administración.");
+    } finally {
+      setAppealBusy(false);
+    }
   }
 
   async function pickClientPhoto() {
@@ -3345,11 +3555,16 @@ export default function Home() {
     try {
       const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: true, aspect: [1, 1], quality: 0.72 });
       if (result.canceled || !result.assets[0]?.uri) return;
-      let photoUri = result.assets[0].uri;
+      const asset = result.assets[0];
+      const validationError = pickedImageError(asset, PHOTO_IMAGE_POLICY);
+      if (validationError) throw new Error(validationError);
+      const optimized = await ImageManipulator.manipulateAsync(asset.uri, [{ resize: { width: 512, height: 512 } }], { compress: 0.72, format: ImageManipulator.SaveFormat.JPEG });
+      let photoUri = optimized.uri;
       if (supabase && !isDemoSession) {
         const userResult = await supabase.auth.getUser();
         if (!userResult.data.user) throw new Error("not_signed_in");
         const photoBlob = await (await fetch(photoUri)).blob();
+        if (photoBlob.size > 4 * 1024 * 1024) throw new Error("La foto preparada sigue siendo demasiado pesada.");
         const storagePath = `${userResult.data.user.id}/perfil.jpg`;
         const upload = await supabase.storage.from("avatars").upload(storagePath, photoBlob, { contentType: "image/jpeg", upsert: true });
         if (upload.error) throw upload.error;
@@ -3359,8 +3574,8 @@ export default function Home() {
       }
       setSession((current) => current ? { ...current, photoUri } : current);
       setRequested("Foto de perfil actualizada.");
-    } catch {
-      setRequested("No pudimos actualizar la foto.");
+    } catch (error) {
+      setRequested(error instanceof Error && error.message ? error.message : "No pudimos actualizar la foto.");
     } finally {
       setClientPhotoBusy(false);
     }
@@ -3368,14 +3583,21 @@ export default function Home() {
 
   async function pickSubscriptionReceipt() {
     setSubscriptionError("");
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: false, quality: 0.9 });
-    if (result.canceled || !result.assets[0]) return;
-    const image = result.assets[0];
-    const resized = await ImageManipulator.manipulateAsync(image.uri, image.width > 1600 ? [{ resize: { width: 1600 } }] : [], { compress: 0.82, format: ImageManipulator.SaveFormat.JPEG });
-    setSubscriptionReceiptUri(resized.uri);
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: false, quality: 0.9, legacy: Platform.OS === "android" });
+      if (result.canceled || !result.assets?.[0]) return;
+      const image = result.assets[0];
+      const validationError = pickedImageError(image, DOCUMENT_IMAGE_POLICY);
+      if (validationError) throw new Error(validationError);
+      const resized = await ImageManipulator.manipulateAsync(image.uri, longestSideResize(image.width, image.height, 1600), { compress: 0.82, format: ImageManipulator.SaveFormat.JPEG });
+      setSubscriptionReceiptUri(resized.uri);
+    } catch (error) {
+      setSubscriptionError(error instanceof Error && error.message ? error.message : "No pudimos abrir esa imagen. Probá con una captura guardada en el teléfono.");
+    }
   }
 
   async function requestSubscription() {
+    if (subscriptionBusy) return;
     if (!supabase || !session || !subscriptionReceiptUri) return setSubscriptionError("Adjuntá una captura legible del comprobante de transferencia.");
     setSubscriptionBusy(true);
     setSubscriptionError("");
@@ -3584,9 +3806,26 @@ export default function Home() {
     .slice(0, 3);
 
   return (
-    <SafeAreaView style={styles.safe}>
-      <View style={[styles.header, compactHeader && styles.headerCompact]}>
-        <View style={styles.brandRow}>
+    <>
+    <Head>
+      <title>LaburApp · Servicios locales</title>
+      <meta name="description" content="Encontrá profesionales locales, pedí presupuestos y gestioná tus trabajos en LaburApp." />
+      <meta name="robots" content="index,follow" />
+      <meta name="theme-color" content="#063C78" />
+      <link rel="manifest" href="/manifest.webmanifest" />
+      {!!publicAppUrl() && <link rel="canonical" href={publicAppUrl()} />}
+    </Head>
+    <AppShell
+      layout={responsive.layout}
+      showNavigation={!!session}
+      navigationItems={navigationItems}
+      activeItem={tab}
+      notificationCount={requestNotificationCount}
+      onNavigate={setTab}
+      colors={colors}
+    >
+      <View style={[styles.header, compactHeader && styles.headerCompact, responsive.isDesktop && styles.headerDesktop, responsive.isDesktop && !!session && styles.headerDesktopSignedIn]}>
+        <View style={[styles.brandRow, responsive.isDesktop && !!session && styles.brandRowDesktop]}>
           <TouchableOpacity
             accessibilityRole="button"
             accessibilityLabel="Abrir menú"
@@ -3604,6 +3843,7 @@ export default function Home() {
             onPress={goHome}
           >
             <Image
+              accessible={false}
               source={officialWordmark}
               resizeMode="contain"
               style={[
@@ -3627,7 +3867,7 @@ export default function Home() {
           </TouchableOpacity>
           <TouchableOpacity
             accessibilityRole="button"
-            accessibilityLabel="Ingresar a LaburApp"
+            accessibilityLabel={signedInName ? `Abrir perfil de ${signedInName}` : "Ingresar a LaburApp"}
             style={styles.loginButton}
             onPress={() =>
               signedInName ? setTab("Perfil") : setAuthMode("login")
@@ -3637,6 +3877,11 @@ export default function Home() {
           </TouchableOpacity>
         </View>
       </View>
+      {requestSync.isOffline && (
+        <View style={styles.offlineBanner} accessibilityRole="alert" accessibilityLiveRegion="polite">
+          <Text style={styles.offlineBannerText}>Sin conexión · mostramos la información guardada y actualizaremos al reconectar.</Text>
+        </View>
+      )}
       {session?.role === "admin" && adminPreviewRole !== "admin" && (
         <View style={styles.adminPreviewBanner}>
           <Text style={styles.adminPreviewText}>
@@ -3648,12 +3893,19 @@ export default function Home() {
         </View>
       )}
       <ScrollView
-        contentContainerStyle={[styles.content, compactHeader && styles.contentCompact]}
+        contentContainerStyle={[
+          styles.content,
+          compactHeader && styles.contentCompact,
+          responsive.isDesktop && styles.contentDesktop,
+          !!session && !responsive.isDesktop && {
+            paddingBottom: 88 + Math.max(insets.bottom, 24) + Math.min(28, Math.max(0, responsive.fontScale - 1) * 28),
+          },
+        ]}
         keyboardShouldPersistTaps="handled"
       >
         {tab === "Inicio" ? (
           <>
-            <View style={[styles.hero, compactHeader && styles.heroCompact]}>
+            <View style={[styles.hero, compactHeader && styles.heroCompact, responsive.isDesktop && styles.heroDesktop]}>
               <Text style={[styles.heroTitle, compactHeader && styles.heroTitleCompact]}>
                 Encontrá a quien sabe hacerlo.
               </Text>
@@ -3814,13 +4066,19 @@ export default function Home() {
               </View>
             )}
             {!!providerDirectoryError && publishedProviders.length === 0 && !providerDirectoryLoading && (
-              <View style={styles.empty}><Text style={styles.modalError}>{providerDirectoryError}</Text></View>
+              <View style={styles.empty} accessibilityRole="alert">
+                <Text style={styles.modalError}>{providerDirectoryError}</Text>
+                <TouchableOpacity accessibilityRole="button" style={styles.retryButton} onPress={() => setRequestRefresh((current) => current + 1)}>
+                  <Text style={styles.retryButtonText}>Reintentar</Text>
+                </TouchableOpacity>
+              </View>
             )}
+            <View style={responsive.isDesktop && styles.providerGridDesktop}>
             {visibleProviders.map((provider) => {
               const featuredWork = featuredWorkFor(provider);
               const expanded = expandedProviderName === provider.name;
               const initials = provider.name.split(" ").map((part) => part[0]).join("");
-              return <View key={provider.providerId ?? provider.name} style={[styles.card, compactHeader && styles.cardCompact, expanded && styles.cardExpanded]}>
+              return <View key={provider.providerId ?? provider.name} style={[styles.card, compactHeader && styles.cardCompact, responsive.isDesktop && styles.providerCardDesktop, expanded && styles.cardExpanded]}>
                 <TouchableOpacity accessibilityRole="link" accessibilityLabel={`Abrir perfil profesional completo de ${provider.name}`} style={styles.cardOpenArea} onPress={() => setPublicProfileProvider(provider)}>
                   <View style={styles.avatar}>
                     <Text style={styles.avatarText}>{initials}</Text>
@@ -3840,13 +4098,14 @@ export default function Home() {
                 </TouchableOpacity>}
                 {expanded && featuredWork && <View style={styles.featuredWork}>
                     <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Ampliar foto de ${featuredWork.title}`} style={styles.featuredPhotoButton} onPress={() => setWorkPhoto({ provider, work: featuredWork })}>
-                      <Image source={{ uri: featuredWork.photoUri }} resizeMode="cover" style={styles.featuredPhoto} />
+                      <Image accessible={false} source={{ uri: featuredWork.photoUri }} resizeMode="cover" style={styles.featuredPhoto} />
                     </TouchableOpacity>
                     <View style={styles.featuredWorkCopy}><Text style={styles.favoriteLabel}>★ DESTACADO</Text><Text style={styles.featuredWorkTitle}>{featuredWork.title}</Text><Text numberOfLines={3} style={styles.featuredWorkDescription}>{featuredWork.description}</Text><TouchableOpacity accessibilityRole="link" onPress={() => setPublicProfileProvider(provider)}><Text style={styles.viewProfileLink}>Ver perfil completo</Text></TouchableOpacity></View>
                 </View>}
                 <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => startQuote(provider)}><Text style={styles.buttonText}>{session ? "Solicitar presupuesto" : "Ingresá para solicitar"}</Text></TouchableOpacity>
               </View>;
             })}
+            </View>
             {!providerDirectoryLoading && !providerDirectoryError && visibleProviders.length === 0 && (
               <View style={styles.empty}>
                 <Text style={styles.emptyTitle}>
@@ -3859,7 +4118,7 @@ export default function Home() {
             )}
           </>
         ) : tab === "Trabajos" || tab === "Solicitudes" ? (
-          <View style={styles.sectionPage}>
+          <View style={[styles.sectionPage, responsive.isDesktop && styles.sectionPageDesktop]}>
             <Text style={styles.pageTitle}>Solicitudes</Text>
             <Text style={styles.pageCopy}>Pedí y recibí presupuestos. Si tenés el modo prestador activo, también respondés desde acá.</Text>
             {effectiveRole !== "admin" && (
@@ -3874,7 +4133,7 @@ export default function Home() {
                   )}
                 </View>
                 <Text style={styles.requestQuotaCount}>
-                  {Math.min(weeklyRequestCount, FREE_WEEKLY_REQUEST_LIMIT)} / {FREE_WEEKLY_REQUEST_LIMIT}
+                  {Math.min(weeklyRequestCount, weeklyRequestLimit)} / {weeklyRequestLimit}
                 </Text>
               </View>
             )}
@@ -3939,7 +4198,20 @@ export default function Home() {
                 <Text style={styles.simulatorButtonText}>Cargar 3 casos</Text>
               </TouchableOpacity>
             </View>}
-            {workRequests.length === 0 ? (
+            {!!requestsError && (
+              <View style={styles.inlineError} accessibilityRole="alert">
+                <Text style={styles.inlineErrorText}>{requestsError}</Text>
+                <TouchableOpacity accessibilityRole="button" style={styles.retryButton} onPress={() => setRequestRefresh((current) => current + 1)}>
+                  <Text style={styles.retryButtonText}>Reintentar</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+            {requestsLoading && workRequests.length === 0 ? (
+              <View style={styles.emptyPanel} accessibilityRole="progressbar" accessibilityLabel="Cargando solicitudes">
+                <Text style={styles.emptyTitle}>Actualizando solicitudes…</Text>
+                <Text style={styles.centerCopy}>Esto puede demorar unos segundos con una conexión lenta.</Text>
+              </View>
+            ) : workRequests.length === 0 ? (
               <View style={styles.emptyPanel}>
                 <Text style={styles.emptyIcon}>🧰</Text>
                 <Text style={styles.emptyTitle}>
@@ -3950,6 +4222,7 @@ export default function Home() {
                   aparecer acá.
                 </Text>
                 <TouchableOpacity
+                  accessibilityRole="button"
                   style={styles.secondaryButton}
                   onPress={() => setTab("Inicio")}
                 >
@@ -4201,40 +4474,48 @@ export default function Home() {
             )}
           </View>
         ) : tab === "QR" ? (
-          <View style={styles.sectionPage}>
+          <View style={[styles.sectionPage, responsive.isDesktop && styles.sectionPageDesktop]}>
             <Text style={styles.pageTitle}>Confirmar trabajo</Text>
             <Text style={styles.pageCopy}>
               Escaneá el QR que muestra el profesional cuando termina. No contiene tu nombre, teléfono ni información del presupuesto.
             </Text>
             <View style={styles.qrScannerCard}>
-              {!cameraPermission ? (
+              {cameraAvailable === null || !cameraPermission ? (
                 <Text style={styles.centerCopy}>Preparando la cámara…</Text>
+              ) : cameraAvailable === false ? (
+                <View style={styles.qrPermissionBox}>
+                  <Text style={styles.emptyTitle}>Cámara no disponible</Text>
+                  <Text style={styles.centerCopy}>Este dispositivo no informó una cámara compatible. Podés ingresar el código corto debajo.</Text>
+                </View>
               ) : !cameraPermission.granted ? (
                 <View style={styles.qrPermissionBox}>
-                  <Text style={styles.emptyIcon}>▣</Text>
+                  <Text style={styles.cameraPermissionIcon}>▣</Text>
                   <Text style={styles.emptyTitle}>Necesitamos acceso a la cámara</Text>
                   <Text style={styles.centerCopy}>La cámara se usa únicamente para leer el QR de finalización.</Text>
-                  <TouchableOpacity accessibilityRole="button" style={styles.modalPrimary} onPress={() => void requestCameraPermission()}>
-                    <Text style={styles.modalPrimaryText}>Habilitar cámara</Text>
+                  <TouchableOpacity accessibilityRole="button" style={styles.cameraPermissionButton} onPress={() => void requestQrCameraPermission()}>
+                    <Text style={styles.cameraPermissionButtonText}>{cameraPermission.canAskAgain === false ? "Abrir Ajustes" : "Habilitar cámara"}</Text>
                   </TouchableOpacity>
                 </View>
               ) : (
                 <View style={styles.cameraFrame}>
                   <CameraView
-                    active={tab === "QR"}
+                    active={tab === "QR" && requestSync.isAppActive && pendingCompletionToken === null}
                     facing="back"
                     barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
                     onBarcodeScanned={qrScanned ? undefined : ({ data }) => void confirmCompletionCode(data)}
+                    onMountError={() => setCompletionError("No pudimos iniciar la cámara. Cerrá otras apps que puedan estar usándola o ingresá el código manualmente.")}
                     style={styles.camera}
                   />
                   <View pointerEvents="none" style={styles.cameraGuide} />
                 </View>
               )}
             </View>
+            {!!completionError && <Text style={styles.modalError}>{completionError}</Text>}
             <View style={styles.manualQrCard}>
               <Text style={styles.panelEyebrow}>¿NO PODÉS USAR LA CÁMARA?</Text>
-              <Text style={styles.reviewText}>Ingresá el código corto que aparece debajo del QR.</Text>
+              <Text style={styles.manualQrHint}>Ingresá el código corto que aparece debajo del QR.</Text>
               <TextInput
+                accessibilityLabel="Código de finalización"
                 autoCapitalize="characters"
                 value={manualQrCode}
                 onChangeText={setManualQrCode}
@@ -4248,7 +4529,7 @@ export default function Home() {
             </View>
           </View>
         ) : tab === "Contratados" ? (
-          <View style={styles.sectionPage}>
+          <View style={[styles.sectionPage, responsive.isDesktop && styles.sectionPageDesktop]}>
             <Text style={styles.pageTitle}>Contratados</Text>
             <Text style={styles.pageCopy}>
               Tus últimos 10 trabajos contratados, con el profesional y el estado de cada servicio.
@@ -4260,7 +4541,7 @@ export default function Home() {
                 <Text style={styles.centerCopy}>
                   Cuando aceptes un presupuesto, vas a encontrarlo en esta sección.
                 </Text>
-                <TouchableOpacity style={styles.secondaryButton} onPress={() => setTab("Inicio")}>
+                <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => setTab("Inicio")}>
                   <Text style={styles.secondaryText}>Buscar profesionales</Text>
                 </TouchableOpacity>
               </View>
@@ -4298,7 +4579,7 @@ export default function Home() {
             })}
           </View>
         ) : tab === "Panel" ? (
-          <View style={styles.sectionPage}>
+          <View style={[styles.sectionPage, responsive.isDesktop && styles.sectionPageDesktop]}>
             <Text style={styles.pageTitle}>Panel de administración</Text>
             <Text style={styles.pageCopy}>
               Vista operativa reservada para cuentas con rol administrador.
@@ -4318,7 +4599,7 @@ export default function Home() {
                   <Text style={styles.panelEyebrow}>DATOS REALES DE LA PLATAFORMA</Text>
                   <Text style={styles.adminModuleTitle}>Resumen general</Text>
                 </View>
-                <TouchableOpacity disabled={adminMetricsLoading} style={styles.adminRefresh} onPress={() => void loadAdminPlatformMetrics()}>
+                <TouchableOpacity accessibilityRole="button" disabled={adminMetricsLoading} style={styles.adminRefresh} onPress={() => void loadAdminPlatformMetrics()}>
                   <Text style={styles.adminRefreshText}>{adminMetricsLoading ? "Actualizando…" : "Actualizar"}</Text>
                 </TouchableOpacity>
               </View>
@@ -4378,7 +4659,7 @@ export default function Home() {
               </View>
               <Text style={styles.adminModuleCopy}>¿Tenés un ID concreto? Buscalo acá. Sin comprobante pendiente, la activación manual dura un mes.</Text>
               <View style={styles.customQualityRow}>
-                <TextInput value={adminPremiumId} onChangeText={setAdminPremiumId} autoCapitalize="characters" placeholder="LP000001" placeholderTextColor="#71818B" style={[styles.modalInput, styles.customQualityInput]} onSubmitEditing={() => void lookupPremiumAccount()} />
+                <TextInput accessibilityLabel="ID público de la cuenta" value={adminPremiumId} onChangeText={setAdminPremiumId} autoCapitalize="characters" placeholder="LP000001" placeholderTextColor="#71818B" style={[styles.modalInput, styles.customQualityInput]} onSubmitEditing={() => void lookupPremiumAccount()} />
                 <TouchableOpacity accessibilityRole="button" style={styles.customQualityButton} onPress={() => void lookupPremiumAccount()} disabled={adminPremiumBusy}><Text style={styles.customQualityButtonText}>Buscar</Text></TouchableOpacity>
               </View>
               {!!adminPremiumError && <Text style={styles.modalError}>{adminPremiumError}</Text>}
@@ -4411,13 +4692,13 @@ export default function Home() {
               <Text style={styles.panelEyebrow}>CONSULTA DE MATRÍCULAS</Text>
               <Text style={styles.adminModuleTitle}>Buscar en registros públicos</Text>
               <Text style={styles.adminModuleCopy}>Ingresá apellido, DNI o matrícula. La coincidencia orienta la revisión, pero no aprueba automáticamente al profesional.</Text>
-              <TextInput value={registryQuery} onChangeText={setRegistryQuery} placeholder="Apellido, DNI o número de matrícula" placeholderTextColor="#71818B" style={styles.modalInput} />
+              <TextInput accessibilityLabel="Buscar apellido, DNI o matrícula" value={registryQuery} onChangeText={setRegistryQuery} placeholder="Apellido, DNI o número de matrícula" placeholderTextColor="#71818B" style={styles.modalInput} />
               <View style={styles.adminRegistryActions}>
-                <TouchableOpacity disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("cooprg")}><Text style={styles.adminRegistryButtonText}>Cooperativa RG</Text></TouchableOpacity>
-                <TouchableOpacity disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("dpe")}><Text style={styles.adminRegistryButtonText}>DPE Ushuaia</Text></TouchableOpacity>
-                <TouchableOpacity disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camrg")}><Text style={styles.adminRegistryButtonText}>CAMRG</Text></TouchableOpacity>
-                <TouchableOpacity disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camtol")}><Text style={styles.adminRegistryButtonText}>CAMTOL</Text></TouchableOpacity>
-                <TouchableOpacity disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camush")}><Text style={styles.adminRegistryButtonText}>CAMUSH</Text></TouchableOpacity>
+                <TouchableOpacity accessibilityRole="button" disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("cooprg")}><Text style={styles.adminRegistryButtonText}>Cooperativa RG</Text></TouchableOpacity>
+                <TouchableOpacity accessibilityRole="button" disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("dpe")}><Text style={styles.adminRegistryButtonText}>DPE Ushuaia</Text></TouchableOpacity>
+                <TouchableOpacity accessibilityRole="button" disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camrg")}><Text style={styles.adminRegistryButtonText}>CAMRG</Text></TouchableOpacity>
+                <TouchableOpacity accessibilityRole="button" disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camtol")}><Text style={styles.adminRegistryButtonText}>CAMTOL</Text></TouchableOpacity>
+                <TouchableOpacity accessibilityRole="button" disabled={registryBusy} style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camush")}><Text style={styles.adminRegistryButtonText}>CAMUSH</Text></TouchableOpacity>
               </View>
               {registryBusy && <Text style={styles.adminMuted}>Consultando el padrón oficial…</Text>}
               {registryResult && !registryResultCredentialId && <View style={styles.registryResult}>
@@ -4431,7 +4712,7 @@ export default function Home() {
             <View style={styles.providerPanel}>
               <View style={styles.adminQueueHeader}>
                 <View><Text style={styles.panelEyebrow}>COLA DE REVISIÓN</Text><Text style={styles.adminModuleTitle}>Certificaciones y matrículas</Text></View>
-                <TouchableOpacity disabled={adminReviewsLoading} style={styles.adminRefresh} onPress={() => void loadAdminCredentialReviews()}><Text style={styles.adminRefreshText}>{adminReviewsLoading ? "Actualizando…" : "Actualizar"}</Text></TouchableOpacity>
+                <TouchableOpacity accessibilityRole="button" disabled={adminReviewsLoading} style={styles.adminRefresh} onPress={() => void loadAdminCredentialReviews()}><Text style={styles.adminRefreshText}>{adminReviewsLoading ? "Actualizando…" : "Actualizar"}</Text></TouchableOpacity>
               </View>
               <Text style={styles.adminModuleCopy}>Los originales se eliminan como máximo a los 5 días. La lectura automática se procesa localmente en este navegador y su texto temporal se elimina a las 48 horas.</Text>
               {!!adminReviewFeedback && <View style={[styles.adminReviewFeedback, adminReviewFeedback.tone === "success" ? styles.adminReviewFeedbackSuccess : styles.adminReviewFeedbackWarning]}><Text style={styles.adminReviewFeedbackText}>{adminReviewFeedback.message}</Text></View>}
@@ -4459,22 +4740,22 @@ export default function Home() {
                     <Text style={styles.adminCredentialOpen}>{expanded ? "−" : "+"}</Text>
                   </TouchableOpacity>
                   {expanded && <View style={styles.adminCredentialDetail}>
-                    {item.signedUrl ? <Image source={{ uri: item.signedUrl }} resizeMode="contain" style={styles.adminCredentialImage} /> : <View style={styles.adminDocumentGone}><Text style={styles.adminDocumentGoneText}>El archivo privado ya fue eliminado.</Text></View>}
+                    {item.signedUrl ? <Image accessibilityLabel={`Documento privado de ${item.kind}`} source={{ uri: item.signedUrl }} resizeMode="contain" style={styles.adminCredentialImage} /> : <View style={styles.adminDocumentGone}><Text style={styles.adminDocumentGoneText}>El archivo privado ya fue eliminado.</Text></View>}
                     <View style={styles.adminCredentialData}>
                       <Text style={styles.modalFieldLabel}>Número informado</Text>
                       <Text style={styles.adminCredentialValue}>{item.credentialNumber || "No informado"}</Text>
                       <Text style={styles.adminRegistryHint}>{item.credentialNumber ? `Los botones consultan directamente la matrícula informada: ${item.credentialNumber}.` : "No hay un número informado; la búsqueda usará el nombre del prestador."}</Text>
-                      {!!item.signedUrl && <TouchableOpacity disabled={adminOcrBusyId === item.id} style={styles.adminOcrButton} onPress={() => void runCredentialOcr(item)}><Text style={styles.adminOcrButtonText}>{adminOcrBusyId === item.id ? "Leyendo imagen…" : "Leer imagen automáticamente"}</Text></TouchableOpacity>}
+                      {!!item.signedUrl && <TouchableOpacity accessibilityRole="button" disabled={adminOcrBusyId === item.id} style={styles.adminOcrButton} onPress={() => void runCredentialOcr(item)}><Text style={styles.adminOcrButtonText}>{adminOcrBusyId === item.id ? "Leyendo imagen…" : "Leer imagen automáticamente"}</Text></TouchableOpacity>}
                       <Text style={styles.modalFieldLabel}>Texto leído · editable</Text>
-                      <TextInput multiline value={adminOcrTexts[item.id] ?? ""} onChangeText={(value) => setAdminOcrTexts((current) => ({ ...current, [item.id]: value }))} placeholder="La lectura automática o tu transcripción aparecerá acá." placeholderTextColor="#71818B" style={[styles.modalInput, styles.adminOcrText]} />
+                      <TextInput accessibilityLabel={`Texto leído de ${item.kind}`} multiline value={adminOcrTexts[item.id] ?? ""} onChangeText={(value) => setAdminOcrTexts((current) => ({ ...current, [item.id]: value }))} placeholder="La lectura automática o tu transcripción aparecerá acá." placeholderTextColor="#71818B" style={[styles.modalInput, styles.adminOcrText]} />
                       <Text style={styles.modalFieldLabel}>Observaciones internas</Text>
-                      <TextInput multiline value={adminReviewNotes[item.id] ?? ""} onChangeText={(value) => setAdminReviewNotes((current) => ({ ...current, [item.id]: value }))} placeholder="Motivo de aprobación, rechazo o datos a corregir." placeholderTextColor="#71818B" style={[styles.modalInput, styles.adminReviewNotes]} />
+                      <TextInput accessibilityLabel={`Observaciones internas de ${item.kind}`} multiline value={adminReviewNotes[item.id] ?? ""} onChangeText={(value) => setAdminReviewNotes((current) => ({ ...current, [item.id]: value }))} placeholder="Motivo de aprobación, rechazo o datos a corregir." placeholderTextColor="#71818B" style={[styles.modalInput, styles.adminReviewNotes]} />
                       <View style={styles.adminRegistryActions}>
-                        <TouchableOpacity style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("cooprg", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>Buscar en Cooperativa</Text></TouchableOpacity>
-                        <TouchableOpacity style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("dpe", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>Buscar en DPE</Text></TouchableOpacity>
-                        <TouchableOpacity style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camrg", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>CAMRG</Text></TouchableOpacity>
-                        <TouchableOpacity style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camtol", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>CAMTOL</Text></TouchableOpacity>
-                        <TouchableOpacity style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camush", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>CAMUSH</Text></TouchableOpacity>
+                        <TouchableOpacity accessibilityRole="button" style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("cooprg", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>Buscar en Cooperativa</Text></TouchableOpacity>
+                        <TouchableOpacity accessibilityRole="button" style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("dpe", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>Buscar en DPE</Text></TouchableOpacity>
+                        <TouchableOpacity accessibilityRole="button" style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camrg", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>CAMRG</Text></TouchableOpacity>
+                        <TouchableOpacity accessibilityRole="button" style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camtol", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>CAMTOL</Text></TouchableOpacity>
+                        <TouchableOpacity accessibilityRole="button" style={styles.adminRegistryButton} onPress={() => void lookupPublicRegistry("camush", item.credentialNumber || item.providerName, item.id)}><Text style={styles.adminRegistryButtonText}>CAMUSH</Text></TouchableOpacity>
                       </View>
                       {registryBusy && registryResultCredentialId === item.id && <Text style={styles.adminRegistryChecking}>Consultando la matrícula {item.credentialNumber || item.providerName}…</Text>}
                       {!!itemRegistryResult && <View style={[styles.adminCredentialMatchFeedback, itemRegistryResult.status === "matched" ? styles.adminCredentialMatchSuccess : styles.adminCredentialMatchWarning]}>
@@ -4484,8 +4765,8 @@ export default function Home() {
                         {!!itemRegistryResult.officialUrl && <TouchableOpacity accessibilityRole="link" style={styles.adminOfficialLink} onPress={() => void openExternalUrl(itemRegistryResult.officialUrl)}><Text style={styles.adminOfficialLinkText}>Abrir fuente oficial en otra pestaña ↗</Text></TouchableOpacity>}
                       </View>}
                       <View style={styles.adminDecisionRow}>
-                        <TouchableOpacity style={styles.adminRejectButton} onPress={() => void submitCredentialReview(item, "rejected")}><Text style={styles.adminRejectText}>Observar / rechazar</Text></TouchableOpacity>
-                        <TouchableOpacity style={styles.adminApproveButton} onPress={() => void submitCredentialReview(item, "verified")}><Text style={styles.adminApproveText}>Aprobar verificación</Text></TouchableOpacity>
+                        <TouchableOpacity accessibilityRole="button" style={styles.adminRejectButton} onPress={() => void submitCredentialReview(item, "rejected")}><Text style={styles.adminRejectText}>Observar / rechazar</Text></TouchableOpacity>
+                        <TouchableOpacity accessibilityRole="button" style={styles.adminApproveButton} onPress={() => void submitCredentialReview(item, "verified")}><Text style={styles.adminApproveText}>Aprobar verificación</Text></TouchableOpacity>
                       </View>
                     </View>
                   </View>}
@@ -4504,7 +4785,7 @@ export default function Home() {
             </View>
           </View>
         ) : (
-          <View style={styles.sectionPage}>
+          <View style={[styles.sectionPage, responsive.isDesktop && styles.sectionPageDesktop]}>
             <Text style={styles.pageTitle}>Mi perfil</Text>
             {!session ? (
               <View style={styles.emptyPanel}>
@@ -4515,12 +4796,14 @@ export default function Home() {
                   tus servicios.
                 </Text>
                 <TouchableOpacity
+                  accessibilityRole="button"
                   style={styles.modalPrimary}
                   onPress={() => setAuthMode("login")}
                 >
                   <Text style={styles.modalPrimaryText}>Ingresar</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
+                  accessibilityRole="button"
                   style={styles.secondaryButton}
                   onPress={() => setAuthMode("register")}
                 >
@@ -4532,6 +4815,7 @@ export default function Home() {
                 <View style={styles.accountCard}>
                   {(providerProfile?.photoUri ?? session.photoUri) ? (
                     <Image
+                      accessibilityLabel="Foto de perfil"
                       source={{ uri: providerProfile?.photoUri ?? session.photoUri }}
                       style={styles.profilePhoto}
                     />
@@ -4594,6 +4878,7 @@ export default function Home() {
                     <View style={styles.workCardTop}>
                       <Text style={styles.panelEyebrow}>SEGUIDORES</Text>
                       <TouchableOpacity
+                        accessibilityRole="button"
                         onPress={() => setFollowersVisible(false)}
                       >
                         <Text style={styles.cardLink}>Ocultar</Text>
@@ -4766,7 +5051,7 @@ export default function Home() {
                           TRABAJOS REALIZADOS
                         </Text>
                         <View style={styles.providerHeaderActions}>
-                          <Text style={styles.servicePlanBadge}>3 GRATIS</Text>
+                          <Text style={styles.servicePlanBadge}>{clientPlan === "plus" ? "6 PREMIUM" : "3 GRATIS"}</Text>
                           {session.role !== "admin" && (
                             <TouchableOpacity accessibilityRole="button" accessibilityLabel="Editar trabajos realizados" style={styles.editProfileButton} onPress={openPortfolioEditor}>
                               <Text style={styles.editProfileButtonText}>EDITAR</Text>
@@ -4787,6 +5072,7 @@ export default function Home() {
                               {work.photos.map((photo) => (
                                 <Image
                                   key={photo.id}
+                                  accessibilityLabel={`Foto del trabajo ${work.service}`}
                                   source={{ uri: photo.uri }}
                                   style={styles.portfolioPhoto}
                                 />
@@ -4817,7 +5103,7 @@ export default function Home() {
                       solicitudes.
                     </Text>
                     {session.role !== "admin" && (
-                      <TouchableOpacity style={styles.modalPrimary} onPress={openProviderProfile}>
+                      <TouchableOpacity accessibilityRole="button" style={styles.modalPrimary} onPress={openProviderProfile}>
                         <Text style={styles.modalPrimaryText}>Crear perfil de prestador</Text>
                       </TouchableOpacity>
                     )}
@@ -4833,7 +5119,7 @@ export default function Home() {
                     </Text>
                   </View>
                 )}
-                <TouchableOpacity style={styles.logoutButton} onPress={signOut}>
+                <TouchableOpacity accessibilityRole="button" style={styles.logoutButton} onPress={signOut}>
                   <Text style={styles.logoutText}>Cerrar sesión</Text>
                 </TouchableOpacity>
               </>
@@ -4844,7 +5130,7 @@ export default function Home() {
       {requested && (
         <View style={styles.toast}>
           <Text style={styles.toastText}>{requested}</Text>
-          <TouchableOpacity onPress={() => setRequested(null)}>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar notificación" onPress={() => setRequested(null)}>
             <Text style={styles.toastClose}>Cerrar</Text>
           </TouchableOpacity>
         </View>
@@ -4947,7 +5233,7 @@ export default function Home() {
             <View style={styles.publicProfileSection}>
               <View style={styles.workCardTop}>
                 <Text style={styles.panelEyebrow}>TRABAJOS REALIZADOS</Text>
-                <Text style={styles.servicePlanBadge}>3 · PLAN GRATIS</Text>
+                <Text style={styles.servicePlanBadge}>{clientPlan === "plus" ? "6 · PREMIUM" : "3 · PLAN GRATIS"}</Text>
               </View>
               {selectedPublicWorks.map((work, workIndex) => (
                 <View key={work.id} style={styles.publicPortfolioWork}>
@@ -4964,7 +5250,7 @@ export default function Home() {
                         style={styles.publicWorkPhotoButton}
                         onPress={() => setWorkPhoto({ provider: publicProfileProvider, work: { title: work.title, description: work.description, photoUri } })}
                       >
-                        <Image source={{ uri: photoUri }} resizeMode="cover" style={styles.publicWorkPhoto} />
+                        <Image accessible={false} source={{ uri: photoUri }} resizeMode="cover" style={styles.publicWorkPhoto} />
                       </TouchableOpacity>
                     ))}
                   </View>
@@ -4979,7 +5265,7 @@ export default function Home() {
       </AppModal>
       <AppModal visible={workPhoto !== null} onRequestClose={() => setWorkPhoto(null)}>
         <View style={styles.lightboxBackdrop}>
-          {workPhoto && <><Image source={{ uri: workPhoto.work.photoUri }} resizeMode="contain" style={styles.lightboxImage} /><Text style={styles.lightboxTitle}>{workPhoto.work.title}</Text><Text style={styles.lightboxCaption}>{workPhoto.provider.name} · {workPhoto.provider.city}</Text></>}
+          {workPhoto && <><Image accessibilityLabel={`Foto ampliada de ${workPhoto.work.title}`} source={{ uri: workPhoto.work.photoUri }} resizeMode="contain" style={styles.lightboxImage} /><Text style={styles.lightboxTitle}>{workPhoto.work.title}</Text><Text style={styles.lightboxCaption}>{workPhoto.provider.name} · {workPhoto.provider.city}</Text></>}
           <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar imagen ampliada" style={styles.lightboxClose} onPress={() => setWorkPhoto(null)}><Text style={styles.lightboxCloseText}>×</Text></TouchableOpacity>
         </View>
       </AppModal>
@@ -4989,8 +5275,11 @@ export default function Home() {
           if (!guestGateLocked && !passwordChangeRequired) setAuthMode(null);
         }}
       >
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
+        <KeyboardAvoidingView style={styles.authKeyboardFrame} behavior={Platform.OS === "ios" ? "padding" : "height"}>
+        <View style={[styles.modalBackdrop, styles.authBackdrop]}>
+          <Pressable style={styles.dismissKeyboardArea} onPress={Keyboard.dismiss} accessibilityLabel="Cerrar teclado" />
+          <View style={[styles.modalCard, styles.authCard]}>
+            <ScrollView keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag" contentContainerStyle={styles.authCardContent}>
             {!guestGateLocked && !passwordChangeRequired && (
               <TouchableOpacity
                 accessibilityRole="button"
@@ -5032,6 +5321,8 @@ export default function Home() {
                 <Text style={styles.modalLabel}>Accesos de prueba</Text>
                 {demoAccounts.map((account) => (
                   <TouchableOpacity
+                    accessibilityRole="button"
+                    accessibilityLabel={account.label}
                     key={account.email}
                     style={styles.demoAccountButton}
                     onPress={() => loginDemoAccount(account)}
@@ -5058,6 +5349,7 @@ export default function Home() {
             )}
             {authMode === "register" && (
               <TextInput
+                accessibilityLabel="Nombre y apellido"
                 value={authName}
                 onChangeText={setAuthName}
                 placeholder="Nombre y apellido"
@@ -5067,6 +5359,7 @@ export default function Home() {
             )}
             {authMode !== "update-password" && (
               <TextInput
+                accessibilityLabel="Correo electrónico"
                 value={authEmail}
                 onChangeText={setAuthEmail}
                 autoCapitalize="none"
@@ -5078,6 +5371,7 @@ export default function Home() {
             )}
             {authMode !== "recovery" && (
               <TextInput
+                accessibilityLabel={authMode === "login" ? "Contraseña" : "Contraseña nueva"}
                 value={authPassword}
                 onChangeText={setAuthPassword}
                 secureTextEntry
@@ -5090,6 +5384,7 @@ export default function Home() {
             )}
             {(authMode === "register" || authMode === "update-password") && (
               <TextInput
+                accessibilityLabel="Repetir contraseña"
                 value={authPasswordConfirm}
                 onChangeText={setAuthPasswordConfirm}
                 secureTextEntry
@@ -5104,13 +5399,16 @@ export default function Home() {
                   Con esta misma cuenta podés contratar profesionales. Si después querés ofrecer servicios, completás tu perfil profesional desde “Mi perfil”.
                 </Text>
                 <Text style={styles.modalLabel}>Tu ciudad</Text>
-                <View style={styles.roleRow}>
-                  {cityChoices.map((city) => (
+                <View style={styles.cityRows}>
+                  {[["San Sebastián", "Almanza"], ["Río Grande", "Tolhuin", "Ushuaia"]].map((row, rowIndex) => <View key={rowIndex} style={styles.cityRow}>
+                  {row.map((city) => (
                     <TouchableOpacity
+                      accessibilityRole="radio"
+                      accessibilityLabel={city}
+                      accessibilityState={{ selected: authCity === city }}
                       key={city}
                       onPress={() => setAuthCity(city)}
                       style={[
-                        styles.roleChoice,
                         styles.cityChoice,
                         authCity === city && styles.roleChoiceActive,
                       ]}
@@ -5125,6 +5423,7 @@ export default function Home() {
                       </Text>
                     </TouchableOpacity>
                   ))}
+                  </View>)}
                 </View>
                 <View style={styles.termsRow}>
                   <TouchableOpacity
@@ -5195,8 +5494,10 @@ export default function Home() {
                 </Text>
               </TouchableOpacity>
             )}
+            </ScrollView>
           </View>
         </View>
+        </KeyboardAvoidingView>
       </AppModal>
       <AppModal
         visible={profileModal}
@@ -5205,6 +5506,7 @@ export default function Home() {
         <View style={styles.modalBackdrop}>
           <ProviderProfileForm
             darkMode={darkMode}
+            premium={clientPlan === "plus"}
             key={`${profileDraft.displayName}-${profileModal}`}
             initialProfile={profileDraft}
             email={session?.email ?? ""}
@@ -5222,6 +5524,7 @@ export default function Home() {
         <View style={styles.modalBackdrop}>
           <PortfolioEditor
             darkMode={darkMode}
+            maxWorks={clientPlan === "plus" ? 6 : 3}
             key={`${providerProfile?.publicId}-${portfolioModal}`}
             initialWorks={providerProfile?.portfolioWorks ?? []}
             availableServices={Array.from(
@@ -5267,6 +5570,7 @@ export default function Home() {
                 : ""}
             </Text>
             <TextInput
+              accessibilityLabel="Descripción del trabajo"
               multiline
               value={quoteDescription}
               onChangeText={setQuoteDescription}
@@ -5275,6 +5579,7 @@ export default function Home() {
               style={[styles.modalInput, styles.multiline]}
             />
             <TextInput
+              accessibilityLabel="Zona aproximada"
               value={quoteZone}
               onChangeText={setQuoteZone}
               placeholder="Zona aproximada (sin dirección exacta)"
@@ -5282,6 +5587,7 @@ export default function Home() {
               style={styles.modalInput}
             />
             <TextInput
+              accessibilityLabel="Fecha estimada"
               value={quoteDate}
               onChangeText={setQuoteDate}
               placeholder="Fecha estimada: AAAA-MM-DD (opcional)"
@@ -5299,7 +5605,7 @@ export default function Home() {
                     <Text style={styles.quoteTimeValue}>{value}</Text><Text style={styles.dropdownChevron}>⌄</Text>
                   </TouchableOpacity>
                   {quoteTimePicker === field && <ScrollView nestedScrollEnabled style={styles.quoteTimeOptions}>
-                    {timeOptions.filter((time) => field === "start" ? time >= quoteAvailabilityStart && time < quoteEndTime : time > quoteStartTime && time <= quoteAvailabilityEnd).map((time) => <TouchableOpacity key={`${field}-${time}`} style={[styles.quoteTimeOption, value === time && styles.dropdownOptionActive]} onPress={() => { field === "start" ? setQuoteStartTime(time) : setQuoteEndTime(time); setQuoteTimePicker(null); }}>
+                    {timeOptions.filter((time) => field === "start" ? time >= quoteAvailabilityStart && time < quoteEndTime : time > quoteStartTime && time <= quoteAvailabilityEnd).map((time) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={`${field === "start" ? "Hora de inicio" : "Hora de fin"}: ${time}`} key={`${field}-${time}`} style={[styles.quoteTimeOption, value === time && styles.dropdownOptionActive]} onPress={() => { field === "start" ? setQuoteStartTime(time) : setQuoteEndTime(time); setQuoteTimePicker(null); }}>
                       <Text style={[styles.dropdownOptionText, value === time && styles.dropdownOptionTextActive]}>{time}</Text>
                     </TouchableOpacity>)}
                   </ScrollView>}
@@ -5385,14 +5691,14 @@ export default function Home() {
           </View>
         </View>
       </AppModal>
-      <AppModal visible={pendingCompletionToken !== null} onRequestClose={() => { setPendingCompletionToken(null); setQrScanned(false); }}>
+      <AppModal visible={pendingCompletionToken !== null} onRequestClose={resetCompletionScan}>
         <View style={styles.modalBackdrop}><View style={[styles.modalCard, styles.reviewModalCard]}>
-          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar confirmación" style={styles.modalClose} onPress={() => { setPendingCompletionToken(null); setQrScanned(false); }}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar confirmación" style={styles.modalClose} onPress={resetCompletionScan}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
           <ScrollView style={styles.reviewModalScroll} contentContainerStyle={styles.reviewModalContent} keyboardShouldPersistTaps="handled">
             <Text style={styles.modalTitle}>Confirmar trabajo</Text>
             <Text style={styles.modalCopy}>Si tenés el comprobante de transferencia en tu celular, adjuntalo ahora. Usá una captura legible, con importe, fecha y datos de la operación claros.</Text>
             <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => void pickCompletionReceipt()}><Text style={styles.secondaryText}>{completionReceiptUri ? "✓ Comprobante adjunto · cambiar" : "Adjuntar comprobante"}</Text></TouchableOpacity>
-            {!!completionReceiptUri && <Image source={{ uri: completionReceiptUri }} resizeMode="contain" style={{ width: "100%", height: 160 }} />}
+            {!!completionReceiptUri && <Image accessibilityLabel="Vista previa del comprobante de finalización" source={{ uri: completionReceiptUri }} resizeMode="contain" style={{ width: "100%", height: 160 }} />}
             <Text style={styles.modalCopy}>Si no lo tenés a mano, podés continuar: el prestador tendrá que confirmar la finalización antes de que puedas dejar una reseña.</Text>
             {!!completionError && <Text style={styles.modalError}>{completionError}</Text>}
             <TouchableOpacity accessibilityRole="button" disabled={qrBusy} style={[styles.modalPrimary, qrBusy && styles.buttonDisabled]} onPress={() => void submitCompletionEvidence()}><Text style={styles.modalPrimaryText}>{qrBusy ? "Confirmando…" : completionReceiptUri ? "Confirmar con comprobante" : "Continuar sin comprobante"}</Text></TouchableOpacity>
@@ -5404,12 +5710,21 @@ export default function Home() {
           <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar suscripción" style={styles.modalClose} onPress={() => setSubscriptionModal(false)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
           <ScrollView style={styles.reviewModalScroll} contentContainerStyle={styles.reviewModalContent} keyboardShouldPersistTaps="handled">
             <Text style={styles.modalTitle}>Suscripción Premium</Text>
-            <Text style={styles.modalCopy}>Elegí un período. El pago es únicamente por transferencia. Premium se activa después de verificar tu comprobante; la comprobación puede demorar hasta 72 horas.</Text>
+            <Text style={styles.modalCopy}>Elegí un período.{"\n"}El pago es únicamente por transferencia.{"\n"}Premium se activa después de verificar tu comprobante, puede demorar hasta 72 hs.</Text>
             {!!accountPublicId && <Text style={styles.subscriptionAccountId}>Tu ID de cuenta: {accountPublicId}</Text>}
             <View style={styles.subscriptionBankCard}>
-              <Text style={styles.panelEyebrow}>CUENTA PARA TRANSFERIR · BBVA</Text>
-              <Text style={styles.subscriptionAlias}>CA: ALSEMA.BBVA <Text style={styles.subscriptionAliasCheck}>✓</Text></Text>
+              <View style={styles.subscriptionAliasRow}>
+                <Text style={styles.subscriptionAlias}>ALSEMA.BBVA <Text style={styles.subscriptionAliasCheck}>✓</Text></Text>
+                <TouchableOpacity accessibilityRole="button" accessibilityLabel="Copiar alias ALSEMA.BBVA" hitSlop={8} style={styles.subscriptionCopyButton} onPress={() => void Clipboard.setStringAsync("ALSEMA.BBVA").then(() => setAliasCopied(true))}>
+                  <Text style={styles.subscriptionCopyIcon}>{aliasCopied ? "✓" : "⧉"}</Text>
+                </TouchableOpacity>
+              </View>
+              {aliasCopied && <Text style={styles.subscriptionCopiedText}>Alias copiado</Text>}
               <View style={styles.subscriptionBankDetails}>
+                <View>
+                  <Text style={styles.subscriptionBankDetailLabel}>Titular</Text>
+                  <Text style={styles.subscriptionBankDetailValue}>Albonio Sergio Martin</Text>
+                </View>
                 <View>
                   <Text style={styles.subscriptionBankDetailLabel}>Número de cuenta</Text>
                   <Text selectable style={styles.subscriptionBankDetailValue}>228-35388/8</Text>
@@ -5421,12 +5736,13 @@ export default function Home() {
               </View>
               <Text style={styles.adminModuleCopy}>Antes de confirmar, comprobá en tu banco que el alias y los datos del destinatario sean correctos.</Text>
             </View>
-            {([ [1, 3500], [3, 7500], [6, 12000], [12, 15000] ] as const).map(([months, price]) => <TouchableOpacity key={months} accessibilityRole="radio" accessibilityState={{ selected: subscriptionMonths === months }} style={[styles.subscriptionPlanChoice, subscriptionMonths === months && styles.roleChoiceActive]} onPress={() => setSubscriptionMonths(months)}><Text style={[styles.roleChoiceText, subscriptionMonths === months && styles.roleChoiceTextActive]}>{subscriptionMonths === months ? "◉" : "○"} {months} {months === 1 ? "mes" : "meses"}</Text><Text style={styles.subscriptionPlanPrice}>${price.toLocaleString("es-AR")}</Text></TouchableOpacity>)}
-            <Text style={styles.subscriptionReceiptReminder}>RECORDÁ ADJUNTAR EL COMPROBANTE</Text>
-            <Text style={styles.modalLabel}>Comprobante de transferencia</Text>
-            <Text style={styles.modalCopy}>Adjuntá una captura legible, bien iluminada, con fecha, importe y datos de la operación visibles. Nunca incluyas contraseñas ni códigos.</Text>
-            <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => void pickSubscriptionReceipt()}><Text style={styles.secondaryText}>{subscriptionReceiptUri ? "✓ Captura seleccionada · cambiar" : "Adjuntar captura"}</Text></TouchableOpacity>
-            {!!subscriptionReceiptUri && <Image source={{ uri: subscriptionReceiptUri }} resizeMode="contain" style={{ width: "100%", height: 180 }} />}
+            <View style={styles.subscriptionPlansRow}>{([ [1, 3500], [3, 7500], [6, 12000], [12, 15000] ] as const).map(([months, price]) => <TouchableOpacity key={months} accessibilityRole="radio" accessibilityLabel={`${months} ${months === 1 ? "mes" : "meses"}, ${price.toLocaleString("es-AR")} pesos`} accessibilityState={{ selected: subscriptionMonths === months }} style={[styles.subscriptionPlanChoice, subscriptionMonths === months && styles.roleChoiceActive]} onPress={() => setSubscriptionMonths(months)}><Text style={[styles.subscriptionPlanMonths, subscriptionMonths === months && styles.roleChoiceTextActive]}>{months} {months === 1 ? "mes" : "meses"}</Text><Text style={styles.subscriptionPlanPrice}>${price.toLocaleString("es-AR")}</Text></TouchableOpacity>)}</View>
+            <Text style={styles.subscriptionBenefits}>7 presupuestos semanales · + cualidades en reseñas · 6 servicios profesionales · 6 trabajos destacados</Text>
+            <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded: comparePlansOpen }} onPress={() => setComparePlansOpen((current) => !current)}><Text style={styles.comparePlansLink}>Compará planes {comparePlansOpen ? "⌃" : "⌄"}</Text></TouchableOpacity>
+            {comparePlansOpen && <View style={styles.planComparison}><Text style={styles.planComparisonText}>Gratis: hasta 3 presupuestos por semana, 3 trabajos publicados y 2 servicios de prestador.</Text><Text style={styles.planComparisonText}>Premium: 7 presupuestos semanales, + cualidades en reseñas. 6 servicios profesionales y 6 trabajos destacados.</Text></View>}
+            <Text style={styles.subscriptionReceiptReminder}>RECORDÁ ADJUNTAR EL COMPROBANTE DE TRANSFERENCIA</Text>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={subscriptionReceiptUri ? "Cambiar archivo adjuntado" : "Adjuntar comprobante de transferencia"} style={styles.secondaryButton} onPress={() => void pickSubscriptionReceipt()}><Text style={styles.secondaryText}>{subscriptionReceiptUri ? "✓ Archivo adjuntado" : "Adjuntar comprobante"}</Text></TouchableOpacity>
+            {!!subscriptionReceiptUri && <Image accessibilityLabel="Vista previa del comprobante de suscripción" source={{ uri: subscriptionReceiptUri }} resizeMode="contain" style={{ width: "100%", height: 180 }} />}
             {!!subscriptionError && <Text style={styles.modalError}>{subscriptionError}</Text>}
             <TouchableOpacity accessibilityRole="button" disabled={subscriptionBusy || !subscriptionReceiptUri} style={[styles.modalPrimary, (subscriptionBusy || !subscriptionReceiptUri) && styles.buttonDisabled]} onPress={() => void requestSubscription()}><Text style={styles.modalPrimaryText}>{subscriptionBusy ? "Enviando…" : "Enviar comprobante"}</Text></TouchableOpacity>
           </ScrollView>
@@ -5491,6 +5807,7 @@ export default function Home() {
               ))}
             </ScrollView>
             <TextInput
+              accessibilityLabel="Mensaje"
               multiline
               blurOnSubmit={false}
               returnKeyType="send"
@@ -5513,10 +5830,12 @@ export default function Home() {
             {!!chatError && <Text style={styles.modalError}>{chatError}</Text>}
             <TouchableOpacity
               accessibilityRole="button"
-              style={styles.modalPrimary}
+              accessibilityState={{ disabled: chatBusy }}
+              disabled={chatBusy}
+              style={[styles.modalPrimary, chatBusy && styles.buttonDisabled]}
               onPress={sendChatMessage}
             >
-              <Text style={styles.modalPrimaryText}>Enviar mensaje</Text>
+              <Text style={styles.modalPrimaryText}>{chatBusy ? "Enviando…" : "Enviar mensaje"}</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -5562,6 +5881,7 @@ export default function Home() {
               ))}
             </View>
             <TextInput
+              accessibilityLabel="Comentario de la reseña"
               multiline
               value={reviewComment}
               onChangeText={setReviewComment}
@@ -5588,6 +5908,7 @@ export default function Home() {
             </View>
             <View style={styles.customQualityRow}>
               <TextInput
+                accessibilityLabel="Otra cualidad"
                 value={customReviewQuality}
                 onChangeText={setCustomReviewQuality}
                 placeholder="Otra cualidad"
@@ -5615,10 +5936,12 @@ export default function Home() {
             )}
             <TouchableOpacity
               accessibilityRole="button"
-              style={styles.modalPrimary}
+              accessibilityState={{ disabled: reviewBusy }}
+              disabled={reviewBusy}
+              style={[styles.modalPrimary, reviewBusy && styles.buttonDisabled]}
               onPress={() => void submitReview()}
             >
-              <Text style={styles.modalPrimaryText}>{reviewRequest?.review ? "Guardar cambios" : "Publicar reseña"}</Text>
+              <Text style={styles.modalPrimaryText}>{reviewBusy ? "Guardando…" : reviewRequest?.review ? "Guardar cambios" : "Publicar reseña"}</Text>
             </TouchableOpacity>
             </ScrollView>
           </View>
@@ -5630,8 +5953,8 @@ export default function Home() {
             <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar apelación" style={styles.modalClose} onPress={() => setAppealReview(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
             <Text style={styles.modalTitle}>Apelar reseña</Text>
             <Text style={styles.modalCopy}>La administración revisará tu pedido y te responderá por este medio.</Text>
-            <TextInput multiline value={appealReason} onChangeText={setAppealReason} placeholder="Contanos qué dato querés revisar" placeholderTextColor="#71818B" style={[styles.modalInput, styles.multiline]} />
-            <TouchableOpacity accessibilityRole="button" style={styles.modalPrimary} onPress={() => void submitReviewAppeal()}><Text style={styles.modalPrimaryText}>Enviar apelación</Text></TouchableOpacity>
+            <TextInput accessibilityLabel="Motivo de la apelación" multiline value={appealReason} onChangeText={setAppealReason} placeholder="Contanos qué dato querés revisar" placeholderTextColor="#71818B" style={[styles.modalInput, styles.multiline]} />
+            <TouchableOpacity accessibilityRole="button" accessibilityState={{ disabled: appealBusy }} disabled={appealBusy} style={[styles.modalPrimary, appealBusy && styles.buttonDisabled]} onPress={() => void submitReviewAppeal()}><Text style={styles.modalPrimaryText}>{appealBusy ? "Enviando…" : "Enviar apelación"}</Text></TouchableOpacity>
           </View>
         </View>
       </AppModal>
@@ -5645,6 +5968,7 @@ export default function Home() {
               darkMode={darkMode}
               request={quoteBuilderRequest}
               tariffItems={providerProfile?.tariffItems}
+              busy={quoteBuilderBusy}
               onCancel={() => setQuoteBuilderRequestId(null)}
               onDismiss={() => void cancelRequest(quoteBuilderRequest, "provider_declined")}
               onSubmit={sendModularQuote}
@@ -5652,33 +5976,13 @@ export default function Home() {
           )}
         </View>
       </AppModal>
-      {session && (
-        <View style={[styles.nav, compactHeader && styles.navCompact]}>
-          {navigationItems.map((item) => (
-            <TouchableOpacity
-              accessibilityRole="button"
-              accessibilityLabel={item}
-              key={item}
-              onPress={() => setTab(item)}
-              style={[styles.navItem, item === "QR" && styles.qrNavItem]}
-            >
-              {item === "QR" ? (
-                <><Text style={styles.qrNavIcon}>▣</Text><Text style={[styles.qrNavText, tab === item && styles.navActive]}>QR</Text></>
-              ) : (
-                <View style={styles.navLabelWrap}>
-                  <Text numberOfLines={1} style={[styles.navText, compactHeader && styles.navTextCompact, tab === item && styles.navActive]}>{item}</Text>
-                  {item === "Solicitudes" && requestNotificationCount > 0 && <Text accessibilityLabel={`${requestNotificationCount} novedades`} style={styles.navAlert}>!</Text>}
-                </View>
-              )}
-            </TouchableOpacity>
-          ))}
-        </View>
-      )}
-    </SafeAreaView>
+    </AppShell>
+    </>
   );
 }
 
-function createStyles(colors: ThemeColors) {
+function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
+  const nativeNavigationSpace = Platform.OS === "android" ? Math.max(safeBottom, 24) : safeBottom;
   return StyleSheet.create({
     safe: { flex: 1, backgroundColor: colors.snow },
     header: {
@@ -5698,10 +6002,13 @@ function createStyles(colors: ThemeColors) {
       paddingVertical: 6,
       backgroundColor: "#000000",
     },
+    headerDesktop: { minHeight: 66, justifyContent: "space-between", paddingHorizontal: 24 },
+    headerDesktopSignedIn: { justifyContent: "flex-end" },
     brandRow: { flexDirection: "row", alignItems: "center", gap: 7, flexShrink: 1 },
+    brandRowDesktop: { display: "none" },
     menuButton: {
-      width: 34,
-      height: 34,
+      width: 44,
+      height: 44,
       borderRadius: 10,
       borderWidth: 1,
       borderColor: "rgba(102,208,245,0.72)",
@@ -5716,8 +6023,8 @@ function createStyles(colors: ThemeColors) {
     wordmarkLogoWide: { width: 210, height: 60 },
     headerActions: { flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 },
     themeButton: {
-      width: 36,
-      height: 36,
+      width: 44,
+      height: 44,
       borderRadius: 12,
       borderWidth: 1,
       borderColor: colors.cyan,
@@ -5727,7 +6034,7 @@ function createStyles(colors: ThemeColors) {
     },
     themeButtonText: { color: "white", fontSize: 19, lineHeight: 22 },
     loginButton: {
-      minHeight: 40,
+      minHeight: 44,
       justifyContent: "center",
       paddingHorizontal: 15,
       maxWidth: 126,
@@ -5740,9 +6047,12 @@ function createStyles(colors: ThemeColors) {
     loginButtonTextCompact: { fontSize: 12 },
     content: { padding: 18, paddingBottom: 110 },
     contentCompact: { paddingHorizontal: 12, paddingTop: 12, paddingBottom: 104 },
+    contentDesktop: { width: "100%", maxWidth: 1440, alignSelf: "center", padding: 28, paddingBottom: 44 },
     adminPreviewBanner: { minHeight: 38, paddingHorizontal: 16, paddingVertical: 8, backgroundColor: colors.warningSurface, borderBottomWidth: 1, borderBottomColor: colors.orange, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 },
     adminPreviewText: { flex: 1, color: colors.warningText, fontSize: 11, fontWeight: "800" },
     adminPreviewAction: { color: colors.orange, fontSize: 11, fontWeight: "900" },
+    offlineBanner: { minHeight: 40, paddingHorizontal: 14, paddingVertical: 9, justifyContent: "center", backgroundColor: colors.warningSurface, borderBottomWidth: 1, borderBottomColor: colors.warningText },
+    offlineBannerText: { color: colors.warningText, fontSize: 12, lineHeight: 17, fontWeight: "800", textAlign: "center" },
     hero: {
       backgroundColor: colors.brandNavy,
       borderRadius: 24,
@@ -5750,6 +6060,7 @@ function createStyles(colors: ThemeColors) {
       marginBottom: 24,
     },
     heroCompact: { borderRadius: 18, padding: 16, marginBottom: 18 },
+    heroDesktop: { paddingHorizontal: 30, paddingVertical: 26, marginBottom: 26 },
     heroTitle: {
       color: "white",
       fontSize: 30,
@@ -5776,7 +6087,7 @@ function createStyles(colors: ThemeColors) {
       marginTop: 12,
     },
     quickSearch: {
-      minHeight: 26,
+      minHeight: 44,
       justifyContent: "center",
       paddingHorizontal: 9,
       paddingVertical: 4,
@@ -5825,7 +6136,7 @@ function createStyles(colors: ThemeColors) {
     compactFiltersMobile: { gap: 4 },
     dropdownWrap: { position: "relative", zIndex: 31 },
     dropdownButton: {
-      height: 36,
+      minHeight: 44,
       paddingHorizontal: 11,
       borderRadius: 10,
       borderWidth: 1,
@@ -5836,7 +6147,7 @@ function createStyles(colors: ThemeColors) {
       justifyContent: "center",
       gap: 5,
     },
-    dropdownButtonCompact: { height: 34, paddingHorizontal: 8 },
+    dropdownButtonCompact: { minHeight: 44, paddingHorizontal: 8 },
     dropdownButtonText: { color: colors.navy, fontSize: 12, fontWeight: "800" },
     dropdownChevron: {
       color: colors.blue,
@@ -5886,6 +6197,8 @@ function createStyles(colors: ThemeColors) {
     },
     cardCompact: { padding: 12, borderRadius: 15 },
     cardExpanded: { borderColor: colors.blue },
+    providerGridDesktop: { flexDirection: "row", flexWrap: "wrap", gap: 14 },
+    providerCardDesktop: { flexGrow: 1, flexBasis: 380, maxWidth: "49%" },
     cardOpenArea: { flexDirection: "row", alignItems: "flex-start" },
     avatar: {
       width: 52,
@@ -5933,6 +6246,10 @@ function createStyles(colors: ThemeColors) {
       alignItems: "center",
       padding: 28,
     },
+    inlineError: { borderWidth: 1, borderColor: colors.danger, borderRadius: 12, backgroundColor: colors.surface, padding: 12, marginTop: 10, alignItems: "flex-start" },
+    inlineErrorText: { color: colors.danger, fontSize: 12, lineHeight: 18, fontWeight: "800" },
+    retryButton: { minHeight: 44, justifyContent: "center", borderWidth: 1, borderColor: colors.blue, borderRadius: 10, paddingHorizontal: 14, marginTop: 10 },
+    retryButtonText: { color: colors.blue, fontSize: 12, fontWeight: "900" },
     emptyTitle: {
       color: colors.navy,
       fontSize: 22,
@@ -5950,6 +6267,7 @@ function createStyles(colors: ThemeColors) {
     },
     secondaryText: { color: colors.blue, fontWeight: "800" },
     sectionPage: { width: "100%", maxWidth: 760, alignSelf: "center" },
+    sectionPageDesktop: { maxWidth: 1180 },
     pageTitle: { color: colors.navy, fontSize: 28, fontWeight: "900" },
     pageCopy: {
       color: colors.stone,
@@ -6714,13 +7032,14 @@ function createStyles(colors: ThemeColors) {
       bottom: 0,
       left: 0,
       right: 0,
-      height: 66,
+      height: 66 + nativeNavigationSpace,
+      paddingBottom: nativeNavigationSpace,
       backgroundColor: colors.surface,
       borderTopWidth: 1,
       borderTopColor: colors.line,
       flexDirection: "row",
     },
-    navCompact: { height: 64 },
+    navCompact: { height: 64 + nativeNavigationSpace },
     navItem: { flex: 1, alignItems: "center", justifyContent: "center" },
     navLabelWrap: { flexDirection: "row", alignItems: "center", gap: 4 },
     navText: { color: colors.stone, fontWeight: "700" },
@@ -6805,7 +7124,14 @@ function createStyles(colors: ThemeColors) {
       elevation: 20,
       backgroundColor: "rgba(0,10,20,0.78)",
       justifyContent: "flex-end",
+      paddingTop: safeTop,
+      paddingBottom: safeBottom,
     },
+    authBackdrop: { justifyContent: "flex-start", paddingTop: safeTop + 12 },
+    authKeyboardFrame: { flex: 1 },
+    authCard: { width: "100%", maxHeight: "100%" },
+    authCardContent: { paddingBottom: 12 },
+    dismissKeyboardArea: { position: "absolute", top: 0, right: 0, bottom: 0, left: 0 },
     modalCard: {
       backgroundColor: colors.surface,
       borderTopLeftRadius: 24,
@@ -6824,9 +7150,9 @@ function createStyles(colors: ThemeColors) {
       right: 18,
       top: 12,
       zIndex: 2,
-      width: 36,
-      height: 36,
-      borderRadius: 18,
+      width: 44,
+      height: 44,
+      borderRadius: 22,
       backgroundColor: colors.raised,
       alignItems: "center",
       justifyContent: "center",
@@ -6938,9 +7264,18 @@ function createStyles(colors: ThemeColors) {
       paddingHorizontal: 8,
     },
     cityChoice: {
-      flexBasis: 148,
-      maxWidth: 210,
+      flex: 1,
+      minWidth: 0,
+      minHeight: 48,
+      borderWidth: 1,
+      borderColor: colors.line,
+      borderRadius: 10,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: 3,
     },
+    cityRows: { gap: 8, marginBottom: 12 },
+    cityRow: { flexDirection: "row", gap: 8 },
     roleChoiceActive: {
       borderColor: colors.blue,
       backgroundColor: colors.raised,
@@ -6948,14 +7283,24 @@ function createStyles(colors: ThemeColors) {
     roleChoiceText: { color: colors.stone, fontSize: 12, fontWeight: "800" },
     roleChoiceTextActive: { color: colors.navy },
     subscriptionAccountId: { color: colors.blue, fontSize: 12, fontWeight: "900", marginBottom: 10 },
-    subscriptionBankCard: { backgroundColor: colors.successSurface, borderWidth: 1, borderColor: colors.green, borderRadius: 12, padding: 13, marginBottom: 13 },
-    subscriptionAlias: { color: colors.navy, fontSize: 18, fontWeight: "900", marginTop: 5, marginBottom: 5 },
-    subscriptionAliasCheck: { color: colors.green, fontSize: 21, fontWeight: "900" },
-    subscriptionBankDetails: { borderTopWidth: 1, borderTopColor: colors.line, gap: 8, paddingTop: 10, marginTop: 5, marginBottom: 10 },
-    subscriptionBankDetailLabel: { color: colors.stone, fontSize: 10, fontWeight: "700" },
-    subscriptionBankDetailValue: { color: colors.navy, fontSize: 12, fontWeight: "800", marginTop: 2 },
-    subscriptionPlanChoice: { minHeight: 48, flexDirection: "row", alignItems: "center", justifyContent: "space-between", borderWidth: 1, borderColor: colors.line, borderRadius: 10, paddingHorizontal: 14, marginBottom: 7 },
-    subscriptionPlanPrice: { color: colors.navy, fontSize: 13, fontWeight: "900" },
+    subscriptionBankCard: { backgroundColor: colors.successSurface, borderWidth: 1, borderColor: colors.green, borderRadius: 12, padding: 10, marginBottom: 10 },
+    subscriptionAliasRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
+    subscriptionAlias: { color: colors.navy, fontSize: 15, fontWeight: "900", marginTop: 3, marginBottom: 3, flexShrink: 1 },
+    subscriptionAliasCheck: { color: colors.green, fontSize: 17, fontWeight: "900" },
+    subscriptionCopyButton: { width: 28, height: 28, borderRadius: 7, borderWidth: 1, borderColor: colors.green, alignItems: "center", justifyContent: "center" },
+    subscriptionCopyIcon: { color: colors.green, fontSize: 16, fontWeight: "900", lineHeight: 18 },
+    subscriptionCopiedText: { color: colors.green, fontSize: 10, fontWeight: "800" },
+    subscriptionBankDetails: { borderTopWidth: 1, borderTopColor: colors.line, gap: 5, paddingTop: 7, marginTop: 3, marginBottom: 7 },
+    subscriptionBankDetailLabel: { color: colors.stone, fontSize: 9, fontWeight: "700" },
+    subscriptionBankDetailValue: { color: colors.navy, fontSize: 11, fontWeight: "800", marginTop: 1 },
+    subscriptionPlansRow: { flexDirection: "row", flexWrap: "wrap", gap: 5, marginBottom: 9 },
+    subscriptionPlanChoice: { flexGrow: 1, flexBasis: 78, minWidth: 72, minHeight: 68, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.line, borderRadius: 10, paddingHorizontal: 4, paddingVertical: 6 },
+    subscriptionPlanMonths: { color: colors.stone, fontSize: 11, lineHeight: 16, fontWeight: "800", textAlign: "center" },
+    subscriptionPlanPrice: { color: colors.navy, fontSize: 11, lineHeight: 16, fontWeight: "900", marginTop: 3, textAlign: "center" },
+    subscriptionBenefits: { color: colors.navy, fontSize: 11, lineHeight: 16, fontWeight: "800", textAlign: "center", marginTop: 2 },
+    comparePlansLink: { color: colors.blue, fontSize: 12, fontWeight: "900", textAlign: "center", paddingVertical: 10, textDecorationLine: "underline" },
+    planComparison: { borderRadius: 10, borderWidth: 1, borderColor: colors.line, padding: 10, gap: 6, marginBottom: 8 },
+    planComparisonText: { color: colors.stone, fontSize: 11, lineHeight: 16 },
     subscriptionReceiptReminder: { color: colors.orange, fontSize: 12, fontWeight: "900", marginTop: 9, marginBottom: 5 },
     singleAccountNote: { color: colors.stone, fontSize: 12, lineHeight: 18, marginBottom: 14 },
     termsRow: { flexDirection: "row", alignItems: "center", marginBottom: 12 },
@@ -7121,11 +7466,15 @@ function createStyles(colors: ThemeColors) {
     qrCodeSurface: { backgroundColor: "white", borderRadius: 18, padding: 18, alignSelf: "center", marginVertical: 16 },
     qrShortCode: { color: colors.navy, fontSize: 16, fontWeight: "900", letterSpacing: 2, textAlign: "center", marginBottom: 12 },
     qrScannerCard: { borderRadius: 18, overflow: "hidden", borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, marginBottom: 14 },
-    qrPermissionBox: { minHeight: 330, padding: 24, alignItems: "center", justifyContent: "center" },
+    qrPermissionBox: { minHeight: 300, padding: 24, alignItems: "center", justifyContent: "center" },
+    cameraPermissionIcon: { color: colors.blue, fontSize: 34, fontWeight: "900", marginBottom: 14 },
+    cameraPermissionButton: { minWidth: 190, minHeight: 48, marginTop: 18, paddingHorizontal: 18, borderRadius: 12, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center" },
+    cameraPermissionButtonText: { color: "white", fontSize: 14, fontWeight: "900", textAlign: "center" },
     cameraFrame: { height: 390, backgroundColor: "#000", position: "relative" },
     camera: { width: "100%", height: "100%" },
     cameraGuide: { position: "absolute", width: 220, height: 220, top: 85, alignSelf: "center", borderWidth: 3, borderColor: colors.orange, borderRadius: 22 },
     manualQrCard: { borderRadius: 15, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, padding: 15 },
+    manualQrHint: { color: colors.stone, fontSize: 13, lineHeight: 19, marginTop: 10, marginBottom: 18 },
     qualityChoices: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 13 },
     qualityChoice: { borderRadius: 999, borderWidth: 1, borderColor: colors.line, paddingHorizontal: 11, paddingVertical: 8, backgroundColor: colors.surfaceSoft },
     qualityChoiceActive: { borderColor: colors.green, backgroundColor: colors.successSurface },
@@ -7140,7 +7489,7 @@ function createStyles(colors: ThemeColors) {
     appealReviewButton: { alignSelf: "flex-start", marginTop: 10, borderWidth: 1, borderColor: colors.blue, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8 },
     appealReviewButtonText: { color: colors.blue, fontSize: 11, fontWeight: "900" },
     chatPendingLink: { color: "#FF4D4D", fontSize: 14, fontWeight: "900" },
-    qrNavItem: { marginTop: -16 },
+    qrNavItem: { marginTop: -10 },
     qrNavIcon: { width: 48, height: 48, borderRadius: 24, color: "white", backgroundColor: colors.orange, textAlign: "center", lineHeight: 48, fontSize: 24, fontWeight: "900", overflow: "hidden" },
     qrNavText: { color: colors.stone, fontSize: 9, fontWeight: "900", marginTop: 2 },
   });

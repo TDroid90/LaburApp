@@ -5,6 +5,7 @@ import { Image, Modal, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity
 import { containsContactAttempt } from "@laburapp/shared";
 import type { SavedCredentialEvidence, SavedProviderProfile, SavedServiceOffer, SavedTariffItem } from "../lib/local-store";
 import { supabase } from "../lib/supabase";
+import { DOCUMENT_IMAGE_POLICY, longestSideResize, PHOTO_IMAGE_POLICY, pickedImageError } from "../src/services/image-safety";
 import { certificationRules as fallbackCertificationRules, professionalSuggestions, providerServiceCatalog, serviceSpecialtiesAreValid, specialtyDescription, type CertificationRule } from "./provider-service-catalog";
 
 const cities = ["San Sebastián", "Río Grande", "Tolhuin", "Almanza", "Ushuaia"];
@@ -44,8 +45,8 @@ function inferredService(trade: string): SavedServiceOffer {
   return { ...defaultService(), family: match.family.name, service: match.specialty, specialties: [match.specialty], description: specialtyDescription(match.family.name, match.specialty) };
 }
 
-function normalizeServices(profile: SavedProviderProfile) {
-  const realServices = (profile.services ?? []).filter((item) => !isDiagnostic(item.service)).slice(0, 2).map((item) => ({
+function normalizeServices(profile: SavedProviderProfile, limit: number) {
+  const realServices = (profile.services ?? []).filter((item) => !isDiagnostic(item.service)).slice(0, limit).map((item) => ({
     ...item,
     family: item.family ?? "",
     specialties: item.specialties?.length ? item.specialties.slice(0, 2) : item.service ? [item.service] : [],
@@ -54,8 +55,9 @@ function normalizeServices(profile: SavedProviderProfile) {
   return realServices.length ? realServices : [inferredService(profile.trade)];
 }
 
-export function ProviderProfileForm({ darkMode, initialProfile, email, busy, remoteError, onCancel, onSubmit }: {
+export function ProviderProfileForm({ darkMode, premium, initialProfile, email, busy, remoteError, onCancel, onSubmit }: {
   darkMode: boolean;
+  premium: boolean;
   initialProfile: SavedProviderProfile;
   email: string;
   busy: boolean;
@@ -66,12 +68,13 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
   const { width } = useWindowDimensions();
   const styles = useMemo(() => createStyles(darkMode), [darkMode]);
   const compact = width < 720;
+  const serviceLimit = premium ? 6 : 2;
   const legacyDiagnostic = initialProfile.services?.find((item) => isDiagnostic(item.service));
   const initialCoverage = initialProfile.coverageAreas?.filter((area) => coverageChoices.includes(area)) ?? (initialProfile.zones === "Toda la provincia" ? coverageChoices : initialProfile.city ? [initialProfile.city] : []);
   const [draft, setDraft] = useState<SavedProviderProfile>(() => ({
     ...initialProfile,
     diagnosticPrice: initialProfile.diagnosticPrice ?? legacyDiagnostic?.price ?? 35000,
-    services: normalizeServices(initialProfile),
+    services: normalizeServices(initialProfile, serviceLimit),
     certifications: initialProfile.certifications ?? [],
     credentials: initialProfile.credentials ?? [],
     tariffItems: (initialProfile.tariffItems ?? []).filter((item) => !isDiagnostic(item.label)).slice(0, 5),
@@ -198,35 +201,45 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
 
   async function pickCredentialPhoto(certification: string) {
     setLocalError("");
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ["images"],
-      allowsEditing: false,
-      quality: 0.9,
-    });
-    if (result.canceled || !result.assets[0]) return;
-    const asset = result.assets[0];
-    const longestSide = Math.max(asset.width ?? 0, asset.height ?? 0);
-    const resize = longestSide > 1600
-      ? asset.width >= asset.height ? [{ resize: { width: 1600 } }] : [{ resize: { height: 1600 } }]
-      : [];
-    const optimized = await ImageManipulator.manipulateAsync(
-      asset.uri,
-      resize,
-      { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true },
-    );
-    updateCredential(certification, {
-      imageUri: optimized.base64 ? `data:image/jpeg;base64,${optimized.base64}` : optimized.uri,
-      privatePath: undefined,
-      status: "pending",
-    });
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ["images"],
+        allowsEditing: false,
+        quality: 0.9,
+      });
+      if (result.canceled || !result.assets[0]) return;
+      const asset = result.assets[0];
+      const validationError = pickedImageError(asset, DOCUMENT_IMAGE_POLICY);
+      if (validationError) return setLocalError(validationError);
+      const optimized = await ImageManipulator.manipulateAsync(
+        asset.uri,
+        longestSideResize(asset.width, asset.height, 1600),
+        { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG, base64: true },
+      );
+      updateCredential(certification, {
+        imageUri: optimized.base64 ? `data:image/jpeg;base64,${optimized.base64}` : optimized.uri,
+        privatePath: undefined,
+        status: "pending",
+      });
+    } catch {
+      setLocalError("No pudimos abrir ese documento. Probá con otra imagen.");
+    }
   }
 
   async function pickPhoto() {
-    const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: true, aspect: [1, 1], quality: 0.7, base64: true });
-    if (result.canceled || !result.assets[0]) return;
-    const asset = result.assets[0];
-    const photoUri = asset.base64 ? `data:${asset.mimeType ?? "image/jpeg"};base64,${asset.base64}` : asset.uri;
-    setDraft((current) => ({ ...current, photoUri }));
+    setLocalError("");
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: true, aspect: [1, 1], quality: 0.7 });
+      if (result.canceled || !result.assets[0]) return;
+      const asset = result.assets[0];
+      const validationError = pickedImageError(asset, PHOTO_IMAGE_POLICY);
+      if (validationError) return setLocalError(validationError);
+      const optimized = await ImageManipulator.manipulateAsync(asset.uri, [{ resize: { width: 512, height: 512 } }], { compress: 0.72, format: ImageManipulator.SaveFormat.JPEG, base64: true });
+      const photoUri = optimized.base64 ? `data:image/jpeg;base64,${optimized.base64}` : optimized.uri;
+      setDraft((current) => ({ ...current, photoUri }));
+    } catch (error) {
+      setLocalError(error instanceof Error && error.message ? error.message : "No pudimos abrir esa foto. Probá con otra imagen.");
+    }
   }
 
   function submit() {
@@ -266,35 +279,35 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
     <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
       <Text style={styles.sectionTitle}>Tu información</Text>
       <View style={styles.identityRow}>
-        {draft.photoUri ? <Image source={{ uri: draft.photoUri }} style={styles.photo} /> : <View style={styles.photoFallback}><Text style={styles.photoInitial}>{draft.displayName.slice(0, 1).toUpperCase() || "P"}</Text></View>}
+        {draft.photoUri ? <Image accessibilityLabel="Vista previa de la foto de perfil" source={{ uri: draft.photoUri }} style={styles.photo} /> : <View style={styles.photoFallback}><Text style={styles.photoInitial}>{draft.displayName.slice(0, 1).toUpperCase() || "P"}</Text></View>}
         <View style={styles.identityFields}><TouchableOpacity accessibilityRole="button" style={styles.photoButton} onPress={() => void pickPhoto()}><Text style={styles.photoButtonText}>{draft.photoUri ? "Cambiar foto" : "Agregar foto"}</Text></TouchableOpacity><Text style={styles.email}>{email}</Text></View>
       </View>
       <View style={[styles.fieldsRow, compact && styles.fieldsColumn]}>
-        <View style={styles.flexField}><Text style={styles.label}>Nombre y apellido</Text><TextInput value={draft.displayName} onChangeText={(displayName) => setDraft({ ...draft, displayName })} placeholder="Nombre y apellido" placeholderTextColor="#71818B" style={styles.input} /></View>
-        <View style={styles.diagnosticField}><Text style={styles.label}>Diagnóstico desde</Text><View style={styles.money}><Text style={styles.currency}>$</Text><TextInput value={`${draft.diagnosticPrice || ""}`} onChangeText={(value) => setDraft({ ...draft, diagnosticPrice: numericValue(value) })} keyboardType="numeric" placeholder="35000" placeholderTextColor="#71818B" style={styles.priceInput} /><Text style={styles.currency}>ARS</Text></View></View>
+        <View style={styles.flexField}><Text style={styles.label}>Nombre y apellido</Text><TextInput accessibilityLabel="Nombre y apellido profesional" value={draft.displayName} onChangeText={(displayName) => setDraft({ ...draft, displayName })} placeholder="Nombre y apellido" placeholderTextColor="#71818B" style={styles.input} /></View>
+        <View style={styles.diagnosticField}><Text style={styles.label}>Diagnóstico desde</Text><View style={styles.money}><Text style={styles.currency}>$</Text><TextInput accessibilityLabel="Precio inicial de diagnóstico" value={`${draft.diagnosticPrice || ""}`} onChangeText={(value) => setDraft({ ...draft, diagnosticPrice: numericValue(value) })} keyboardType="numeric" placeholder="35000" placeholderTextColor="#71818B" style={styles.priceInput} /><Text style={styles.currency}>ARS</Text></View></View>
       </View>
       <Text style={styles.help}>Es una tarifa inicial de visita o diagnóstico; no cuenta como servicio.</Text>
 
       <Text style={styles.label}>Ciudad</Text>
       <TouchableOpacity accessibilityRole="button" accessibilityLabel="Elegir ciudad" style={styles.selector} onPress={() => { setCityOpen((current) => !current); setCoverageOpen(false); setActiveTradeField(null); setOpenFamilyId(null); setOpenSpecialtyId(null); }}><Text style={[styles.selectorText, !draft.city && styles.placeholder]}>{draft.city || "Seleccioná tu ciudad"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
-      {cityOpen && <View style={styles.options}>{cities.map((city) => <TouchableOpacity key={city} style={[styles.option, draft.city === city && styles.optionActive]} onPress={() => selectCity(city)}><Text style={[styles.optionText, draft.city === city && styles.optionTextActive]}>{city}</Text></TouchableOpacity>)}</View>}
+      {cityOpen && <View style={styles.options}>{cities.map((city) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Elegir ${city}`} key={city} style={[styles.option, draft.city === city && styles.optionActive]} onPress={() => selectCity(city)}><Text style={[styles.optionText, draft.city === city && styles.optionTextActive]}>{city}</Text></TouchableOpacity>)}</View>}
 
       <Text style={styles.label}>Profesional · hasta 2 en el plan gratis</Text>
-      <TextInput value={draft.trade} onFocus={() => { setActiveTradeField("primary"); setCityOpen(false); setCoverageOpen(false); }} onChangeText={(trade) => { setDraft({ ...draft, trade }); setActiveTradeField("primary"); }} placeholder="Ej. Gasista" placeholderTextColor="#71818B" style={styles.input} />
-      {activeTradeField === "primary" && filteredTrades.length > 0 && <View style={styles.suggestions}>{filteredTrades.map((trade) => <TouchableOpacity key={trade} style={styles.suggestion} onPress={() => { setDraft({ ...draft, trade }); setActiveTradeField(null); }}><Text style={styles.suggestionHash}>+</Text><Text style={styles.suggestionText}>{trade}</Text></TouchableOpacity>)}</View>}
+      <TextInput accessibilityLabel="Profesión principal" value={draft.trade} onFocus={() => { setActiveTradeField("primary"); setCityOpen(false); setCoverageOpen(false); }} onChangeText={(trade) => { setDraft({ ...draft, trade }); setActiveTradeField("primary"); }} placeholder="Ej. Gasista" placeholderTextColor="#71818B" style={styles.input} />
+      {activeTradeField === "primary" && filteredTrades.length > 0 && <View style={styles.suggestions}>{filteredTrades.map((trade) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Elegir ${trade}`} key={trade} style={styles.suggestion} onPress={() => { setDraft({ ...draft, trade }); setActiveTradeField(null); }}><Text style={styles.suggestionHash}>+</Text><Text style={styles.suggestionText}>{trade}</Text></TouchableOpacity>)}</View>}
       {draft.secondaryTrade !== undefined ? <>
-        <View style={styles.serviceTop}><Text style={styles.miniLabel}>SEGUNDA PROFESIÓN</Text><TouchableOpacity onPress={() => { setDraft({ ...draft, secondaryTrade: undefined }); setActiveTradeField(null); }}><Text style={styles.remove}>Quitar</Text></TouchableOpacity></View>
-        <TextInput value={draft.secondaryTrade} onFocus={() => { setActiveTradeField("secondary"); setCityOpen(false); setCoverageOpen(false); }} onChangeText={(secondaryTrade) => { setDraft({ ...draft, secondaryTrade }); setActiveTradeField("secondary"); }} placeholder="Ej. Plomero" placeholderTextColor="#71818B" style={styles.input} />
-        {activeTradeField === "secondary" && filteredTrades.length > 0 && <View style={styles.suggestions}>{filteredTrades.map((trade) => <TouchableOpacity key={trade} style={styles.suggestion} onPress={() => { setDraft({ ...draft, secondaryTrade: trade }); setActiveTradeField(null); }}><Text style={styles.suggestionHash}>+</Text><Text style={styles.suggestionText}>{trade}</Text></TouchableOpacity>)}</View>}
+        <View style={styles.serviceTop}><Text style={styles.miniLabel}>SEGUNDA PROFESIÓN</Text><TouchableOpacity accessibilityRole="button" onPress={() => { setDraft({ ...draft, secondaryTrade: undefined }); setActiveTradeField(null); }}><Text style={styles.remove}>Quitar</Text></TouchableOpacity></View>
+        <TextInput accessibilityLabel="Segunda profesión" value={draft.secondaryTrade} onFocus={() => { setActiveTradeField("secondary"); setCityOpen(false); setCoverageOpen(false); }} onChangeText={(secondaryTrade) => { setDraft({ ...draft, secondaryTrade }); setActiveTradeField("secondary"); }} placeholder="Ej. Plomero" placeholderTextColor="#71818B" style={styles.input} />
+        {activeTradeField === "secondary" && filteredTrades.length > 0 && <View style={styles.suggestions}>{filteredTrades.map((trade) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Elegir ${trade}`} key={trade} style={styles.suggestion} onPress={() => { setDraft({ ...draft, secondaryTrade: trade }); setActiveTradeField(null); }}><Text style={styles.suggestionHash}>+</Text><Text style={styles.suggestionText}>{trade}</Text></TouchableOpacity>)}</View>}
       </> : <TouchableOpacity accessibilityRole="button" style={styles.addService} onPress={() => { setDraft({ ...draft, secondaryTrade: "" }); setActiveTradeField("secondary"); }}><Text style={styles.addServiceText}>+ Agregar segunda profesión</Text></TouchableOpacity>}
       <Text style={styles.help}>Podés mostrar hasta dos profesiones sin costo. Una tercera requiere membresía.</Text>
-      <TextInput multiline value={draft.bio} onChangeText={(bio) => setDraft({ ...draft, bio })} placeholder="Breve presentación: qué hacés y cómo trabajás" placeholderTextColor="#71818B" maxLength={600} style={[styles.input, styles.multiline]} />
-      <TextInput multiline value={draft.training ?? ""} onChangeText={(training) => setDraft({ ...draft, training })} placeholder="Formación y experiencia" placeholderTextColor="#71818B" maxLength={1200} style={[styles.input, styles.multilineSmall]} />
+      <TextInput accessibilityLabel="Presentación profesional" multiline value={draft.bio} onChangeText={(bio) => setDraft({ ...draft, bio })} placeholder="Breve presentación: qué hacés y cómo trabajás" placeholderTextColor="#71818B" maxLength={600} style={[styles.input, styles.multiline]} />
+      <TextInput accessibilityLabel="Formación y experiencia" multiline value={draft.training ?? ""} onChangeText={(training) => setDraft({ ...draft, training })} placeholder="Formación y experiencia" placeholderTextColor="#71818B" maxLength={1200} style={[styles.input, styles.multilineSmall]} />
 
       <Text style={styles.label}>Certificaciones</Text>
       {!!draft.certifications?.length && <View style={styles.chipList}>{draft.certifications.map((certification) => <View key={certification} style={styles.chip}><Text style={styles.chipText}>#{certification.replace(/\s+/g, "_")}</Text><TouchableOpacity accessibilityRole="button" accessibilityLabel={`Quitar ${certification}`} onPress={() => removeCertification(certification)}><Text style={styles.chipRemove}>×</Text></TouchableOpacity></View>)}</View>}
-      <TextInput value={certificationInput} onFocus={() => { setActiveTradeField(null); setCityOpen(false); setCoverageOpen(false); }} onChangeText={setCertificationInput} onSubmitEditing={() => addCertification(certificationInput)} placeholder="Escribí para agregar una certificación" placeholderTextColor="#71818B" style={styles.input} />
-      {certificationInput.trim().length > 0 && <View style={styles.suggestions}>{filteredCertifications.map((certification) => <TouchableOpacity key={certification} style={styles.suggestion} onPress={() => addCertification(certification)}><Text style={styles.suggestionHash}>#</Text><Text style={styles.suggestionText}>{certification}</Text></TouchableOpacity>)}<TouchableOpacity style={styles.suggestion} onPress={() => addCertification(certificationInput)}><Text style={styles.suggestionHash}>+</Text><Text style={styles.suggestionText}>Agregar “{certificationInput.trim()}”</Text></TouchableOpacity></View>}
+      <TextInput accessibilityLabel="Agregar certificación" value={certificationInput} onFocus={() => { setActiveTradeField(null); setCityOpen(false); setCoverageOpen(false); }} onChangeText={setCertificationInput} onSubmitEditing={() => addCertification(certificationInput)} placeholder="Escribí para agregar una certificación" placeholderTextColor="#71818B" style={styles.input} />
+      {certificationInput.trim().length > 0 && <View style={styles.suggestions}>{filteredCertifications.map((certification) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Agregar certificación ${certification}`} key={certification} style={styles.suggestion} onPress={() => addCertification(certification)}><Text style={styles.suggestionHash}>#</Text><Text style={styles.suggestionText}>{certification}</Text></TouchableOpacity>)}<TouchableOpacity accessibilityRole="button" accessibilityLabel={`Agregar certificación ${certificationInput.trim()}`} style={styles.suggestion} onPress={() => addCertification(certificationInput)}><Text style={styles.suggestionHash}>+</Text><Text style={styles.suggestionText}>Agregar “{certificationInput.trim()}”</Text></TouchableOpacity></View>}
       <View style={styles.documentPanel}>
         <View style={styles.documentPanelCopy}>
           <Text style={styles.documentPanelTitle}>Documentación de respaldo</Text>
@@ -330,9 +343,9 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
                       <Text style={[styles.credentialStatus, status === "verified" && styles.credentialVerified, (status === "rejected" || status === "expired") && styles.credentialRejected]}>{status === "verified" ? "VERIFICADA" : status === "pending" ? "EN REVISIÓN" : status === "rejected" ? "OBSERVADA" : status === "expired" ? "ACTUALIZAR" : "SIN VALIDAR"}</Text>
                     </View>
                     <View style={[styles.credentialBody, compact && styles.credentialBodyCompact]}>
-                      {(credential?.imageUri || credential?.privatePath) ? <View style={styles.credentialPreviewWrap}>{credential?.imageUri ? <Image source={{ uri: credential.imageUri }} resizeMode="contain" style={styles.credentialPreview} /> : <View style={styles.credentialStored}><Text style={styles.credentialStoredIcon}>✓</Text><Text style={styles.credentialStoredText}>Un archivo guardado</Text></View>}</View> : <View style={styles.credentialEmpty}><Text style={styles.credentialEmptyIcon}>▧</Text><Text style={styles.credentialEmptyText}>Falta el archivo</Text></View>}
+                      {(credential?.imageUri || credential?.privatePath) ? <View style={styles.credentialPreviewWrap}>{credential?.imageUri ? <Image accessibilityLabel={`Vista previa del comprobante de ${certification}`} source={{ uri: credential.imageUri }} resizeMode="contain" style={styles.credentialPreview} /> : <View style={styles.credentialStored}><Text style={styles.credentialStoredIcon}>✓</Text><Text style={styles.credentialStoredText}>Un archivo guardado</Text></View>}</View> : <View style={styles.credentialEmpty}><Text style={styles.credentialEmptyIcon}>▧</Text><Text style={styles.credentialEmptyText}>Falta el archivo</Text></View>}
                       <View style={styles.credentialFields}>
-                        {rule?.requiresNumber && <><Text style={styles.miniLabel}>{(rule.numberLabel ?? "Número de matrícula").toLocaleUpperCase("es-AR")}</Text><TextInput value={credential?.number ?? ""} onChangeText={(number) => updateCredential(certification, { number: number.replace(/\D/g, "").slice(0, 30), numberLabel: rule.numberLabel, status: credential?.imageUri || credential?.privatePath ? "pending" : "missing" })} keyboardType="number-pad" placeholder="Ingresá sólo números" placeholderTextColor="#71818B" style={styles.input} /></>}
+                        {rule?.requiresNumber && <><Text style={styles.miniLabel}>{(rule.numberLabel ?? "Número de matrícula").toLocaleUpperCase("es-AR")}</Text><TextInput accessibilityLabel={`${rule.numberLabel ?? "Número de matrícula"} de ${certification}`} value={credential?.number ?? ""} onChangeText={(number) => updateCredential(certification, { number: number.replace(/\D/g, "").slice(0, 30), numberLabel: rule.numberLabel, status: credential?.imageUri || credential?.privatePath ? "pending" : "missing" })} keyboardType="number-pad" placeholder="Ingresá sólo números" placeholderTextColor="#71818B" style={styles.input} /></>}
                         <TouchableOpacity accessibilityRole="button" style={styles.credentialUpload} onPress={() => void pickCredentialPhoto(certification)}><Text style={styles.credentialUploadText}>{credential?.imageUri || credential?.privatePath ? "Reemplazar archivo" : "Subir único archivo"}</Text></TouchableOpacity>
                       </View>
                     </View>
@@ -348,20 +361,20 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
       <Text style={styles.label}>Dónde trabajás</Text>
       <TouchableOpacity accessibilityRole="button" accessibilityLabel="Elegir alcance de trabajo" style={styles.selector} onPress={() => { setCoverageOpen((current) => !current); setCityOpen(false); setActiveTradeField(null); setOpenFamilyId(null); setOpenSpecialtyId(null); }}><Text style={styles.selectorText}>{draft.zones}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
       {coverageOpen && <View style={styles.options}>
-        <TouchableOpacity style={[styles.coverageOption, draft.zones === "Toda la provincia" && styles.optionActive]} onPress={toggleAllCoverage}><Text style={styles.optionCheck}>{draft.zones === "Toda la provincia" ? "☑" : "☐"}</Text><Text style={[styles.optionText, draft.zones === "Toda la provincia" && styles.optionTextActive]}>Toda la provincia</Text></TouchableOpacity>
+        <TouchableOpacity accessibilityRole="checkbox" accessibilityState={{ checked: draft.zones === "Toda la provincia" }} style={[styles.coverageOption, draft.zones === "Toda la provincia" && styles.optionActive]} onPress={toggleAllCoverage}><Text style={styles.optionCheck}>{draft.zones === "Toda la provincia" ? "☑" : "☐"}</Text><Text style={[styles.optionText, draft.zones === "Toda la provincia" && styles.optionTextActive]}>Toda la provincia</Text></TouchableOpacity>
         {coverageChoices.map((coverage) => {
           const selected = draft.coverageAreas?.includes(coverage) ?? false;
-          return <TouchableOpacity key={coverage} style={[styles.coverageOption, selected && styles.optionActive]} onPress={() => toggleCoverage(coverage)}><Text style={styles.optionCheck}>{selected ? "☑" : "☐"}</Text><Text style={[styles.optionText, selected && styles.optionTextActive]}>{coverage}</Text></TouchableOpacity>;
+          return <TouchableOpacity accessibilityRole="checkbox" accessibilityState={{ checked: selected }} key={coverage} style={[styles.coverageOption, selected && styles.optionActive]} onPress={() => toggleCoverage(coverage)}><Text style={styles.optionCheck}>{selected ? "☑" : "☐"}</Text><Text style={[styles.optionText, selected && styles.optionTextActive]}>{coverage}</Text></TouchableOpacity>;
         })}
       </View>}
 
       <View style={styles.servicesHeading}><View><Text style={styles.sectionTitle}>Tarifario interno</Text><Text style={styles.help}>Guardá hasta 5 tareas frecuentes con su precio y tiempo estimado. Sólo vos los verás y podrás usarlos al responder presupuestos.</Text></View><Text style={styles.freeBadge}>{(draft.tariffItems ?? []).length}/5</Text></View>
       {(draft.tariffItems ?? []).map((item, index) => <View key={item.id} style={styles.tariffCard}>
-        <View style={styles.serviceTop}><Text style={styles.serviceNumber}>ELEMENTO {index + 1}</Text><TouchableOpacity onPress={() => removeTariffItem(item.id)}><Text style={styles.remove}>Quitar</Text></TouchableOpacity></View>
-        <TextInput value={item.label} onChangeText={(label) => updateTariffItem(item.id, { label })} placeholder="Ej. Instalación de calefactor" placeholderTextColor="#71818B" style={styles.input} />
+        <View style={styles.serviceTop}><Text style={styles.serviceNumber}>ELEMENTO {index + 1}</Text><TouchableOpacity accessibilityRole="button" accessibilityLabel={`Quitar elemento ${index + 1} del tarifario`} onPress={() => removeTariffItem(item.id)}><Text style={styles.remove}>Quitar</Text></TouchableOpacity></View>
+        <TextInput accessibilityLabel={`Nombre del elemento ${index + 1} del tarifario`} value={item.label} onChangeText={(label) => updateTariffItem(item.id, { label })} placeholder="Ej. Instalación de calefactor" placeholderTextColor="#71818B" style={styles.input} />
         <View style={[styles.fieldsRow, compact && styles.fieldsColumn]}>
-          <View style={styles.flexField}><Text style={styles.miniLabel}>PRECIO</Text><View style={styles.money}><Text style={styles.currency}>$</Text><TextInput value={item.unitPrice ? `${item.unitPrice}` : ""} onChangeText={(value) => updateTariffItem(item.id, { unitPrice: numericValue(value) })} keyboardType="numeric" placeholder="35000" placeholderTextColor="#71818B" style={styles.priceInput} /><Text style={styles.currency}>ARS</Text></View></View>
-          <View style={styles.diagnosticField}><Text style={styles.miniLabel}>HORAS ESTIMADAS</Text><TextInput value={item.estimatedHours ? `${item.estimatedHours}` : ""} onChangeText={(value) => updateTariffItem(item.id, { estimatedHours: numericValue(value) })} keyboardType="decimal-pad" placeholder="2" placeholderTextColor="#71818B" style={styles.input} /></View>
+          <View style={styles.flexField}><Text style={styles.miniLabel}>PRECIO</Text><View style={styles.money}><Text style={styles.currency}>$</Text><TextInput accessibilityLabel={`Precio del elemento ${index + 1}`} value={item.unitPrice ? `${item.unitPrice}` : ""} onChangeText={(value) => updateTariffItem(item.id, { unitPrice: numericValue(value) })} keyboardType="numeric" placeholder="35000" placeholderTextColor="#71818B" style={styles.priceInput} /><Text style={styles.currency}>ARS</Text></View></View>
+          <View style={styles.diagnosticField}><Text style={styles.miniLabel}>HORAS ESTIMADAS</Text><TextInput accessibilityLabel={`Horas estimadas del elemento ${index + 1}`} value={item.estimatedHours ? `${item.estimatedHours}` : ""} onChangeText={(value) => updateTariffItem(item.id, { estimatedHours: numericValue(value) })} keyboardType="decimal-pad" placeholder="2" placeholderTextColor="#71818B" style={styles.input} /></View>
         </View>
       </View>)}
       <TouchableOpacity accessibilityRole="button" disabled={(draft.tariffItems ?? []).length >= 5} style={[styles.addService, (draft.tariffItems ?? []).length >= 5 && styles.disabled]} onPress={() => { if ((draft.tariffItems ?? []).length >= 5) return; setDraft({ ...draft, tariffItems: [...(draft.tariffItems ?? []), defaultTariffItem(`${Date.now()}-${(draft.tariffItems ?? []).length}`)] }); }}><Text style={styles.addServiceText}>{(draft.tariffItems ?? []).length >= 5 ? "Límite de 5 elementos alcanzado" : "+ Agregar elemento al tarifario"}</Text></TouchableOpacity>
@@ -373,43 +386,43 @@ export function ProviderProfileForm({ darkMode, initialProfile, email, busy, rem
           const value = field === "start" ? draft.availabilityStart : draft.availabilityEnd;
           return <View key={field} style={styles.timeField}>
             <Text style={styles.miniLabel}>{field === "start" ? "DESDE" : "HASTA"}</Text>
-            <TouchableOpacity style={styles.selector} onPress={() => setAvailabilityPicker(availabilityPicker === field ? null : field)}><Text style={styles.selectorText}>{value}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
-            {availabilityPicker === field && <ScrollView nestedScrollEnabled style={styles.timeOptions}>{timeOptions.filter((time) => field === "start" ? time < (draft.availabilityEnd ?? "18:00") : time > (draft.availabilityStart ?? "08:00")).map((time) => <TouchableOpacity key={`${field}-${time}`} style={[styles.option, value === time && styles.optionActive]} onPress={() => { setDraft((current) => ({ ...current, [field === "start" ? "availabilityStart" : "availabilityEnd"]: time })); setAvailabilityPicker(null); }}><Text style={[styles.optionText, value === time && styles.optionTextActive]}>{time}</Text></TouchableOpacity>)}</ScrollView>}
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel={`${field === "start" ? "Hora inicial" : "Hora final"}: ${value}`} style={styles.selector} onPress={() => setAvailabilityPicker(availabilityPicker === field ? null : field)}><Text style={styles.selectorText}>{value}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
+            {availabilityPicker === field && <ScrollView nestedScrollEnabled style={styles.timeOptions}>{timeOptions.filter((time) => field === "start" ? time < (draft.availabilityEnd ?? "18:00") : time > (draft.availabilityStart ?? "08:00")).map((time) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Elegir ${time}`} key={`${field}-${time}`} style={[styles.option, value === time && styles.optionActive]} onPress={() => { setDraft((current) => ({ ...current, [field === "start" ? "availabilityStart" : "availabilityEnd"]: time })); setAvailabilityPicker(null); }}><Text style={[styles.optionText, value === time && styles.optionTextActive]}>{time}</Text></TouchableOpacity>)}</ScrollView>}
           </View>;
         })}
       </View>
 
-      <View style={styles.servicesHeading}><View><Text style={styles.sectionTitle}>Tus servicios</Text><Text style={styles.help}>Elegí el rubro y después una especialidad concreta.</Text></View><Text style={styles.freeBadge}>GRATIS · 2</Text></View>
+      <View style={styles.servicesHeading}><View><Text style={styles.sectionTitle}>Tus servicios</Text><Text style={styles.help}>Elegí el rubro y después una especialidad concreta.</Text></View><Text style={styles.freeBadge}>{premium ? "PREMIUM · 6" : "GRATIS · 2"}</Text></View>
       {services.map((item, index) => {
         const family = providerServiceCatalog.find((option) => option.name === item.family);
         const descriptionLength = item.description?.length ?? 0;
         return <View key={item.id} style={styles.serviceCard}>
-          <View style={styles.serviceTop}><Text style={styles.serviceNumber}>SERVICIO {index + 1}</Text>{services.length > 1 && <TouchableOpacity onPress={() => setDraft({ ...draft, services: services.filter((service) => service.id !== item.id) })}><Text style={styles.remove}>Quitar</Text></TouchableOpacity>}</View>
+          <View style={styles.serviceTop}><Text style={styles.serviceNumber}>SERVICIO {index + 1}</Text>{services.length > 1 && <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Quitar servicio ${index + 1}`} onPress={() => setDraft({ ...draft, services: services.filter((service) => service.id !== item.id) })}><Text style={styles.remove}>Quitar</Text></TouchableOpacity>}</View>
           <Text style={styles.miniLabel}>FAMILIA</Text>
           <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Elegir familia del servicio ${index + 1}`} style={styles.selector} onPress={() => { setOpenFamilyId(openFamilyId === item.id ? null : item.id); setOpenSpecialtyId(null); setCityOpen(false); setCoverageOpen(false); setActiveTradeField(null); }}><Text style={[styles.selectorText, !item.family && styles.placeholder]}>{item.family || "Elegí un rubro"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
-          {openFamilyId === item.id && <ScrollView nestedScrollEnabled style={styles.catalogOptions}>{providerServiceCatalog.map((option) => <TouchableOpacity key={option.name} style={[styles.familyOption, item.family === option.name && styles.optionActive]} onPress={() => { updateService(item.id, { family: option.name, service: "", specialties: [], description: "" }); setOpenFamilyId(null); setOpenSpecialtyId(item.id); }}><Text style={[styles.optionText, item.family === option.name && styles.optionTextActive]}>{option.name}</Text><Text style={styles.optionDescription}>{option.description}</Text></TouchableOpacity>)}</ScrollView>}
+          {openFamilyId === item.id && <ScrollView nestedScrollEnabled style={styles.catalogOptions}>{providerServiceCatalog.map((option) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Elegir familia ${option.name}`} key={option.name} style={[styles.familyOption, item.family === option.name && styles.optionActive]} onPress={() => { updateService(item.id, { family: option.name, service: "", specialties: [], description: "" }); setOpenFamilyId(null); setOpenSpecialtyId(item.id); }}><Text style={[styles.optionText, item.family === option.name && styles.optionTextActive]}>{option.name}</Text><Text style={styles.optionDescription}>{option.description}</Text></TouchableOpacity>)}</ScrollView>}
           <Text style={styles.miniLabel}>ESPECIALIDADES · ELEGÍ HASTA 2</Text>
           <TouchableOpacity accessibilityRole="button" disabled={!family} accessibilityLabel={`Elegir especialidades del servicio ${index + 1}`} style={[styles.selector, !family && styles.disabledSelector]} onPress={() => family && setOpenSpecialtyId(openSpecialtyId === item.id ? null : item.id)}><Text style={[styles.selectorText, !item.specialties?.length && styles.placeholder]}>{item.specialties?.length ? item.specialties.join(" · ") : family ? "Elegí hasta 2 especialidades" : "Primero elegí una familia"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
           {openSpecialtyId === item.id && family && <ScrollView nestedScrollEnabled style={styles.specialtyOptions}>{family.specialties.map((specialty) => {
             const selected = item.specialties?.includes(specialty) ?? false;
             const unavailable = !selected && (item.specialties?.length ?? 0) >= 2;
-            return <TouchableOpacity key={specialty} disabled={unavailable} style={[styles.specialtyOption, selected && styles.specialtyOptionActive, unavailable && styles.unavailableOption]} onPress={() => toggleSpecialty(item, specialty)}><View style={styles.specialtyTitleRow}><Text style={styles.optionCheck}>{selected ? "☑" : "☐"}</Text><Text style={[styles.specialtyTitle, selected && styles.optionTextActive]}>{specialty}</Text></View><Text style={styles.optionDescription}>{specialtyDescription(family.name, specialty)}</Text></TouchableOpacity>;
+            return <TouchableOpacity accessibilityRole="checkbox" accessibilityState={{ checked: selected, disabled: unavailable }} key={specialty} disabled={unavailable} style={[styles.specialtyOption, selected && styles.specialtyOptionActive, unavailable && styles.unavailableOption]} onPress={() => toggleSpecialty(item, specialty)}><View style={styles.specialtyTitleRow}><Text style={styles.optionCheck}>{selected ? "☑" : "☐"}</Text><Text style={[styles.specialtyTitle, selected && styles.optionTextActive]}>{specialty}</Text></View><Text style={styles.optionDescription}>{specialtyDescription(family.name, specialty)}</Text></TouchableOpacity>;
           })}</ScrollView>}
           <View style={styles.descriptionHeading}><Text style={styles.miniLabel}>CONTALE BREVEMENTE AL CLIENTE QUÉ OFRECÉS</Text><Text style={styles.counter}>{descriptionLength}/240</Text></View>
-          <TextInput multiline maxLength={240} value={item.description ?? ""} onChangeText={(description) => updateService(item.id, { description })} placeholder="Ej. Reviso la instalación, detecto la falla y explico las opciones antes de comenzar." placeholderTextColor="#71818B" style={[styles.input, styles.serviceDescription]} />
+          <TextInput accessibilityLabel={`Descripción del servicio ${index + 1}`} multiline maxLength={240} value={item.description ?? ""} onChangeText={(description) => updateService(item.id, { description })} placeholder="Ej. Reviso la instalación, detecto la falla y explico las opciones antes de comenzar." placeholderTextColor="#71818B" style={[styles.input, styles.serviceDescription]} />
           <Text style={styles.help}>No incluyas teléfono, correo, redes sociales ni enlaces.</Text>
         </View>;
       })}
       <TouchableOpacity accessibilityRole="button" style={styles.addService} onPress={() => {
-        if (services.length >= 2) return setMembershipNotice(true);
+        if (services.length >= serviceLimit) return setMembershipNotice(true);
         setMembershipNotice(false);
         setDraft({ ...draft, services: [...services, defaultService(`${Date.now()}-${services.length}`)] });
       }}><Text style={styles.addServiceText}>＋ Agregar otro servicio</Text></TouchableOpacity>
-      {membershipNotice && <View style={styles.membershipNotice}><Text style={styles.lockedTitle}>🔒 Alcanzaste los 2 servicios gratuitos</Text><Text style={styles.lockedText}>El tercer servicio se habilitará con la membresía profesional. Por ahora podés editar o quitar uno de los anteriores.</Text></View>}
-      <View style={styles.lockedService}><View><Text style={styles.lockedTitle}>Tercer servicio</Text><Text style={styles.lockedText}>Próximamente con membresía profesional.</Text></View><Text style={styles.membershipBadge}>MEMBRESÍA</Text></View>
+      {membershipNotice && <View style={styles.membershipNotice}><Text style={styles.lockedTitle}>Alcanzaste el límite de {serviceLimit} servicios</Text><Text style={styles.lockedText}>{premium ? "Podés editar o quitar uno de los servicios publicados." : "Premium habilita hasta 6 servicios profesionales."}</Text></View>}
+      {!premium && <View style={styles.lockedService}><View><Text style={styles.lockedTitle}>Hasta 6 servicios</Text><Text style={styles.lockedText}>Disponible con Premium.</Text></View><Text style={styles.membershipBadge}>PREMIUM</Text></View>}
     </ScrollView>
     {!!(localError || remoteError) && <Text style={styles.error}>{localError || remoteError}</Text>}
-    <View style={styles.actions}><TouchableOpacity style={styles.cancel} onPress={onCancel}><Text style={styles.cancelText}>Cancelar</Text></TouchableOpacity><TouchableOpacity disabled={busy} style={[styles.save, busy && styles.disabled]} onPress={submit}><Text style={styles.saveText}>{busy ? "Guardando…" : "Guardar y publicar"}</Text></TouchableOpacity></View>
+    <View style={styles.actions}><TouchableOpacity accessibilityRole="button" style={styles.cancel} onPress={onCancel}><Text style={styles.cancelText}>Cancelar</Text></TouchableOpacity><TouchableOpacity accessibilityRole="button" disabled={busy} style={[styles.save, busy && styles.disabled]} onPress={submit}><Text style={styles.saveText}>{busy ? "Guardando…" : "Guardar y publicar"}</Text></TouchableOpacity></View>
   </View>;
 }
 
@@ -422,7 +435,7 @@ function createStyles(darkMode: boolean) {
     selector: { minHeight: 46, borderWidth: 1, borderColor: palette.line, backgroundColor: palette.input, borderRadius: 11, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, marginBottom: 7 }, disabledSelector: { opacity: 0.48 }, selectorText: { color: palette.text, fontSize: 12, fontWeight: "800", flex: 1 }, placeholder: { color: palette.muted, fontWeight: "500" }, chevron: { color: "#49B2F5", fontSize: 17, fontWeight: "900" }, options: { borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 8, backgroundColor: palette.input }, catalogOptions: { maxHeight: 265, borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 9, backgroundColor: palette.input }, specialtyOptions: { maxHeight: 280, borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: -3, marginBottom: 9, backgroundColor: palette.input }, option: { minHeight: 41, justifyContent: "center", paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: palette.line }, coverageOption: { minHeight: 42, flexDirection: "row", alignItems: "center", gap: 9, paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: palette.line }, optionCheck: { color: "#49B2F5", fontSize: 15, fontWeight: "900" }, familyOption: { minHeight: 57, justifyContent: "center", paddingHorizontal: 11, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: palette.line }, specialtyOption: { minHeight: 66, justifyContent: "center", paddingHorizontal: 11, paddingVertical: 9, borderBottomWidth: 1, borderBottomColor: palette.line }, specialtyOptionActive: { backgroundColor: palette.soft }, unavailableOption: { opacity: 0.38 }, specialtyTitleRow: { flexDirection: "row", alignItems: "center", gap: 8 }, optionActive: { backgroundColor: palette.soft }, optionText: { color: palette.muted, fontSize: 12, fontWeight: "800" }, optionTextActive: { color: palette.text, fontWeight: "900" }, optionDescription: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: 3 }, specialtyTitle: { color: palette.text, fontSize: 12, fontWeight: "900" },
     suggestions: { borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", backgroundColor: palette.surface, marginTop: -5, marginBottom: 9 }, suggestion: { minHeight: 40, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: palette.line }, suggestionHash: { color: "#49B2F5", fontSize: 13, fontWeight: "900" }, suggestionText: { color: palette.text, fontSize: 11, fontWeight: "800" }, chipList: { flexDirection: "row", flexWrap: "wrap", gap: 6, marginBottom: 8 }, chip: { flexDirection: "row", alignItems: "center", gap: 6, borderWidth: 1, borderColor: "#49B2F5", backgroundColor: palette.soft, paddingHorizontal: 9, paddingVertical: 6, borderRadius: 14 }, chipText: { color: "#49B2F5", fontSize: 10, fontWeight: "900" }, chipRemove: { color: palette.danger, fontSize: 16, lineHeight: 16, fontWeight: "900" },
     documentPanel: { borderWidth: 1, borderColor: palette.line, borderRadius: 13, backgroundColor: palette.surface, padding: 11, marginBottom: 10, flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 10 }, documentPanelCopy: { flex: 1, minWidth: 190 }, documentPanelTitle: { color: palette.text, fontSize: 12, fontWeight: "900" }, documentPanelText: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: 3 },
-    credentialModalBackdrop: { flex: 1, backgroundColor: "rgba(0, 8, 18, 0.86)", justifyContent: "center", alignItems: "center", padding: 12 }, credentialModalCard: { width: "100%", maxWidth: 780, maxHeight: "94%", borderWidth: 1, borderColor: palette.line, borderRadius: 20, backgroundColor: palette.background, padding: 16 }, credentialModalHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }, credentialModalHeading: { flex: 1 }, credentialModalEyebrow: { color: "#FF8A1F", fontSize: 9, fontWeight: "900", letterSpacing: 0.7 }, credentialModalTitle: { color: palette.text, fontSize: 21, fontWeight: "900", marginTop: 3 }, credentialModalClose: { width: 34, height: 34, borderRadius: 17, backgroundColor: palette.soft, alignItems: "center", justifyContent: "center" }, credentialModalCloseText: { color: palette.text, fontSize: 26, lineHeight: 28, fontWeight: "900" }, credentialModalScroll: { marginTop: 12 }, credentialModalContent: { paddingBottom: 4 }, credentialInstructions: { borderWidth: 1, borderColor: palette.line, borderRadius: 12, backgroundColor: palette.warning, padding: 11, marginBottom: 11 }, credentialInstructionTitle: { color: palette.warningText, fontSize: 12, fontWeight: "900", marginBottom: 5 }, credentialInstruction: { color: palette.muted, fontSize: 10, lineHeight: 15, marginTop: 3 }, credentialModalDone: { minHeight: 47, borderRadius: 11, backgroundColor: "#FF7800", alignItems: "center", justifyContent: "center", marginTop: 2 }, credentialModalDoneText: { color: "white", fontSize: 13, fontWeight: "900" },
+    credentialModalBackdrop: { flex: 1, backgroundColor: "rgba(0, 8, 18, 0.86)", justifyContent: "center", alignItems: "center", padding: 12 }, credentialModalCard: { width: "100%", maxWidth: 780, maxHeight: "94%", borderWidth: 1, borderColor: palette.line, borderRadius: 20, backgroundColor: palette.background, padding: 16 }, credentialModalHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }, credentialModalHeading: { flex: 1 }, credentialModalEyebrow: { color: "#FF8A1F", fontSize: 9, fontWeight: "900", letterSpacing: 0.7 }, credentialModalTitle: { color: palette.text, fontSize: 21, fontWeight: "900", marginTop: 3 }, credentialModalClose: { width: 44, height: 44, borderRadius: 22, backgroundColor: palette.soft, alignItems: "center", justifyContent: "center" }, credentialModalCloseText: { color: palette.text, fontSize: 26, lineHeight: 28, fontWeight: "900" }, credentialModalScroll: { marginTop: 12 }, credentialModalContent: { paddingBottom: 4 }, credentialInstructions: { borderWidth: 1, borderColor: palette.line, borderRadius: 12, backgroundColor: palette.warning, padding: 11, marginBottom: 11 }, credentialInstructionTitle: { color: palette.warningText, fontSize: 12, fontWeight: "900", marginBottom: 5 }, credentialInstruction: { color: palette.muted, fontSize: 10, lineHeight: 15, marginTop: 3 }, credentialModalDone: { minHeight: 47, borderRadius: 11, backgroundColor: "#FF7800", alignItems: "center", justifyContent: "center", marginTop: 2 }, credentialModalDoneText: { color: "white", fontSize: 13, fontWeight: "900" },
     credentialsList: { gap: 8, marginBottom: 10 }, credentialCard: { borderWidth: 1, borderColor: palette.line, borderRadius: 13, backgroundColor: palette.surface, padding: 11 }, credentialHeader: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 8, marginBottom: 9 }, credentialTitleWrap: { flex: 1 }, credentialTitle: { color: palette.text, fontSize: 12, fontWeight: "900" }, credentialPrivacy: { color: palette.muted, fontSize: 9, lineHeight: 13, marginTop: 2 }, credentialStatus: { color: palette.warningText, backgroundColor: palette.warning, borderRadius: 9, paddingHorizontal: 7, paddingVertical: 4, fontSize: 8, fontWeight: "900", overflow: "hidden" }, credentialVerified: { color: "#56D3A1", backgroundColor: palette.soft }, credentialRejected: { color: palette.danger }, credentialBody: { flexDirection: "row", alignItems: "stretch", gap: 10 }, credentialBodyCompact: { flexDirection: "column" }, credentialPreviewWrap: { width: 118, minHeight: 92, borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", backgroundColor: palette.input }, credentialPreview: { width: "100%", height: 92 }, credentialStored: { flex: 1, minHeight: 92, alignItems: "center", justifyContent: "center", padding: 8 }, credentialStoredIcon: { color: "#56D3A1", fontSize: 22, fontWeight: "900" }, credentialStoredText: { color: palette.muted, textAlign: "center", fontSize: 9, fontWeight: "800", marginTop: 4 }, credentialEmpty: { width: 118, minHeight: 92, alignItems: "center", justifyContent: "center", borderWidth: 1, borderStyle: "dashed", borderColor: palette.line, borderRadius: 10, backgroundColor: palette.input, padding: 8 }, credentialEmptyIcon: { color: "#49B2F5", fontSize: 25, fontWeight: "900" }, credentialEmptyText: { color: palette.muted, textAlign: "center", fontSize: 9, fontWeight: "800", marginTop: 4 }, credentialFields: { flex: 1 }, credentialUpload: { minHeight: 42, borderWidth: 1, borderColor: "#49B2F5", borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 10 }, credentialUploadText: { color: "#49B2F5", fontSize: 10, fontWeight: "900", textAlign: "center" },
     servicesHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 2 }, freeBadge: { color: "#56D3A1", backgroundColor: palette.soft, paddingHorizontal: 9, paddingVertical: 5, borderRadius: 12, fontSize: 10, fontWeight: "900" }, tariffCard: { borderWidth: 1, borderColor: palette.line, backgroundColor: palette.surface, borderRadius: 14, padding: 11, marginTop: 8 }, serviceCard: { borderWidth: 1, borderColor: palette.line, backgroundColor: palette.surface, borderRadius: 14, padding: 11, marginTop: 8 }, serviceTop: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 9 }, serviceNumber: { color: "#49B2F5", fontSize: 10, fontWeight: "900", letterSpacing: 0.4 }, remove: { color: palette.danger, fontSize: 10, fontWeight: "900" }, miniLabel: { color: palette.muted, fontSize: 9, fontWeight: "900", marginTop: 4, marginBottom: 5 }, descriptionHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 }, counter: { color: palette.muted, fontSize: 9, fontWeight: "800" }, serviceDescription: { minHeight: 82, paddingTop: 11, textAlignVertical: "top" }, addService: { minHeight: 44, borderWidth: 1, borderStyle: "dashed", borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center", marginTop: 9 }, addServiceText: { color: "#49B2F5", fontSize: 12, fontWeight: "900" }, lockedService: { minHeight: 58, borderRadius: 11, backgroundColor: palette.soft, marginTop: 9, paddingHorizontal: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, opacity: 0.86 }, membershipNotice: { borderWidth: 1, borderColor: palette.warningText, borderRadius: 11, backgroundColor: palette.warning, marginTop: 9, padding: 11 }, lockedTitle: { color: palette.muted, fontSize: 12, fontWeight: "900" }, lockedText: { color: palette.muted, fontSize: 10, lineHeight: 14, marginTop: 2 }, membershipBadge: { color: palette.warningText, fontSize: 9, fontWeight: "900", backgroundColor: palette.warning, borderRadius: 9, paddingHorizontal: 7, paddingVertical: 4 },
     error: { color: palette.danger, fontSize: 12, fontWeight: "800", marginTop: 7 }, actions: { flexDirection: "row", gap: 8, marginTop: 12 }, cancel: { minHeight: 48, minWidth: 92, borderWidth: 1, borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center" }, cancelText: { color: "#49B2F5", fontWeight: "900" }, save: { flex: 1, minHeight: 48, borderRadius: 11, backgroundColor: "#FF7800", alignItems: "center", justifyContent: "center" }, saveText: { color: "white", fontWeight: "900" }, disabled: { opacity: 0.55 },

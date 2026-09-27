@@ -3,7 +3,12 @@ import { NextRequest, NextResponse } from "next/server";
 export function proxy(request: NextRequest) {
   const expectedUser = process.env.ADMIN_BASIC_USER;
   const expectedPassword = process.env.ADMIN_BASIC_PASSWORD;
-  if (!expectedUser || !expectedPassword) return NextResponse.next();
+  if (!expectedUser || !expectedPassword) {
+    return new NextResponse("Administración no disponible: configuración incompleta.", {
+      status: 503,
+      headers: { "Cache-Control": "no-store" },
+    });
+  }
 
   const authorization = request.headers.get("authorization");
   if (authorization?.startsWith("Basic ")) {

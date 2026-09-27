@@ -1,23 +1,23 @@
 # Dominio, enlaces y acceso social
 
-`laburapp.work` es válido como dominio público de la web y como dominio asociado para la aplicación móvil. El proyecto ya declara ese host para enlaces universales de iOS y App Links de Android.
+LaburApp todavía no tiene un dominio público definitivo. Ningún host debe tratarse como canónico hasta que el equipo lo controle y lo configure explícitamente.
 
-## DNS y Vercel
+## DNS y hosting
 
-El dominio está agregado al proyecto `laburapp` de Vercel. Para activarlo falta apuntar el DNS del registrador a Vercel, con el registro que muestre el panel de Vercel en el momento de configurarlo. No se debe cambiar el DNS hasta confirmar que el dominio fue comprado y está bajo control de LaburApp.
+El dominio y el hosting público están pendientes. No se debe configurar DNS ni declarar un host canónico hasta confirmar que el dominio fue comprado y está bajo control de LaburApp.
 
 ## Google
 
 En Google Cloud se debe configurar:
 
-- dominio autorizado: `laburapp.work`;
-- origen web: `https://laburapp.work`;
+- dominio autorizado: pendiente;
+- origen web: el valor HTTPS definitivo de `EXPO_PUBLIC_APP_URL`;
 - URL de retorno de Supabase: `https://<PROJECT_REF>.supabase.co/auth/v1/callback`;
 - página principal, privacidad y términos servidos por HTTPS en el dominio.
 
 ## Apple
 
-En Apple Developer se debe crear un Services ID para acceso web y asociarlo al App ID `com.alsema.laburapp`. El dominio web será `laburapp.work`; la URL de retorno será la indicada por Supabase. Los enlaces universales requieren publicar `/.well-known/apple-app-site-association` con el Team ID real.
+En Apple Developer se debe crear un Services ID para acceso web y asociarlo al App ID `com.alsema.laburapp`. El dominio web se completará cuando exista; la URL de retorno será la indicada por Supabase. Los enlaces universales requieren publicar `/.well-known/apple-app-site-association` con el Team ID real.
 
 ## Archivos pendientes de identidad
 

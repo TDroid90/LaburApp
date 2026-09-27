@@ -1,0 +1,11 @@
+{
+  "name": "LaburApp",
+  "short_name": "LaburApp",
+  "description": "Servicios locales, presupuestos y trabajos en un solo lugar.",
+  "lang": "es-AR",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#06131F",
+  "theme_color": "#063C78"
+}
