@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   backendApiUrl,
+  isAllowedNativeAuthCallbackUrl,
   isAllowedNativeRecoveryUrl,
+  parseNativeAuthCallback,
   resolveWebAuthRedirect,
 } from "./public-app-url";
 
@@ -32,5 +34,23 @@ describe("public URL helpers", () => {
     expect(isAllowedNativeRecoveryUrl("laburapp://recover-password.evil.test?code=one-time")).toBe(false);
     expect(isAllowedNativeRecoveryUrl("laburapp://recover-password/%E0%A4%A")).toBe(false);
     expect(isAllowedNativeRecoveryUrl("not a url")).toBe(false);
+  });
+
+  it("accepts and parses only the native confirmation callback", () => {
+    expect(isAllowedNativeAuthCallbackUrl("laburapp://auth/callback?code=one-time")).toBe(true);
+    expect(isAllowedNativeAuthCallbackUrl("laburapp://auth/other?code=one-time")).toBe(false);
+    expect(isAllowedNativeAuthCallbackUrl("laburapp://recover-password?code=one-time")).toBe(false);
+    expect(parseNativeAuthCallback("laburapp://auth/callback?code=one-time")).toEqual({
+      code: "one-time",
+      accessToken: null,
+      refreshToken: null,
+      error: null,
+    });
+    expect(parseNativeAuthCallback("laburapp://auth/callback#access_token=a&refresh_token=r")).toEqual({
+      code: null,
+      accessToken: "a",
+      refreshToken: "r",
+      error: null,
+    });
   });
 });

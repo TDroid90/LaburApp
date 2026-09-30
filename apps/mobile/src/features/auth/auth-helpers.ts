@@ -7,11 +7,15 @@ export function passwordSecurityError(value: string) {
   return null;
 }
 
+export function isEmailNotConfirmedError(message: string) {
+  return message.toLowerCase().includes("email not confirmed");
+}
+
 export function readableAuthError(message: string) {
   const normalized = message.toLowerCase();
   if (normalized.includes("invalid login credentials"))
     return "El correo o la contraseña no son correctos.";
-  if (normalized.includes("email not confirmed"))
+  if (isEmailNotConfirmedError(message))
     return "Confirmá tu correo antes de ingresar.";
   if (normalized.includes("user already registered"))
     return "No pudimos crear la cuenta. Probá ingresar o recuperar la contraseña si ya te registraste.";

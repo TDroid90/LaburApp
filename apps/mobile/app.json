@@ -30,7 +30,8 @@
           "configureAndroidBackup": false
         }
       ],
-      "./plugins/with-security-hardening"
+      "./plugins/with-security-hardening",
+      "expo-splash-screen"
     ],
     "ios": {
       "supportsTablet": true,

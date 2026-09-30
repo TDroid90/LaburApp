@@ -53,8 +53,11 @@ import { enqueueMirrorEvent, flushMirrorEvents } from "../lib/mirror-events";
 import { resilientRead, safeRemoteErrorMessage, withTimeout } from "../lib/network-resilience";
 import {
   backendApiUrl,
+  isAllowedNativeAuthCallbackUrl,
   isAllowedNativeRecoveryUrl,
+  nativeAuthCallbackUrl,
   nativeRecoveryRedirectUrl,
+  parseNativeAuthCallback,
   publicAppUrl,
   webAuthRedirectUrl,
 } from "../lib/public-app-url";
@@ -62,7 +65,7 @@ import { clearPersistedSupabaseSession, supabase } from "../lib/supabase";
 import { AppShell } from "../src/layouts/AppShell";
 import { useRequestSync } from "../src/hooks/useRequestSync";
 import { useResponsiveLayout } from "../src/layouts/useResponsiveLayout";
-import { isDemoAccessEnabled, passwordSecurityError, readableAuthError, shouldClearSessionOnAuthEvent } from "../src/features/auth/auth-helpers";
+import { isDemoAccessEnabled, isEmailNotConfirmedError, passwordSecurityError, readableAuthError, shouldClearSessionOnAuthEvent } from "../src/features/auth/auth-helpers";
 import { parseCompletionToken } from "../src/features/completion/completion-qr";
 import { DOCUMENT_IMAGE_POLICY, longestSideResize, PHOTO_IMAGE_POLICY, pickedImageError } from "../src/services/image-safety";
 
@@ -580,6 +583,31 @@ const quickSearches = [
   "Mecánica",
   "Costura",
   "Informática",
+];
+
+function buildHomeQuickSearches(directory: Provider[]) {
+  const ranked = [...directory]
+    .sort((a, b) => Number(b.jobs || 0) - Number(a.jobs || 0))
+    .map((provider) => provider.trade.trim())
+    .filter(Boolean);
+  const topFive = [...new Set(ranked)].slice(0, 5);
+  const candidates = [...new Set([
+    ...ranked,
+    ...quickSearches,
+    ...directory.flatMap((provider) => provider.skills.split(" · ").map((skill) => skill.trim())),
+  ])].filter((term) => term && !topFive.includes(term));
+  for (let index = candidates.length - 1; index > 0; index -= 1) {
+    const target = Math.floor(Math.random() * (index + 1));
+    [candidates[index], candidates[target]] = [candidates[target], candidates[index]];
+  }
+  return [...topFive, ...candidates.slice(0, 15 - topFive.length)];
+}
+
+const subscriptionPlans = [
+  { months: 1 as const, price: 3500, title: "Plan mensual", benefits: "7 presupuestos semanales · más cualidades en reseñas · 6 servicios profesionales · 6 trabajos destacados" },
+  { months: 3 as const, price: 7500, title: "Plan trimestral", benefits: "7 presupuestos semanales · más cualidades en reseñas · 6 servicios profesionales · 6 trabajos destacados" },
+  { months: 6 as const, price: 12000, title: "Plan semestral", benefits: "Todo lo anterior + 8 presupuestos semanales + 4 servicios profesionales + 4 trabajos destacados" },
+  { months: 12 as const, price: 15000, title: "Plan anual", benefits: "7 presupuestos semanales · más cualidades en reseñas · 6 servicios profesionales · 6 trabajos destacados" },
 ];
 type Provider = (typeof providers)[number] & {
   providerId?: string;
@@ -1114,6 +1142,7 @@ export default function Home() {
   >(null);
   const [guestGateLocked, setGuestGateLocked] = useState(false);
   const [passwordChangeRequired, setPasswordChangeRequired] = useState(false);
+  const [processedAuthCallbackUrl, setProcessedAuthCallbackUrl] = useState<string | null>(null);
   const [processedRecoveryUrl, setProcessedRecoveryUrl] = useState<string | null>(null);
   const [adminPreviewRole, setAdminPreviewRole] = useState<"admin" | "client" | "provider">("admin");
   const [adminCredentialReviews, setAdminCredentialReviews] = useState<AdminCredentialReview[]>([]);
@@ -1145,8 +1174,13 @@ export default function Home() {
   const [authEmail, setAuthEmail] = useState("");
   const [authPassword, setAuthPassword] = useState("");
   const [authPasswordConfirm, setAuthPasswordConfirm] = useState("");
+  const [authPasswordVisible, setAuthPasswordVisible] = useState(false);
+  const [authPasswordConfirmVisible, setAuthPasswordConfirmVisible] = useState(false);
   const [authCity, setAuthCity] = useState("Río Grande");
   const [authBusy, setAuthBusy] = useState(false);
+  const [confirmationEmail, setConfirmationEmail] = useState<string | null>(null);
+  const [confirmationResendBusy, setConfirmationResendBusy] = useState(false);
+  const [confirmationResendNotice, setConfirmationResendNotice] = useState("");
   const [acceptedTerms, setAcceptedTerms] = useState(false);
   const [authError, setAuthError] = useState("");
   const [quoteProvider, setQuoteProvider] = useState<Provider | null>(null);
@@ -1262,20 +1296,25 @@ export default function Home() {
     ? Math.round((adminPlatformMetrics.activity.jobs / adminPlatformMetrics.activity.quotes) * 100)
     : 0;
   const topAdminCity = adminPlatformMetrics?.cities[0];
+  const homeQuickSearches = useMemo(
+    () => buildHomeQuickSearches(publishedProviders.length ? publishedProviders : providers),
+    [publishedProviders],
+  );
+  const selectedSubscriptionPlan = subscriptionPlans.find((plan) => plan.months === subscriptionMonths) ?? subscriptionPlans[0];
 
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
 
   useEffect(() => {
+    if (Platform.OS !== "web") {
+      setCameraAvailable(true);
+      return;
+    }
     let cancelled = false;
     void CameraView.isAvailableAsync()
-      .then((available) => {
-        if (!cancelled) setCameraAvailable(available);
-      })
-      .catch(() => {
-        if (!cancelled) setCameraAvailable(false);
-      });
+      .then((available) => { if (!cancelled) setCameraAvailable(available); })
+      .catch(() => { if (!cancelled) setCameraAvailable(false); });
     return () => { cancelled = true; };
   }, []);
 
@@ -1401,6 +1440,58 @@ export default function Home() {
     });
     return () => data.subscription.unsubscribe();
   }, []);
+
+  useEffect(() => {
+    if (!supabase || !linkingUrl || Platform.OS === "web" || processedAuthCallbackUrl === linkingUrl
+      || !isAllowedNativeAuthCallbackUrl(linkingUrl)) return;
+    const callback = parseNativeAuthCallback(linkingUrl);
+    if (!callback) return;
+    setProcessedAuthCallbackUrl(linkingUrl);
+    void (async () => {
+      if (callback.error) {
+        setAuthMode("login");
+        setAuthError("No pudimos confirmar tu cuenta. Ingresá tus datos para pedir un correo nuevo.");
+        return;
+      }
+      const result = callback.code
+        ? await supabase.auth.exchangeCodeForSession(callback.code)
+        : callback.accessToken && callback.refreshToken
+          ? await supabase.auth.setSession({
+              access_token: callback.accessToken,
+              refresh_token: callback.refreshToken,
+            })
+          : { data: { user: null }, error: new Error("AUTH_CALLBACK_INVALID") };
+      if (result.error || !result.data.user) {
+        setAuthMode("login");
+        setAuthError("El enlace venció o ya fue utilizado. Ingresá tus datos para pedir un correo nuevo.");
+        return;
+      }
+      const user = result.data.user;
+      const { data: roles } = await supabase
+        .from("user_roles")
+        .select("role")
+        .eq("user_id", user.id);
+      const role: SavedSession["role"] = roles?.some((item) => item.role === "admin")
+        ? "admin"
+        : roles?.some((item) => item.role === "provider")
+          ? "provider"
+          : "client";
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("full_name, avatar_path, must_change_password")
+        .eq("id", user.id)
+        .maybeSingle();
+      const name = profile?.full_name || String(user.user_metadata?.full_name || user.email || "Usuario");
+      suppressLocalSaveRef.current = false;
+      setCurrentUserId(user.id);
+      setSession({ name, email: user.email ?? "", role, photoUri: profile?.avatar_path ?? undefined });
+      setSignedInName(name);
+      setGuestGateLocked(false);
+      setAuthMode(profile?.must_change_password ? "update-password" : null);
+      setPasswordChangeRequired(profile?.must_change_password === true);
+      setRequested("Tu cuenta fue confirmada. ¡Bienvenido a LaburApp!");
+    })();
+  }, [linkingUrl, processedAuthCallbackUrl]);
 
   useEffect(() => {
     if (!supabase || !linkingUrl || Platform.OS === "web" || processedRecoveryUrl === linkingUrl
@@ -2106,6 +2197,8 @@ export default function Home() {
   async function submitAuth() {
     if (authBusy) return;
     setAuthError("");
+    setConfirmationEmail(null);
+    setConfirmationResendNotice("");
     if (!supabase && !demoAccessEnabled) {
       return setAuthError("El acceso no está configurado en esta instalación.");
     }
@@ -2194,6 +2287,9 @@ export default function Home() {
               password: authPassword,
               options: {
                 data: { full_name: name, role: "client", city: authCity },
+                emailRedirectTo: Platform.OS === "web"
+                  ? webAuthRedirectUrl(typeof window !== "undefined" ? window.location.origin : undefined)
+                  : nativeAuthCallbackUrl(),
               },
             })), 15_000)
           : await withTimeout(Promise.resolve(supabase.auth.signInWithPassword({
@@ -2206,6 +2302,9 @@ export default function Home() {
       }
       if (result.error) {
         setAuthBusy(false);
+        if (authMode === "login" && isEmailNotConfirmedError(result.error.message)) {
+          setConfirmationEmail(authEmail.trim().toLowerCase());
+        }
         return setAuthError(readableAuthError(result.error.message));
       }
       if (authMode === "register" && !result.data.session) {
@@ -2213,7 +2312,7 @@ export default function Home() {
         setAuthMode(guestGateLocked ? "login" : null);
         setAuthPassword("");
         setRequested(
-          "Cuenta creada. Revisá tu correo para confirmarla y después ingresá.",
+          "Revisá tu correo para confirmar el registro. Si esa dirección ya tenía una cuenta, ingresá o recuperá tu contraseña.",
         );
         return;
       }
@@ -2274,6 +2373,33 @@ export default function Home() {
     setPasswordChangeRequired(mustChangePassword);
     setAuthPassword("");
     setAuthPasswordConfirm("");
+  }
+
+  async function resendConfirmationEmail() {
+    if (confirmationResendBusy || !supabase || !confirmationEmail) return;
+    setConfirmationResendBusy(true);
+    setConfirmationResendNotice("");
+    setAuthError("");
+    try {
+      const result = await withTimeout(Promise.resolve(supabase.auth.resend({
+        type: "signup",
+        email: confirmationEmail,
+        options: {
+          emailRedirectTo: Platform.OS === "web"
+            ? webAuthRedirectUrl(typeof window !== "undefined" ? window.location.origin : undefined)
+            : nativeAuthCallbackUrl(),
+        },
+      })), 15_000);
+      if (result.error) {
+        setAuthError(readableAuthError(result.error.message));
+        return;
+      }
+      setConfirmationResendNotice("Te enviamos un nuevo correo de confirmación. Revisá también Spam o Correo no deseado.");
+    } catch (error) {
+      setAuthError(safeRemoteErrorMessage(error));
+    } finally {
+      setConfirmationResendBusy(false);
+    }
   }
 
   function loginDemoAccount(account: SavedSession) {
@@ -3973,7 +4099,7 @@ export default function Home() {
                 style={styles.quickSearches}
                 accessibilityLabel="Búsquedas frecuentes"
               >
-                {(session ? quickSearches : quickSearches.slice(0, 6)).map((term) => (
+                {homeQuickSearches.map((term) => (
                   <TouchableOpacity
                     key={term}
                     accessibilityRole="button"
@@ -4124,6 +4250,7 @@ export default function Home() {
             <View style={responsive.isDesktop && styles.providerGridDesktop}>
             {visibleProviders.map((provider) => {
               const featuredWork = featuredWorkFor(provider);
+              const providerWorks = publicPortfolioFor(provider);
               const expanded = expandedProviderName === provider.name;
               const initials = provider.name.split(" ").map((part) => part[0]).join("");
               return <View key={provider.providerId ?? provider.name} style={[styles.card, compactHeader && styles.cardCompact, responsive.isDesktop && styles.providerCardDesktop, expanded && styles.cardExpanded]}>
@@ -4144,12 +4271,25 @@ export default function Home() {
                 {featuredWork && <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded }} accessibilityLabel={`${expanded ? "Ocultar" : "Ver"} trabajo destacado de ${provider.name}`} style={styles.featuredToggleButton} onPress={() => setExpandedProviderName(expanded ? null : provider.name)}>
                   <Text style={styles.featuredToggle}>{expanded ? "Ocultar trabajo destacado ︿" : "Ver trabajo destacado ﹀"}</Text>
                 </TouchableOpacity>}
-                {expanded && featuredWork && <View style={styles.featuredWork}>
+                {expanded && featuredWork && providerWorks.length <= 3 && <View style={styles.featuredWork}>
                     <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Ampliar foto de ${featuredWork.title}`} style={styles.featuredPhotoButton} onPress={() => setWorkPhoto({ provider, work: featuredWork })}>
                       <Image accessible={false} source={{ uri: featuredWork.photoUri }} resizeMode="cover" style={styles.featuredPhoto} />
                     </TouchableOpacity>
                     <View style={styles.featuredWorkCopy}><Text style={styles.favoriteLabel}>★ DESTACADO</Text><Text style={styles.featuredWorkTitle}>{featuredWork.title}</Text><Text numberOfLines={3} style={styles.featuredWorkDescription}>{featuredWork.description}</Text><TouchableOpacity accessibilityRole="link" onPress={() => setPublicProfileProvider(provider)}><Text style={styles.viewProfileLink}>Ver perfil completo</Text></TouchableOpacity></View>
                 </View>}
+                {expanded && providerWorks.length > 3 && <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.featuredCarousel} accessibilityLabel={`Galería de trabajos destacados de ${provider.name}`}>
+                  {providerWorks.map((work, index) => {
+                    const carouselWork = { title: work.title, description: work.description, photoUri: work.photoUris[0] };
+                    return <View key={work.id} style={styles.featuredCarouselCard}>
+                      <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Ampliar trabajo ${index + 1}: ${work.title}`} onPress={() => setWorkPhoto({ provider, work: carouselWork })}>
+                        <Image accessible={false} source={{ uri: carouselWork.photoUri }} resizeMode="cover" style={styles.featuredCarouselPhoto} />
+                      </TouchableOpacity>
+                      <Text style={styles.favoriteLabel}>★ DESTACADO {index + 1}</Text>
+                      <Text numberOfLines={2} style={styles.featuredWorkTitle}>{work.title}</Text>
+                      <Text numberOfLines={3} style={styles.featuredWorkDescription}>{work.description}</Text>
+                    </View>;
+                  })}
+                </ScrollView>}
                 <TouchableOpacity accessibilityRole="button" style={styles.button} onPress={() => startQuote(provider)}><Text style={styles.buttonText}>{session ? "Solicitar presupuesto" : "Ingresá para solicitar"}</Text></TouchableOpacity>
               </View>;
             })}
@@ -4861,60 +5001,27 @@ export default function Home() {
             ) : (
               <>
                 <View style={styles.accountCard}>
-                  {(providerProfile?.photoUri ?? session.photoUri) ? (
-                    <Image
-                      accessibilityLabel="Foto de perfil"
-                      source={{ uri: providerProfile?.photoUri ?? session.photoUri }}
-                      style={styles.profilePhoto}
-                    />
-                  ) : (
-                    <View style={styles.profileAvatar}>
-                      <Text style={styles.profileAvatarText}>
-                        {session.name.slice(0, 1).toUpperCase()}
-                      </Text>
+                  <View style={styles.accountIdentity}>
+                    {(providerProfile?.photoUri ?? session.photoUri) ? (
+                      <Image accessibilityLabel="Foto de perfil" source={{ uri: providerProfile?.photoUri ?? session.photoUri }} style={styles.profilePhoto} />
+                    ) : (
+                      <View style={styles.profileAvatar}><Text style={styles.profileAvatarText}>{session.name.slice(0, 1).toUpperCase()}</Text></View>
+                    )}
+                    <View style={styles.accountBody}>
+                      <View style={styles.verifiedNameRow}>
+                        <Text style={styles.accountName}>{session.name}</Text>
+                        {hasProviderProfile && providerProfile?.verified && <Text accessibilityLabel="Perfil verificado" style={styles.verifiedIcon}>✓</Text>}
+                      </View>
+                      {hasProviderProfile && !!providerProfile?.diagnosticPrice && <Text style={styles.diagnosticBadge}>Diagnóstico desde ${providerProfile.diagnosticPrice.toLocaleString("es-AR")}</Text>}
+                      <Text style={styles.clientJobsCount}>{session.role === "provider" ? `${contractedRequests.length} trabajos gestionados` : `${clientHistory.length} trabajos contratados en los últimos 6 meses`}</Text>
+                      {!!accountPublicId && <Text style={styles.clientJobsCount}>ID de cuenta: {accountPublicId}</Text>}
+                      {isDemoSession && <Text style={styles.localBadge}>Cuenta de demostración</Text>}
                     </View>
-                  )}
-                  <View style={styles.accountBody}>
-                    <View style={styles.verifiedNameRow}>
-                      <Text style={styles.accountName}>{session.name}</Text>
-                      {hasProviderProfile && providerProfile?.verified && (
-                        <Text
-                          accessibilityLabel="Perfil verificado"
-                          style={styles.verifiedIcon}
-                        >
-                          ✓
-                        </Text>
-                      )}
-                      {hasProviderProfile && !!providerProfile?.diagnosticPrice && (
-                        <Text style={styles.diagnosticBadge}>
-                          Diagnóstico desde $
-                          {providerProfile.diagnosticPrice.toLocaleString(
-                            "es-AR",
-                          )}
-                        </Text>
-                      )}
-                    </View>
-                    <Text style={styles.clientJobsCount}>{session.role === "provider" ? `${contractedRequests.length} trabajos gestionados` : `${clientHistory.length} trabajos contratados en los últimos 6 meses`}</Text>
-                    {!!accountPublicId && <Text style={styles.clientJobsCount}>ID de cuenta: {accountPublicId}</Text>}
-                    {isDemoSession && <Text style={styles.localBadge}>Cuenta de demostración</Text>}
                   </View>
-                  {session.role !== "admin" && (
-                    <TouchableOpacity accessibilityRole="button" disabled={clientPhotoBusy} style={styles.editProfileButton} onPress={() => void pickClientPhoto()}>
-                      <Text style={styles.editProfileButtonText}>{clientPhotoBusy ? "CARGANDO…" : session.photoUri ? "CAMBIAR FOTO" : "AGREGAR FOTO"}</Text>
-                    </TouchableOpacity>
-                  )}
-                  {hasProviderProfile && (
-                    <TouchableOpacity
-                      accessibilityRole="button"
-                      style={styles.followersButton}
-                      onPress={() => setFollowersVisible((current) => !current)}
-                    >
-                      <Text style={styles.followersCount}>
-                        {providerProfile.followersCount ?? 0}
-                      </Text>
-                      <Text style={styles.followersLabel}>seguidores</Text>
-                    </TouchableOpacity>
-                  )}
+                  <View style={styles.accountActions}>
+                    {session.role !== "admin" && <TouchableOpacity accessibilityRole="button" disabled={clientPhotoBusy} style={[styles.editProfileButton, styles.accountPhotoButton]} onPress={() => void pickClientPhoto()}><Text style={styles.editProfileButtonText}>{clientPhotoBusy ? "CARGANDO…" : session.photoUri ? "CAMBIAR FOTO" : "AGREGAR FOTO"}</Text></TouchableOpacity>}
+                    {hasProviderProfile && <TouchableOpacity accessibilityRole="button" style={styles.followersButton} onPress={() => setFollowersVisible((current) => !current)}><Text style={styles.followersCount}>{providerProfile.followersCount ?? 0}</Text><Text style={styles.followersLabel}>seguidores</Text></TouchableOpacity>}
+                  </View>
                 </View>
                 {session.role !== "admin" && <View style={styles.providerPanel}>
                   <View style={styles.workCardTop}><View><Text style={styles.panelEyebrow}>SUSCRIPCIÓN</Text><Text style={styles.adminModuleTitle}>{clientPlan === "plus" ? "Premium activo" : "Conocé Premium"}</Text></View><Text style={styles.publishedBadge}>{clientPlan === "plus" ? "PREMIUM" : "GRATIS"}</Text></View>
@@ -5414,7 +5521,11 @@ export default function Home() {
               <TextInput
                 accessibilityLabel="Correo electrónico"
                 value={authEmail}
-                onChangeText={setAuthEmail}
+                onChangeText={(value) => {
+                  setAuthEmail(value);
+                  setConfirmationEmail(null);
+                  setConfirmationResendNotice("");
+                }}
                 autoCapitalize="none"
                 keyboardType="email-address"
                 placeholder="Correo electrónico"
@@ -5423,28 +5534,58 @@ export default function Home() {
               />
             )}
             {authMode !== "recovery" && (
-              <TextInput
-                accessibilityLabel={authMode === "login" ? "Contraseña" : "Contraseña nueva"}
-                value={authPassword}
-                onChangeText={setAuthPassword}
-                secureTextEntry
-                returnKeyType={authMode === "login" ? "go" : "next"}
-                onSubmitEditing={authMode === "login" ? () => void submitAuth() : undefined}
-                placeholder={authMode === "login" ? "Contraseña" : "Contraseña segura (12 caracteres mínimo)"}
-                placeholderTextColor="#71818B"
-                style={styles.modalInput}
-              />
+              <View style={styles.passwordField}>
+                <TextInput
+                  accessibilityLabel={authMode === "login" ? "Contraseña" : "Contraseña nueva"}
+                  value={authPassword}
+                  onChangeText={setAuthPassword}
+                  secureTextEntry={!authPasswordVisible}
+                  returnKeyType={authMode === "login" ? "go" : "next"}
+                  onSubmitEditing={authMode === "login" ? () => void submitAuth() : undefined}
+                  placeholder={authMode === "login" ? "Contraseña" : "Contraseña segura (12 caracteres mínimo)"}
+                  placeholderTextColor="#71818B"
+                  style={styles.passwordInput}
+                />
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={authPasswordVisible ? "Ocultar contraseña" : "Mostrar contraseña"}
+                  accessibilityState={{ expanded: authPasswordVisible }}
+                  hitSlop={4}
+                  onPress={() => setAuthPasswordVisible((visible) => !visible)}
+                  style={styles.passwordVisibilityButton}
+                >
+                  <View style={styles.passwordEye}>
+                    <View style={styles.passwordEyePupil} />
+                    {!authPasswordVisible && <View style={styles.passwordEyeSlash} />}
+                  </View>
+                </Pressable>
+              </View>
             )}
             {(authMode === "register" || authMode === "update-password") && (
-              <TextInput
-                accessibilityLabel="Repetir contraseña"
-                value={authPasswordConfirm}
-                onChangeText={setAuthPasswordConfirm}
-                secureTextEntry
-                placeholder="Repetí la contraseña"
-                placeholderTextColor="#71818B"
-                style={styles.modalInput}
-              />
+              <View style={styles.passwordField}>
+                <TextInput
+                  accessibilityLabel="Repetir contraseña"
+                  value={authPasswordConfirm}
+                  onChangeText={setAuthPasswordConfirm}
+                  secureTextEntry={!authPasswordConfirmVisible}
+                  placeholder="Repetí la contraseña"
+                  placeholderTextColor="#71818B"
+                  style={styles.passwordInput}
+                />
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={authPasswordConfirmVisible ? "Ocultar contraseña repetida" : "Mostrar contraseña repetida"}
+                  accessibilityState={{ expanded: authPasswordConfirmVisible }}
+                  hitSlop={4}
+                  onPress={() => setAuthPasswordConfirmVisible((visible) => !visible)}
+                  style={styles.passwordVisibilityButton}
+                >
+                  <View style={styles.passwordEye}>
+                    <View style={styles.passwordEyePupil} />
+                    {!authPasswordConfirmVisible && <View style={styles.passwordEyeSlash} />}
+                  </View>
+                </Pressable>
+              </View>
             )}
             {authMode === "register" && (
               <>
@@ -5497,6 +5638,24 @@ export default function Home() {
               </>
             )}
             {!!authError && <Text style={styles.modalError}>{authError}</Text>}
+            {!!confirmationEmail && (
+              <TouchableOpacity
+                accessibilityRole="button"
+                accessibilityLabel="Reenviar correo de confirmación"
+                disabled={confirmationResendBusy}
+                onPress={() => void resendConfirmationEmail()}
+                style={[styles.confirmationResendButton, confirmationResendBusy && styles.buttonDisabled]}
+              >
+                <Text style={styles.confirmationResendText}>
+                  {confirmationResendBusy ? "Enviando…" : "Reenviar correo de confirmación"}
+                </Text>
+              </TouchableOpacity>
+            )}
+            {!!confirmationResendNotice && (
+              <Text accessibilityLiveRegion="polite" style={styles.confirmationResendNotice}>
+                {confirmationResendNotice}
+              </Text>
+            )}
             <TouchableOpacity
               accessibilityRole="button"
               disabled={authBusy}
@@ -5522,6 +5681,8 @@ export default function Home() {
                 accessibilityRole="button"
                 onPress={() => {
                   setAuthError("");
+                  setConfirmationEmail(null);
+                  setConfirmationResendNotice("");
                   setAuthMode("recovery");
                 }}
               >
@@ -5533,8 +5694,12 @@ export default function Home() {
                 accessibilityRole="button"
                 onPress={() => {
                   setAuthError("");
+                  setConfirmationEmail(null);
+                  setConfirmationResendNotice("");
                   setAuthPassword("");
                   setAuthPasswordConfirm("");
+                  setAuthPasswordVisible(false);
+                  setAuthPasswordConfirmVisible(false);
                   setAuthMode(authMode === "login" ? "register" : "login");
                 }}
               >
@@ -5789,8 +5954,8 @@ export default function Home() {
               </View>
               <Text style={styles.adminModuleCopy}>Antes de confirmar, comprobá en tu banco que el alias y los datos del destinatario sean correctos.</Text>
             </View>
-            <View style={styles.subscriptionPlansRow}>{([ [1, 3500], [3, 7500], [6, 12000], [12, 15000] ] as const).map(([months, price]) => <TouchableOpacity key={months} accessibilityRole="radio" accessibilityLabel={`${months} ${months === 1 ? "mes" : "meses"}, ${price.toLocaleString("es-AR")} pesos`} accessibilityState={{ selected: subscriptionMonths === months }} style={[styles.subscriptionPlanChoice, subscriptionMonths === months && styles.roleChoiceActive]} onPress={() => setSubscriptionMonths(months)}><Text style={[styles.subscriptionPlanMonths, subscriptionMonths === months && styles.roleChoiceTextActive]}>{months} {months === 1 ? "mes" : "meses"}</Text><Text style={styles.subscriptionPlanPrice}>${price.toLocaleString("es-AR")}</Text></TouchableOpacity>)}</View>
-            <Text style={styles.subscriptionBenefits}>7 presupuestos semanales · + cualidades en reseñas · 6 servicios profesionales · 6 trabajos destacados</Text>
+            <View style={styles.subscriptionPlansRow}>{subscriptionPlans.map((plan) => <TouchableOpacity key={plan.months} accessibilityRole="radio" accessibilityLabel={`${plan.months} ${plan.months === 1 ? "mes" : "meses"}, ${plan.price.toLocaleString("es-AR")} pesos`} accessibilityState={{ selected: subscriptionMonths === plan.months }} style={[styles.subscriptionPlanChoice, subscriptionMonths === plan.months && styles.roleChoiceActive]} onPress={() => setSubscriptionMonths(plan.months)}><Text style={[styles.subscriptionPlanMonths, subscriptionMonths === plan.months && styles.roleChoiceTextActive]}>{plan.months} {plan.months === 1 ? "mes" : "meses"}</Text><Text style={styles.subscriptionPlanPrice}>${plan.price.toLocaleString("es-AR")}</Text></TouchableOpacity>)}</View>
+            <View accessibilityLiveRegion="polite" style={styles.selectedPlanCard}><Text style={styles.selectedPlanTitle}>{selectedSubscriptionPlan.title}</Text><Text style={styles.subscriptionBenefits}>{selectedSubscriptionPlan.benefits}</Text></View>
             <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded: comparePlansOpen }} onPress={() => setComparePlansOpen((current) => !current)}><Text style={styles.comparePlansLink}>Compará planes {comparePlansOpen ? "⌃" : "⌄"}</Text></TouchableOpacity>
             {comparePlansOpen && <View style={styles.planComparison}><Text style={styles.planComparisonText}>Gratis: hasta 3 presupuestos por semana, 3 trabajos publicados y 2 servicios de prestador.</Text><Text style={styles.planComparisonText}>Premium: 7 presupuestos semanales, + cualidades en reseñas. 6 servicios profesionales y 6 trabajos destacados.</Text></View>}
             <Text style={styles.subscriptionReceiptReminder}>RECORDÁ ADJUNTAR EL COMPROBANTE DE TRANSFERENCIA</Text>
@@ -6311,6 +6476,9 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     favoriteLabel: { color: colors.orange, fontSize: 9, fontWeight: "900", letterSpacing: 0.4 },
     featuredWorkTitle: { color: colors.navy, fontSize: 13, fontWeight: "900", marginTop: 4 },
     featuredWorkDescription: { color: colors.stone, fontSize: 10, lineHeight: 14, marginTop: 4 },
+    featuredCarousel: { gap: 10, paddingTop: 11, paddingBottom: 4 },
+    featuredCarouselCard: { width: 190, borderWidth: 1, borderColor: colors.line, borderRadius: 12, backgroundColor: colors.surfaceSoft, padding: 9 },
+    featuredCarouselPhoto: { width: "100%", height: 120, borderRadius: 9, marginBottom: 7 },
     viewProfileLink: { color: colors.blue, fontSize: 10, fontWeight: "900", marginTop: 7 },
     empty: {
       minHeight: 360,
@@ -6622,10 +6790,13 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
       borderColor: colors.line,
       borderRadius: 18,
       padding: 16,
-      flexDirection: "row",
-      alignItems: "center",
+      flexDirection: "column",
+      alignItems: "stretch",
       marginTop: 8,
     },
+    accountIdentity: { flexDirection: "row", alignItems: "flex-start", minWidth: 0 },
+    accountActions: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: 10, marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: colors.line },
+    accountPhotoButton: { flexGrow: 1, minWidth: 150 },
     profileAvatar: {
       width: 56,
       height: 56,
@@ -6657,11 +6828,13 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
       fontWeight: "900",
     },
     diagnosticBadge: {
+      alignSelf: "flex-start",
       color: colors.orange,
       backgroundColor: colors.warningSurface,
       borderRadius: 11,
       paddingHorizontal: 8,
       paddingVertical: 5,
+      marginTop: 7,
       fontSize: 9,
       fontWeight: "900",
     },
@@ -7259,6 +7432,49 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
       marginBottom: 10,
       backgroundColor: colors.input,
     },
+    passwordField: {
+      minHeight: 48,
+      borderWidth: 1,
+      borderColor: colors.line,
+      borderRadius: 12,
+      marginBottom: 10,
+      backgroundColor: colors.input,
+      flexDirection: "row",
+      alignItems: "center",
+    },
+    passwordInput: {
+      minHeight: 48,
+      flex: 1,
+      paddingLeft: 14,
+      paddingRight: 4,
+      color: colors.navy,
+      fontSize: 15,
+    },
+    passwordVisibilityButton: {
+      width: 48,
+      minHeight: 48,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    passwordEye: {
+      width: 22,
+      height: 14,
+      borderWidth: 2,
+      borderColor: colors.blue,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+      transform: [{ rotate: "-8deg" }],
+    },
+    passwordEyePupil: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.blue },
+    passwordEyeSlash: {
+      position: "absolute",
+      width: 27,
+      height: 2,
+      borderRadius: 1,
+      backgroundColor: colors.blue,
+      transform: [{ rotate: "45deg" }],
+    },
     modalFieldLabel: { color: colors.navy, fontSize: 12, fontWeight: "900", marginBottom: 7 },
     availabilityHint: { color: colors.green, fontSize: 11, fontWeight: "800", marginTop: -3, marginBottom: 8 },
     quoteTimeRow: { flexDirection: "row", gap: 9, marginBottom: 10, zIndex: 4 },
@@ -7373,7 +7589,9 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     subscriptionPlanChoice: { flexGrow: 1, flexBasis: 78, minWidth: 72, minHeight: 68, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.line, borderRadius: 10, paddingHorizontal: 4, paddingVertical: 6 },
     subscriptionPlanMonths: { color: colors.stone, fontSize: 11, lineHeight: 16, fontWeight: "800", textAlign: "center" },
     subscriptionPlanPrice: { color: colors.navy, fontSize: 11, lineHeight: 16, fontWeight: "900", marginTop: 3, textAlign: "center" },
-    subscriptionBenefits: { color: colors.navy, fontSize: 11, lineHeight: 16, fontWeight: "800", textAlign: "center", marginTop: 2 },
+    selectedPlanCard: { borderWidth: 1, borderColor: colors.blue, backgroundColor: colors.raised, borderRadius: 11, padding: 11, marginTop: 2, marginBottom: 4 },
+    selectedPlanTitle: { color: colors.blue, fontSize: 13, fontWeight: "900", textAlign: "center", marginBottom: 4 },
+    subscriptionBenefits: { color: colors.navy, fontSize: 11, lineHeight: 16, fontWeight: "800", textAlign: "center" },
     comparePlansLink: { color: colors.blue, fontSize: 12, fontWeight: "900", textAlign: "center", paddingVertical: 10, textDecorationLine: "underline" },
     planComparison: { borderRadius: 10, borderWidth: 1, borderColor: colors.line, padding: 10, gap: 6, marginBottom: 8 },
     planComparisonText: { color: colors.stone, fontSize: 11, lineHeight: 16 },
@@ -7386,6 +7604,27 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     modalError: {
       color: colors.danger,
       fontSize: 13,
+      fontWeight: "700",
+      marginBottom: 10,
+    },
+    confirmationResendButton: {
+      minHeight: 44,
+      borderWidth: 1,
+      borderColor: colors.blue,
+      borderRadius: 10,
+      alignItems: "center",
+      justifyContent: "center",
+      paddingHorizontal: 12,
+      marginBottom: 10,
+    },
+    confirmationResendText: { color: colors.blue, fontSize: 13, fontWeight: "900" },
+    confirmationResendNotice: {
+      color: colors.successText,
+      backgroundColor: colors.successSurface,
+      borderRadius: 9,
+      padding: 10,
+      fontSize: 12,
+      lineHeight: 17,
       fontWeight: "700",
       marginBottom: 10,
     },

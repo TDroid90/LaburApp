@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isDemoAccessEnabled, passwordSecurityError, readableAuthError, shouldClearSessionOnAuthEvent } from "./auth-helpers";
+import { isDemoAccessEnabled, isEmailNotConfirmedError, passwordSecurityError, readableAuthError, shouldClearSessionOnAuthEvent } from "./auth-helpers";
 
 describe("auth helpers", () => {
   it("requires a strong password", () => {
@@ -9,6 +9,11 @@ describe("auth helpers", () => {
 
   it("does not expose raw authentication errors", () => {
     expect(readableAuthError("database token secret failure")).toBe("No pudimos completar el acceso. Volvé a intentarlo.");
+  });
+
+  it("recognizes an account that still needs email confirmation", () => {
+    expect(isEmailNotConfirmedError("Email not confirmed")).toBe(true);
+    expect(isEmailNotConfirmedError("Invalid login credentials")).toBe(false);
   });
 
   it("enables demo access only in the explicit development environment", () => {

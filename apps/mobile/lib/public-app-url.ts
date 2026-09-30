@@ -1,4 +1,5 @@
 const configuredPublicAppUrl = process.env.EXPO_PUBLIC_APP_URL?.trim().replace(/\/+$/, "") ?? "";
+const NATIVE_AUTH_CALLBACK_URL = "laburapp://auth/callback";
 const NATIVE_RECOVERY_URL = "laburapp://recover-password";
 
 function normalizedOrigin(value: string) {
@@ -39,6 +40,33 @@ export function webAuthRedirectUrl(browserOrigin?: string) {
 
 export function nativeRecoveryRedirectUrl() {
   return NATIVE_RECOVERY_URL;
+}
+
+export function nativeAuthCallbackUrl() {
+  return NATIVE_AUTH_CALLBACK_URL;
+}
+
+export function isAllowedNativeAuthCallbackUrl(value: string) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "laburapp:"
+      && parsed.hostname === "auth"
+      && (parsed.pathname === "/callback" || parsed.pathname === "/callback/");
+  } catch {
+    return false;
+  }
+}
+
+export function parseNativeAuthCallback(value: string) {
+  if (!isAllowedNativeAuthCallbackUrl(value)) return null;
+  const parsed = new URL(value);
+  const fragment = new URLSearchParams(parsed.hash.replace(/^#/, ""));
+  return {
+    code: parsed.searchParams.get("code"),
+    accessToken: fragment.get("access_token"),
+    refreshToken: fragment.get("refresh_token"),
+    error: fragment.get("error") ?? parsed.searchParams.get("error"),
+  };
 }
 
 export function isAllowedNativeRecoveryUrl(value: string) {

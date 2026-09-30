@@ -3,7 +3,7 @@ import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import ViewShot, { captureRef } from "react-native-view-shot";
 import type { ViewShotRef } from "react-native-view-shot";
-import { Image, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
+import { Animated, Image, PanResponder, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity, View } from "react-native";
 import { containsContactAttempt } from "@laburapp/shared";
 import type { SavedPortfolioWork } from "../lib/local-store";
 import { PHOTO_IMAGE_POLICY, pickedImageError } from "../src/services/image-safety";
@@ -13,6 +13,35 @@ const watermarkTiles = Array.from({ length: 25 }, (_, index) => ({ left: (index 
 
 function emptyWork(index: number): SavedPortfolioWork {
   return { id: `work-${Date.now()}-${index}`, service: "", description: "", photos: [] };
+}
+
+function SortableWorkHeader({ index, title, expanded, onToggle, onMove, styles }: {
+  index: number;
+  title: string;
+  expanded: boolean;
+  onToggle: () => void;
+  onMove: (from: number, offset: number) => void;
+  styles: ReturnType<typeof createStyles>;
+}) {
+  const dragY = useRef(new Animated.Value(0)).current;
+  const pan = useMemo(() => PanResponder.create({
+    onMoveShouldSetPanResponder: (_, gesture) => !expanded && Math.abs(gesture.dy) > 6,
+    onPanResponderMove: Animated.event([null, { dy: dragY }], { useNativeDriver: false }),
+    onPanResponderRelease: (_, gesture) => {
+      dragY.setValue(0);
+      const offset = Math.round(gesture.dy / 72);
+      if (offset) onMove(index, offset);
+    },
+    onPanResponderTerminate: () => dragY.setValue(0),
+  }), [dragY, expanded, index, onMove]);
+
+  return <Animated.View style={[styles.collapsedHeader, { transform: [{ translateY: dragY }] }]} {...(!expanded ? pan.panHandlers : {})}>
+    <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded }} style={styles.collapsedToggle} onPress={onToggle}>
+      <Text style={styles.dragHandle}>{expanded ? "⌃" : "☰"}</Text>
+      <View style={styles.collapsedCopy}><Text style={styles.workNumber}>TRABAJO {index + 1}</Text><Text numberOfLines={1} style={styles.collapsedTitle}>{title || "Trabajo sin completar"}</Text></View>
+      <Text style={styles.chevron}>{expanded ? "⌃" : "⌄"}</Text>
+    </TouchableOpacity>
+  </Animated.View>;
 }
 
 export function PortfolioEditor({ darkMode, maxWorks, initialWorks, availableServices, busy, remoteError, onCancel, onSubmit }: {
@@ -27,6 +56,7 @@ export function PortfolioEditor({ darkMode, maxWorks, initialWorks, availableSer
 }) {
   const styles = useMemo(() => createStyles(darkMode), [darkMode]);
   const [works, setWorks] = useState(() => initialWorks.slice(0, maxWorks));
+  const [expandedIds, setExpandedIds] = useState<string[]>(() => initialWorks.filter((work) => !work.service || work.photos.length !== 3).map((work) => work.id));
   const [openServiceId, setOpenServiceId] = useState<string | null>(null);
   const [pending, setPending] = useState<{ workId: string; photoId: string; sourceUri: string } | null>(null);
   const [imageReady, setImageReady] = useState(false);
@@ -36,6 +66,17 @@ export function PortfolioEditor({ darkMode, maxWorks, initialWorks, availableSer
 
   function updateWork(id: string, patch: Partial<SavedPortfolioWork>) {
     setWorks((current) => current.map((work) => work.id === id ? { ...work, ...patch } : work));
+  }
+
+  function moveWork(from: number, offset: number) {
+    setWorks((current) => {
+      const to = Math.max(0, Math.min(current.length - 1, from + offset));
+      if (to === from) return current;
+      const next = [...current];
+      const [moved] = next.splice(from, 1);
+      next.splice(to, 0, moved);
+      return next;
+    });
   }
 
   useEffect(() => {
@@ -93,8 +134,10 @@ export function PortfolioEditor({ darkMode, maxWorks, initialWorks, availableSer
     <Text style={styles.title}>Trabajos realizados</Text>
     <Text style={styles.copy}>Podés publicar hasta {maxWorks} trabajos, con 3 fotos cuadradas por trabajo.</Text>
     <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">
-      {works.map((work, index) => <View key={work.id} style={styles.workCard}>
-        <View style={styles.workTop}><Text style={styles.workNumber}>TRABAJO {index + 1}</Text><TouchableOpacity accessibilityRole="button" accessibilityLabel={`Quitar trabajo ${index + 1}`} onPress={() => setWorks((current) => current.filter((item) => item.id !== work.id))}><Text style={styles.remove}>Quitar</Text></TouchableOpacity></View>
+      {works.map((work, index) => { const expanded = expandedIds.includes(work.id); return <View key={work.id} style={styles.workCard}>
+        <SortableWorkHeader index={index} title={work.service} expanded={expanded} onToggle={() => setExpandedIds((current) => current.includes(work.id) ? current.filter((id) => id !== work.id) : [...current, work.id])} onMove={moveWork} styles={styles} />
+        {expanded && <>
+        <View style={styles.workTop}><Text style={styles.reorderHint}>Replegalo para arrastrar y ordenar</Text><TouchableOpacity accessibilityRole="button" accessibilityLabel={`Quitar trabajo ${index + 1}`} onPress={() => setWorks((current) => current.filter((item) => item.id !== work.id))}><Text style={styles.remove}>Quitar</Text></TouchableOpacity></View>
         <Text style={styles.label}>Servicio de</Text>
         <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Elegir servicio del trabajo ${index + 1}`} style={styles.selector} onPress={() => setOpenServiceId(openServiceId === work.id ? null : work.id)}><Text style={[styles.selectorText, !work.service && styles.placeholder]}>{work.service || "Seleccioná uno de tus servicios"}</Text><Text style={styles.chevron}>⌄</Text></TouchableOpacity>
         {openServiceId === work.id && <View style={styles.options}>{availableServices.map((service) => <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Elegir ${service}`} key={service} style={[styles.option, work.service === service && styles.optionActive]} onPress={() => { updateWork(work.id, { service }); setOpenServiceId(null); }}><Text style={[styles.optionText, work.service === service && styles.optionTextActive]}>{service}</Text></TouchableOpacity>)}</View>}
@@ -106,8 +149,9 @@ export function PortfolioEditor({ darkMode, maxWorks, initialWorks, availableSer
           {work.photos.length < 3 && <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Agregar foto al trabajo ${index + 1}`} disabled={processing} style={styles.addPhoto} onPress={() => void pickWorkPhoto(work)}><Text style={styles.addPhotoPlus}>＋</Text><Text style={styles.addPhotoText}>{processing ? "Optimizando…" : "Foto 1:1"}</Text></TouchableOpacity>}
         </View>
         <Text style={styles.photoHelp}>Recorte 1:1 · 900 px · compresión liviana · marca de agua LaburApp.</Text>
-      </View>)}
-      {works.length < maxWorks && <TouchableOpacity accessibilityRole="button" style={styles.addWork} onPress={() => setWorks((current) => [...current, emptyWork(current.length)])}><Text style={styles.addWorkText}>＋ Agregar trabajo realizado</Text></TouchableOpacity>}
+        </>}
+      </View>})}
+      {works.length < maxWorks && <TouchableOpacity accessibilityRole="button" style={styles.addWork} onPress={() => { const next = emptyWork(works.length); setWorks((current) => [...current, next]); setExpandedIds((current) => [...current, next.id]); }}><Text style={styles.addWorkText}>＋ Agregar trabajo realizado</Text></TouchableOpacity>}
       {!works.length && <View style={styles.empty}><Text style={styles.emptyTitle}>Todavía no cargaste trabajos</Text><Text style={styles.emptyText}>Agregá el primero para mostrar ejemplos reales de lo que hacés.</Text></View>}
     </ScrollView>
     {!!(localError || remoteError) && <Text style={styles.error}>{localError || remoteError}</Text>}
@@ -120,7 +164,13 @@ function createStyles(darkMode: boolean) {
   const palette = darkMode ? { background: "#10202F", surface: "#162A3B", input: "#132738", text: "#EAF4FC", muted: "#AFC2D2", line: "#29465B", soft: "#1B3041", danger: "#FF8A72" } : { background: "#FFFFFF", surface: "#F8FCFE", input: "#FBFDFE", text: "#063C78", muted: "#5E7183", line: "#D6E8F2", soft: "#EEF7FB", danger: "#B7452B" };
   return StyleSheet.create({
     card: { backgroundColor: palette.background, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 20, paddingBottom: 24, maxHeight: "96%" }, eyebrow: { color: "#FF8A1F", fontSize: 11, fontWeight: "900", letterSpacing: 0.8 }, title: { color: palette.text, fontSize: 25, fontWeight: "900", marginTop: 3 }, copy: { color: palette.muted, fontSize: 12, lineHeight: 17, marginTop: 4, marginBottom: 8 }, scroll: { maxHeight: 650 }, scrollContent: { paddingBottom: 12 },
-    workCard: { borderWidth: 1, borderColor: palette.line, backgroundColor: palette.surface, borderRadius: 14, padding: 12, marginTop: 10 }, workTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" }, workNumber: { color: "#49B2F5", fontSize: 10, fontWeight: "900" }, remove: { color: palette.danger, fontSize: 10, fontWeight: "900" }, label: { color: palette.text, fontSize: 11, fontWeight: "900", marginTop: 10, marginBottom: 6 },
+    workCard: { borderWidth: 1, borderColor: palette.line, backgroundColor: palette.surface, borderRadius: 14, padding: 12, marginTop: 10 },
+    collapsedHeader: { minHeight: 58, borderRadius: 11, backgroundColor: palette.soft, borderWidth: 1, borderColor: palette.line, zIndex: 2 },
+    collapsedToggle: { minHeight: 58, flexDirection: "row", alignItems: "center", paddingHorizontal: 11, gap: 9 },
+    dragHandle: { color: "#49B2F5", fontSize: 20, fontWeight: "900" },
+    collapsedCopy: { flex: 1, minWidth: 0 },
+    collapsedTitle: { color: palette.text, fontSize: 12, fontWeight: "900", marginTop: 3 },
+    workTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 9 }, workNumber: { color: "#49B2F5", fontSize: 10, fontWeight: "900" }, reorderHint: { color: palette.muted, fontSize: 9, fontWeight: "700" }, remove: { color: palette.danger, fontSize: 10, fontWeight: "900" }, label: { color: palette.text, fontSize: 11, fontWeight: "900", marginTop: 10, marginBottom: 6 },
     selector: { minHeight: 46, borderWidth: 1, borderColor: palette.line, backgroundColor: palette.input, borderRadius: 11, flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12 }, selectorText: { color: palette.text, fontSize: 12, fontWeight: "800", flex: 1 }, placeholder: { color: palette.muted, fontWeight: "500" }, chevron: { color: "#49B2F5", fontSize: 17, fontWeight: "900" }, options: { borderWidth: 1, borderColor: palette.line, borderRadius: 10, overflow: "hidden", marginTop: 5, backgroundColor: palette.input }, option: { minHeight: 44, justifyContent: "center", paddingHorizontal: 11, borderBottomWidth: 1, borderBottomColor: palette.line }, optionActive: { backgroundColor: palette.soft }, optionText: { color: palette.muted, fontSize: 11, fontWeight: "800" }, optionTextActive: { color: palette.text, fontWeight: "900" },
     input: { minHeight: 46, borderWidth: 1, borderColor: palette.line, borderRadius: 11, paddingHorizontal: 12, color: palette.text, backgroundColor: palette.input }, description: { minHeight: 78, paddingTop: 11, textAlignVertical: "top" }, counter: { color: palette.muted, fontSize: 9, textAlign: "right", marginTop: 4 }, photosRow: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 9 }, photoWrap: { width: 92, height: 92, position: "relative" }, photo: { width: 92, height: 92, borderRadius: 10 }, photoRemove: { position: "absolute", right: 4, top: 4, width: 23, height: 23, borderRadius: 12, backgroundColor: "rgba(7,18,29,0.82)", alignItems: "center", justifyContent: "center" }, photoRemoveText: { color: "white", fontSize: 16, lineHeight: 18, fontWeight: "900" }, addPhoto: { width: 92, height: 92, borderRadius: 10, borderWidth: 1, borderStyle: "dashed", borderColor: "#49B2F5", backgroundColor: palette.input, alignItems: "center", justifyContent: "center" }, addPhotoPlus: { color: "#49B2F5", fontSize: 22, fontWeight: "900" }, addPhotoText: { color: "#49B2F5", fontSize: 9, fontWeight: "900", marginTop: 2 }, photoHelp: { color: palette.muted, fontSize: 9, lineHeight: 13, marginTop: 7 },
     addWork: { minHeight: 46, borderWidth: 1, borderStyle: "dashed", borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center", marginTop: 10 }, addWorkText: { color: "#49B2F5", fontSize: 12, fontWeight: "900" }, empty: { backgroundColor: palette.soft, borderRadius: 12, padding: 16, marginTop: 10 }, emptyTitle: { color: palette.text, fontSize: 13, fontWeight: "900" }, emptyText: { color: palette.muted, fontSize: 10, lineHeight: 15, marginTop: 4 }, error: { color: palette.danger, fontSize: 12, fontWeight: "800", marginTop: 7 }, actions: { flexDirection: "row", gap: 8, marginTop: 12 }, cancel: { minHeight: 48, minWidth: 92, borderWidth: 1, borderColor: "#49B2F5", borderRadius: 11, alignItems: "center", justifyContent: "center" }, cancelText: { color: "#49B2F5", fontWeight: "900" }, save: { flex: 1, minHeight: 48, borderRadius: 11, backgroundColor: "#FF7800", alignItems: "center", justifyContent: "center" }, saveText: { color: "white", fontWeight: "900" }, disabled: { opacity: 0.55 },
