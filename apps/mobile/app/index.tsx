@@ -67,6 +67,12 @@ import { useRequestSync } from "../src/hooks/useRequestSync";
 import { useResponsiveLayout } from "../src/layouts/useResponsiveLayout";
 import { isDemoAccessEnabled, isEmailNotConfirmedError, passwordSecurityError, readableAuthError, shouldClearSessionOnAuthEvent } from "../src/features/auth/auth-helpers";
 import { parseCompletionToken } from "../src/features/completion/completion-qr";
+import {
+  advanceLeaderCycle,
+  LeaderCycle,
+  rankProviders,
+  topTieKeys,
+} from "../src/features/discovery/provider-ranking";
 import { DOCUMENT_IMAGE_POLICY, longestSideResize, PHOTO_IMAGE_POLICY, pickedImageError } from "../src/services/image-safety";
 
 const providers = [
@@ -620,6 +626,8 @@ type Provider = (typeof providers)[number] & {
   availabilityEnd?: string;
   portfolioWorks?: PublicPortfolioWork[];
   profileReviews?: SavedProfileReview[];
+  subscriptionPriority?: number;
+  registeredAt?: string;
 };
 type ProviderSort = "recent" | "jobs" | "rating";
 type FeaturedWork = {
@@ -1043,6 +1051,7 @@ const darkColors: typeof lightColors = {
 type ThemeColors = typeof lightColors;
 const THEME_STORAGE_KEY = "laburapp-color-theme";
 const LAST_TAB_STORAGE_KEY = "laburapp:last-tab";
+const PROVIDER_LEADER_CYCLES_STORAGE_KEY = "laburapp:provider-leader-cycles:v1";
 const officialWordmark = require("../assets/brand/laburapp-wordmark-clean.png");
 const demoAccessEnabled = isDemoAccessEnabled(
   process.env.EXPO_PUBLIC_DEMO_ACCESS,
@@ -1135,6 +1144,8 @@ export default function Home() {
   const [requested, setRequested] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [requestRefresh, setRequestRefresh] = useState(0);
+  const [providerLeaderCycles, setProviderLeaderCycles] = useState<Record<string, LeaderCycle>>({});
+  const [providerLeaderCyclesLoaded, setProviderLeaderCyclesLoaded] = useState(false);
   const [hiddenRequestIds, setHiddenRequestIds] = useState<string[]>([]);
   const [undoCancellation, setUndoCancellation] = useState<UndoCancellation | null>(null);
   const [authMode, setAuthMode] = useState<
@@ -1632,6 +1643,8 @@ export default function Home() {
           availabilityEnd: String(row.availability_end ?? "18:00").slice(0, 5),
           portfolioWorks: publishedWorks,
           profileReviews: reviewsByProvider.get(String(row.public_id)) ?? [],
+          subscriptionPriority: Number(row.subscription_priority ?? 0),
+          registeredAt: row.registered_at ? String(row.registered_at) : undefined,
         };
       });
       setPublishedProviders((current) => JSON.stringify(current) === JSON.stringify(directory) ? current : directory);
@@ -3873,32 +3886,54 @@ export default function Home() {
     requests.find((request) => request.id === acceptQuoteRequestId) ?? null;
   const quoteBuilderRequest =
     requests.find((request) => request.id === quoteBuilderRequestId) ?? null;
-  const filtered = useMemo(
-    () =>
-      publishedProviders
-        .map((provider, registrationOrder) => ({ provider, registrationOrder }))
-        .filter(
-          ({ provider }) =>
-            (cityFilter === "Todas" || provider.city === cityFilter) &&
-            `${provider.name} ${provider.trade} ${provider.city} ${provider.skills}`
-              .toLowerCase()
-              .includes(query.toLowerCase()),
-        )
-        .sort((a, b) =>
-          providerSort === "jobs"
-            ? b.provider.jobs - a.provider.jobs
-            : providerSort === "rating"
-              ? (b.provider.rating === "Nuevo"
-                  ? 0
-                  : Number(b.provider.rating.replace(",", "."))) -
-                (a.provider.rating === "Nuevo"
-                  ? 0
-                  : Number(a.provider.rating.replace(",", ".")))
-              : b.registrationOrder - a.registrationOrder,
-        )
-        .map(({ provider }) => provider),
-    [publishedProviders, query, cityFilter, providerSort],
+  const providerRankingScope = `${providerSort}|${cityFilter}|${query.trim().toLocaleLowerCase("es")}`;
+  const matchingProviders = useMemo(
+    () => publishedProviders.filter(
+      (provider) =>
+        (cityFilter === "Todas" || provider.city === cityFilter) &&
+        `${provider.name} ${provider.trade} ${provider.city} ${provider.skills}`
+          .toLocaleLowerCase("es")
+          .includes(query.toLocaleLowerCase("es")),
+    ),
+    [publishedProviders, query, cityFilter],
   );
+  const filtered = useMemo(
+    () => rankProviders(matchingProviders, providerSort, providerLeaderCycles[providerRankingScope]?.leaderId),
+    [matchingProviders, providerSort, providerLeaderCycles, providerRankingScope],
+  );
+  const topProviderTieKeys = useMemo(
+    () => topTieKeys(matchingProviders, providerSort),
+    [matchingProviders, providerSort],
+  );
+  const topProviderTieSignature = topProviderTieKeys.join("|");
+
+  useEffect(() => {
+    let active = true;
+    void AsyncStorage.getItem(PROVIDER_LEADER_CYCLES_STORAGE_KEY).then((stored) => {
+      if (!active) return;
+      try {
+        setProviderLeaderCycles(stored ? JSON.parse(stored) : {});
+      } catch {
+        setProviderLeaderCycles({});
+      }
+      setProviderLeaderCyclesLoaded(true);
+    });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!providerLeaderCyclesLoaded) return;
+    void AsyncStorage.setItem(PROVIDER_LEADER_CYCLES_STORAGE_KEY, JSON.stringify(providerLeaderCycles));
+  }, [providerLeaderCycles, providerLeaderCyclesLoaded]);
+
+  useEffect(() => {
+    if (!providerLeaderCyclesLoaded || !topProviderTieKeys.length) return;
+    setProviderLeaderCycles((current) => ({
+      ...current,
+      [providerRankingScope]: advanceLeaderCycle(current[providerRankingScope], topProviderTieKeys),
+    }));
+  }, [providerLeaderCyclesLoaded, providerRankingScope, requestRefresh, topProviderTieSignature]);
+
   const visibleProviders = session ? filtered : filtered.slice(0, 4);
   const selectedPublicWorks = publicProfileProvider
     ? publicPortfolioFor(publicProfileProvider)
