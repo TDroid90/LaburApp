@@ -1053,7 +1053,8 @@ type ThemeColors = typeof lightColors;
 const THEME_STORAGE_KEY = "laburapp-color-theme";
 const LAST_TAB_STORAGE_KEY = "laburapp:last-tab";
 const PROVIDER_LEADER_CYCLES_STORAGE_KEY = "laburapp:provider-leader-cycles:v1";
-const officialWordmark = require("../assets/brand/laburapp-wordmark-clean.png");
+const officialHorizontalLogo = require("../assets/brand/laburapp-logo-horizontal.png");
+const officialPrimaryLogo = require("../assets/brand/laburapp-logo-primary.png");
 const demoAccessEnabled = isDemoAccessEnabled(
   process.env.EXPO_PUBLIC_DEMO_ACCESS,
   process.env.EXPO_PUBLIC_APP_ENV,
@@ -4056,7 +4057,7 @@ export default function Home() {
           >
             <Image
               accessible={false}
-              source={officialWordmark}
+              source={officialHorizontalLogo}
               resizeMode="contain"
               style={[
                 styles.wordmarkLogo,
@@ -5374,7 +5375,13 @@ export default function Home() {
         <View style={styles.drawerBackdrop}>
           <View style={styles.drawerPanel}>
             <View style={styles.drawerHeader}>
-              <Text style={styles.drawerTitle}>LaburApp</Text>
+              <Image
+                accessible
+                accessibilityLabel="LaburApp"
+                source={officialPrimaryLogo}
+                resizeMode="contain"
+                style={styles.drawerLogo}
+              />
               <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar menú" style={styles.drawerClose} onPress={() => setMenuOpen(false)}>
                 <Text style={styles.drawerCloseText}>×</Text>
               </TouchableOpacity>
@@ -6322,9 +6329,9 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
       gap: 4,
     },
     menuLine: { width: 15, height: 2, borderRadius: 2, backgroundColor: "white" },
-    wordmarkLogo: { width: 176, height: 48 },
-    wordmarkLogoCompact: { width: 128, height: 38 },
-    wordmarkLogoWide: { width: 210, height: 60 },
+    wordmarkLogo: { width: 168, height: 68 },
+    wordmarkLogoCompact: { width: 116, height: 50 },
+    wordmarkLogoWide: { width: 190, height: 76 },
     headerActions: { flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 1 },
     themeButton: {
       width: 44,
@@ -7415,7 +7422,7 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     },
     drawerDismissArea: { flex: 1 },
     drawerHeader: { minHeight: 48, flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 24 },
-    drawerTitle: { color: colors.navy, fontSize: 24, fontWeight: "900" },
+    drawerLogo: { width: 128, height: 128, marginTop: -16, marginBottom: -14 },
     drawerClose: { width: 36, height: 36, alignItems: "center", justifyContent: "center" },
     drawerCloseText: { color: colors.navy, fontSize: 30, lineHeight: 32, fontWeight: "800" },
     drawerEyebrow: { color: colors.orange, fontSize: 10, fontWeight: "900", letterSpacing: 1, marginBottom: 8 },

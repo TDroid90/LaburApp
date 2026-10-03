@@ -8,7 +8,7 @@ import { containsContactAttempt } from "@laburapp/shared";
 import type { SavedPortfolioWork } from "../lib/local-store";
 import { PHOTO_IMAGE_POLICY, pickedImageError } from "../src/services/image-safety";
 
-const wordmark = require("../assets/brand/laburapp-wordmark-clean.png");
+const wordmark = require("../assets/brand/laburapp-logo-horizontal.png");
 const watermarkTiles = Array.from({ length: 25 }, (_, index) => ({ left: (index % 5) * 150 - 40, top: Math.floor(index / 5) * 150 - 25 }));
 
 function emptyWork(index: number): SavedPortfolioWork {
