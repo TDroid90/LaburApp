@@ -5,7 +5,7 @@ export type ServiceFamily = {
 };
 
 export const providerServiceCatalog: ServiceFamily[] = [
-  { name: "Instalaciones", description: "Instalaciones y reparaciones esenciales del hogar.", specialties: ["Gasista", "Electricidad domiciliaria", "Reparación de pérdidas de agua", "Instalación de agua", "Instalación de desagües", "Instalación de cloacas", "Instalación sanitaria", "Destape de cañerías", "Instalación de termotanque", "Instalación de calefón", "Instalación de cocina", "Instalación de artefactos"] },
+  { name: "Instalaciones", description: "Instalaciones y reparaciones esenciales del hogar.", specialties: ["Gasista", "Electricidad", "Reparación de pérdidas de agua", "Instalación de agua", "Instalación de desagües", "Instalación de cloacas", "Instalación sanitaria", "Destape de cañerías", "Instalación de termotanque", "Instalación de calefón", "Instalación de cocina", "Instalación de artefactos"] },
   { name: "Calefacción", description: "Instalación, limpieza y mantenimiento de sistemas de calefacción.", specialties: ["Reparación de calefactores", "Limpieza de calefactores", "Reparación de calderas", "Instalación de radiadores", "Mantenimiento de calefacción"] },
   { name: "Climatización", description: "Soluciones de frío, aire acondicionado y refrigeración.", specialties: ["Reparación de aire acondicionado", "Instalación de aire acondicionado", "Carga de gas", "Reparación de heladeras", "Reparación de freezers"] },
   { name: "Construcción", description: "Obra, aberturas, terminaciones y reparaciones estructurales.", specialties: ["Albañilería", "Construcción en seco", "Durlock", "Revoques", "Reparación de paredes", "Reparación de techos", "Reparación de humedad", "Aberturas", "Instalación de puertas", "Instalación de ventanas", "Reparación de puertas y ventanas", "Colocación de mosquiteros", "Sellado y ajuste de aberturas"] },
@@ -17,7 +17,7 @@ export const providerServiceCatalog: ServiceFamily[] = [
   { name: "Tecnología", description: "Soporte, reparación e instalación de tecnología doméstica.", specialties: ["Reparación de computadoras", "Instalación de programas", "Reparación de celulares", "Instalación de cámaras", "Instalación de alarmas", "Instalación de redes Wi-Fi", "Reparación de impresoras", "Instalación de porteros eléctricos"] },
   { name: "Vehículos", description: "Mantenimiento, reparación y cuidado de vehículos.", specialties: ["Mecánica general", "Electricidad del automotor", "Reparación de motos", "Reparación de bicicletas", "Cambio de aceite", "Auxilio mecánico", "Lavado y limpieza de vehículos", "Detailing"] },
   { name: "Fletes y mudanzas", description: "Traslados, movimientos de carga y retiros.", specialties: ["Fletes pequeños", "Mudanzas", "Traslado de muebles", "Carga y descarga", "Retiro de materiales", "Retiro de escombros"] },
-  { name: "Limpieza y hogar", description: "Limpieza y mantenimiento de hogares y espacios de trabajo.", specialties: ["Limpieza domiciliaria", "Limpieza profunda", "Limpieza de vidrios", "Limpieza de alfombras", "Limpieza de tapizados", "Limpieza de oficinas", "Limpieza de comercios", "Limpieza de obra", "Limpieza de patios", "Lavado y planchado"] },
+  { name: "Limpieza y hogar", description: "Limpieza y mantenimiento de hogares y espacios de trabajo.", specialties: ["Limpieza general", "Limpieza profunda", "Limpieza de vidrios", "Limpieza de alfombras", "Limpieza de tapizados", "Limpieza de oficinas", "Limpieza de comercios", "Limpieza de obra", "Limpieza de patios", "Lavado y planchado"] },
   { name: "Exteriores y jardín", description: "Cuidado, limpieza y mejora de espacios exteriores.", specialties: ["Corte de pasto", "Jardinería", "Poda", "Mantenimiento de patios", "Instalación de riego", "Limpieza de canaletas", "Limpieza de terrenos", "Construcción de cercos", "Mantenimiento de espacios verdes"] },
   { name: "Seguridad", description: "Instalación de sistemas de seguridad y control.", specialties: ["Instalación de cámaras", "Instalación de alarmas", "Instalación de sensores", "Control de accesos", "Cerraduras electrónicas"] },
   { name: "Cerrajería", description: "Apertura, reparación e instalación de cerraduras.", specialties: ["Apertura de puertas", "Cambio de cerraduras", "Reparación de cerraduras", "Copia de llaves", "Cerrajería automotor", "Instalación de cerraduras digitales"] },
@@ -31,8 +31,28 @@ export const providerServiceCatalog: ServiceFamily[] = [
 ];
 
 export const professionalSuggestions = [
-  "Gasista", "Electricista domiciliario", "Plomero", "Técnico en calefacción", "Técnico en refrigeración", "Albañil", "Instalador de aberturas", "Pintor", "Carpintero", "Herrero", "Técnico en reparación de electrodomésticos", "Técnico en informática", "Mecánico", "Fletero", "Personal de limpieza", "Jardinero", "Cerrajero", "Cuidador de adultos mayores", "Niñera", "Peluquero", "Costurero", "Fotógrafo", "Profesor particular", "Guía turístico/a y excursiones", "Guía de senderismo", "Organizador/a de experiencias turísticas", "Planificador/a de itinerarios", "Candy", "Especialista en candy bar", "Wedding planner", "Coordinador/a de eventos",
+  "Gasista", "Electricista", "Plomero", "Técnico en calefacción", "Técnico en refrigeración", "Albañil", "Instalador de aberturas", "Pintor", "Carpintero", "Herrero", "Técnico en reparación de electrodomésticos", "Técnico en informática", "Mecánico", "Fletero", "Personal de limpieza", "Jardinero", "Cerrajero", "Cuidador de adultos mayores", "Niñera", "Peluquero", "Costurero", "Fotógrafo", "Profesor particular", "Guía turístico/a y excursiones", "Guía de senderismo", "Organizador/a de experiencias turísticas", "Planificador/a de itinerarios", "Candy", "Especialista en candy bar", "Wedding planner", "Coordinador/a de eventos",
 ];
+
+export function normalizeProfessionalLabel(value: string) {
+  const trimmed = value.trim();
+  if (/^electricista domiciliari[oa]$/i.test(trimmed)) return "Electricista";
+  if (/^electricidad domiciliaria$/i.test(trimmed)) return "Electricidad";
+  if (/^limpieza domiciliaria$/i.test(trimmed)) return "Limpieza general";
+  return trimmed;
+}
+
+export function discoveryLabels(value: string) {
+  return value
+    .split(/\s*[·,]\s*/)
+    .map(normalizeProfessionalLabel)
+    .filter(Boolean);
+}
+
+export function professionalSuggestionIsValid(value?: string) {
+  const normalized = normalizeProfessionalLabel(value ?? "").toLocaleLowerCase("es-AR");
+  return professionalSuggestions.some((item) => item.toLocaleLowerCase("es-AR") === normalized);
+}
 
 export type CertificationRule = {
   label: string;

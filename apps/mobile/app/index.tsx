@@ -27,6 +27,7 @@ import { containsContactAttempt, containsPriceAttempt, reviewIsEligible } from "
 import { PortfolioEditor } from "../components/PortfolioEditor";
 import { ProviderProfileForm } from "../components/ProviderProfileForm";
 import { QuoteBuilderForm } from "../components/QuoteBuilderForm";
+import { discoveryLabels, normalizeProfessionalLabel } from "../components/provider-service-catalog";
 import {
   applyDemoAction,
   createDemoScenarios,
@@ -594,13 +595,13 @@ const quickSearches = [
 function buildHomeQuickSearches(directory: Provider[]) {
   const ranked = [...directory]
     .sort((a, b) => Number(b.jobs || 0) - Number(a.jobs || 0))
-    .map((provider) => provider.trade.trim())
+    .map((provider) => normalizeProfessionalLabel(provider.trade))
     .filter(Boolean);
   const topFive = [...new Set(ranked)].slice(0, 5);
   const candidates = [...new Set([
     ...ranked,
     ...quickSearches,
-    ...directory.flatMap((provider) => provider.skills.split(" · ").map((skill) => skill.trim())),
+    ...directory.flatMap((provider) => discoveryLabels(provider.skills)),
   ])].filter((term) => term && !topFive.includes(term));
   for (let index = candidates.length - 1; index > 0; index -= 1) {
     const target = Math.floor(Math.random() * (index + 1));
@@ -1129,6 +1130,7 @@ export default function Home() {
   const colors = darkMode ? darkColors : lightColors;
   const styles = useMemo(() => createStyles(colors, insets.top, insets.bottom), [darkMode, insets.top, insets.bottom]);
   const [query, setQuery] = useState("");
+  const [tradeHelpVisible, setTradeHelpVisible] = useState(false);
   const [providerSort, setProviderSort] = useState<ProviderSort>("recent");
   const [cityFilter, setCityFilter] = useState("Todas");
   const [openFilter, setOpenFilter] = useState<"sort" | "city" | null>(null);
@@ -1629,7 +1631,7 @@ export default function Home() {
           providerId: String(row.provider_id),
           publicId: String(row.public_id ?? ""),
           name: String(row.display_name ?? "Profesional"),
-          trade: tradeTitle.split(" · ")[0] || "Servicio profesional",
+          trade: normalizeProfessionalLabel(tradeTitle.split(" · ")[0] || "Servicio profesional"),
           city: String(row.city ?? ""),
           rating: rating > 0 ? rating.toFixed(1).replace(".", ",") : "Nuevo",
           jobs: Number(row.completed_jobs ?? 0),
@@ -1707,8 +1709,9 @@ export default function Home() {
       const availabilityEnd = String(providerRow.availability_end ?? "18:00").slice(0, 5);
       const tradeRows = tradesResult.data ?? [];
       const titleTrades = String(providerRow.trade_title ?? "").split(" · ").filter(Boolean);
-      const primaryTrade = String(tradeRows[0]?.trade_name ?? titleTrades[0] ?? "");
-      const secondaryTrade = String(tradeRows[1]?.trade_name ?? titleTrades[1] ?? "") || undefined;
+      const primaryTrade = normalizeProfessionalLabel(String(tradeRows[0]?.trade_name ?? titleTrades[0] ?? ""));
+      const secondaryTradeValue = String(tradeRows[1]?.trade_name ?? titleTrades[1] ?? "");
+      const secondaryTrade = secondaryTradeValue ? normalizeProfessionalLabel(secondaryTradeValue) : undefined;
       const photoRows = photosResult.data ?? [];
       const storedTariffItems = Array.isArray(tariffTemplateResult.data?.items) ? tariffTemplateResult.data.items : [];
       const hydratedProfile: SavedProviderProfile = {
@@ -4155,6 +4158,35 @@ export default function Home() {
                     </Text>
                   </TouchableOpacity>
                 ))}
+                <View style={styles.tradeHelpWrap}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel="Ayuda si tu oficio no aparece"
+                    accessibilityState={{ expanded: tradeHelpVisible }}
+                    onHoverIn={() => setTradeHelpVisible(true)}
+                    onHoverOut={() => setTradeHelpVisible(false)}
+                    onFocus={() => setTradeHelpVisible(true)}
+                    onBlur={() => setTradeHelpVisible(false)}
+                    onPress={() => setTradeHelpVisible((current) => !current)}
+                    style={styles.tradeHelpButton}
+                  >
+                    <Text style={styles.tradeHelpIcon}>!</Text>
+                  </Pressable>
+                  {tradeHelpVisible && (
+                    <View accessibilityRole="alert" style={styles.tradeHelpTooltip}>
+                      <Text style={styles.tradeHelpText}>
+                        ¿Tu oficio no está?{" "}
+                        <Text
+                          accessibilityRole="link"
+                          style={styles.tradeHelpLink}
+                          onPress={() => void Linking.openURL("#").catch(() => undefined)}
+                        >
+                          Contactanos
+                        </Text>
+                      </Text>
+                    </View>
+                  )}
+                </View>
               </View>
             </View>
             <View style={[styles.sectionHeader, compactHeader && styles.sectionHeaderCompact]}>
@@ -6378,6 +6410,36 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
       lineHeight: 14,
       fontWeight: "700",
     },
+    tradeHelpWrap: { position: "relative", zIndex: 30 },
+    tradeHelpButton: {
+      width: 44,
+      height: 44,
+      alignItems: "center",
+      justifyContent: "center",
+      borderRadius: 22,
+      borderWidth: 1,
+      borderColor: "rgba(255,255,255,0.5)",
+      backgroundColor: "rgba(255,255,255,0.12)",
+    },
+    tradeHelpIcon: { color: "white", fontSize: 18, fontWeight: "900" },
+    tradeHelpTooltip: {
+      position: "absolute",
+      right: 0,
+      bottom: 50,
+      width: 220,
+      paddingHorizontal: 12,
+      paddingVertical: 10,
+      borderRadius: 10,
+      backgroundColor: colors.surface,
+      borderWidth: 1,
+      borderColor: colors.line,
+      shadowColor: "#000",
+      shadowOpacity: 0.2,
+      shadowRadius: 8,
+      elevation: 6,
+    },
+    tradeHelpText: { color: colors.navy, fontSize: 13, lineHeight: 18 },
+    tradeHelpLink: { color: colors.blue, fontWeight: "900", textDecorationLine: "underline" },
     guestPreviewNotice: { backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.line, borderRadius: 14, padding: 12, marginBottom: 12 },
     guestPreviewTitle: { color: colors.navy, fontSize: 13, fontWeight: "900" },
     guestPreviewCopy: { color: colors.stone, fontSize: 11, lineHeight: 16, marginTop: 3 },

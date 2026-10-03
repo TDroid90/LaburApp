@@ -6,7 +6,7 @@ import { containsContactAttempt } from "@laburapp/shared";
 import type { SavedCredentialEvidence, SavedProviderProfile, SavedServiceOffer, SavedTariffItem } from "../lib/local-store";
 import { supabase } from "../lib/supabase";
 import { DOCUMENT_IMAGE_POLICY, longestSideResize, PHOTO_IMAGE_POLICY, pickedImageError } from "../src/services/image-safety";
-import { certificationRules as fallbackCertificationRules, professionalSuggestions, providerServiceCatalog, serviceSpecialtiesAreValid, specialtyDescription, type CertificationRule } from "./provider-service-catalog";
+import { certificationRules as fallbackCertificationRules, normalizeProfessionalLabel, professionalSuggestions, providerServiceCatalog, serviceSpecialtiesAreValid, specialtyDescription, type CertificationRule } from "./provider-service-catalog";
 
 const cities = ["San Sebastián", "Río Grande", "Tolhuin", "Almanza", "Ushuaia"];
 const coverageChoices = [...cities, "Zonas rurales"];
@@ -89,6 +89,7 @@ export function ProviderProfileForm({ darkMode, premium, initialProfile, email, 
   const [certificationInput, setCertificationInput] = useState("");
   const [credentialModalOpen, setCredentialModalOpen] = useState(false);
   const [certificationRules, setCertificationRules] = useState<CertificationRule[]>(fallbackCertificationRules);
+  const [tradeSuggestions, setTradeSuggestions] = useState(professionalSuggestions);
   const [openFamilyId, setOpenFamilyId] = useState<string | null>(null);
   const [openSpecialtyId, setOpenSpecialtyId] = useState<string | null>(null);
   const [membershipNotice, setMembershipNotice] = useState(false);
@@ -96,13 +97,21 @@ export function ProviderProfileForm({ darkMode, premium, initialProfile, email, 
   const [localError, setLocalError] = useState("");
   const services = draft.services ?? [];
   const activeTradeValue = activeTradeField === "secondary" ? draft.secondaryTrade ?? "" : draft.trade;
-  const filteredTrades = professionalSuggestions.filter((item) => item.toLocaleLowerCase("es-AR").includes(activeTradeValue.trim().toLocaleLowerCase("es-AR"))).slice(0, 6);
+  const filteredTrades = tradeSuggestions.filter((item) => item.toLocaleLowerCase("es-AR").includes(activeTradeValue.trim().toLocaleLowerCase("es-AR"))).slice(0, 6);
   const certificationSuggestions = certificationRules.map((item) => item.label);
   const filteredCertifications = certificationSuggestions.filter((item) => !draft.certifications?.includes(item) && item.toLocaleLowerCase("es-AR").includes(certificationInput.trim().toLocaleLowerCase("es-AR"))).slice(0, 6);
 
   useEffect(() => {
     if (!supabase) return;
     let active = true;
+    void supabase
+      .from("professional_trades")
+      .select("name")
+      .eq("active", true)
+      .order("position")
+      .then(({ data }) => {
+        if (active && data?.length) setTradeSuggestions(data.map((item) => normalizeProfessionalLabel(String(item.name))));
+      });
     void supabase
       .from("certification_types")
       .select("label, requires_number, number_label")
@@ -247,8 +256,9 @@ export function ProviderProfileForm({ darkMode, premium, initialProfile, email, 
     if (draft.displayName.trim().length < 3) return setLocalError("Ingresá tu nombre y apellido.");
     if (!cities.includes(draft.city)) return setLocalError("Elegí tu ciudad.");
     if ((draft.diagnosticPrice ?? 0) <= 0) return setLocalError("Indicá el valor inicial del diagnóstico o visita.");
-    if (draft.trade.trim().length < 3) return setLocalError("Indicá cómo querés presentarte profesionalmente.");
-    if (draft.secondaryTrade !== undefined && draft.secondaryTrade.trim().length < 3) return setLocalError("Completá o quitá la segunda profesión.");
+    const validTrade = (value?: string) => tradeSuggestions.some((item) => item.toLocaleLowerCase("es-AR") === normalizeProfessionalLabel(value ?? "").toLocaleLowerCase("es-AR"));
+    if (!validTrade(draft.trade)) return setLocalError("Elegí un oficio o profesión de la lista. Si no aparece, contactanos para incorporarlo.");
+    if (draft.secondaryTrade !== undefined && !validTrade(draft.secondaryTrade)) return setLocalError("Elegí la segunda profesión de la lista o quitála.");
     if (draft.bio.trim().length < 20) return setLocalError("Escribí una presentación de al menos 20 caracteres.");
     if (containsContactAttempt(draft.bio)) return setLocalError("No incluyas teléfonos, correos, redes ni enlaces en tu presentación.");
     if (!draft.coverageAreas?.length || draft.coverageAreas.some((area) => !coverageChoices.includes(area))) return setLocalError("Elegí al menos una localidad o zona de cobertura.");
@@ -269,7 +279,9 @@ export function ProviderProfileForm({ darkMode, premium, initialProfile, email, 
       const rule = certificationRules.find((item) => item.label === invalidCredential.certification);
       return setLocalError(`Completá ${rule?.numberLabel?.toLocaleLowerCase("es-AR") ?? "el número"} de ${invalidCredential.certification}.`);
     }
-    onSubmit({ ...draft, tariffItems: tariffItems.map((item) => ({ ...item, trade: item.trade.trim() || draft.trade.trim(), label: item.label.trim(), unit: item.unit.trim() || "servicio" })), trade: draft.trade.trim().replace(/ matriculad[oa]$/i, ""), secondaryTrade: draft.secondaryTrade?.trim().replace(/ matriculad[oa]$/i, "") || undefined, zones: coverageLabel(draft.coverageAreas), availability: coverageLabel(draft.coverageAreas), skills: services.flatMap((item) => item.specialties ?? [item.service]).join(", "), services: services.map((item) => ({ ...item, startTime: draft.availabilityStart ?? "08:00", endTime: draft.availabilityEnd ?? "18:00" })) });
+    const trade = normalizeProfessionalLabel(draft.trade.replace(/ matriculad[oa]$/i, ""));
+    const secondaryTrade = draft.secondaryTrade ? normalizeProfessionalLabel(draft.secondaryTrade.replace(/ matriculad[oa]$/i, "")) : undefined;
+    onSubmit({ ...draft, tariffItems: tariffItems.map((item) => ({ ...item, trade: item.trade.trim() || trade, label: item.label.trim(), unit: item.unit.trim() || "servicio" })), trade, secondaryTrade, zones: coverageLabel(draft.coverageAreas), availability: coverageLabel(draft.coverageAreas), skills: services.flatMap((item) => item.specialties ?? [item.service]).join(", "), services: services.map((item) => ({ ...item, startTime: draft.availabilityStart ?? "08:00", endTime: draft.availabilityEnd ?? "18:00" })) });
   }
 
   return <View style={styles.card}>
