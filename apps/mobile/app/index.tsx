@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   Image,
+  ImageBackground,
   Keyboard,
   KeyboardAvoidingView,
   Modal,
@@ -1055,6 +1056,7 @@ const LAST_TAB_STORAGE_KEY = "laburapp:last-tab";
 const PROVIDER_LEADER_CYCLES_STORAGE_KEY = "laburapp:provider-leader-cycles:v1";
 const officialHorizontalLogo = require("../assets/brand/laburapp-logo-horizontal.png");
 const officialPrimaryLogo = require("../assets/brand/laburapp-logo-primary.png");
+const launchPattern = require("../assets/laburapp-launch-pattern.png");
 const demoAccessEnabled = isDemoAccessEnabled(
   process.env.EXPO_PUBLIC_DEMO_ACCESS,
   process.env.EXPO_PUBLIC_APP_ENV,
@@ -4018,6 +4020,18 @@ export default function Home() {
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .slice(0, 3);
 
+  if (!hydrated) {
+    return (
+      <ImageBackground
+        accessible
+        accessibilityLabel="Iniciando LaburApp"
+        source={launchPattern}
+        resizeMode="cover"
+        style={styles.launchScreen}
+      />
+    );
+  }
+
   return (
     <>
     <Head>
@@ -6296,6 +6310,7 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
   const nativeNavigationSpace = Platform.OS === "android" ? Math.max(safeBottom, 24) : safeBottom;
   return StyleSheet.create({
     safe: { flex: 1, backgroundColor: colors.snow },
+    launchScreen: { flex: 1, width: "100%", height: "100%", backgroundColor: "#020912" },
     header: {
       minHeight: 88,
       paddingHorizontal: 16,
