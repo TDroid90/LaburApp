@@ -23,6 +23,7 @@ export const providerServiceCatalog: ServiceFamily[] = [
   { name: "Cerrajería", description: "Apertura, reparación e instalación de cerraduras.", specialties: ["Apertura de puertas", "Cambio de cerraduras", "Reparación de cerraduras", "Copia de llaves", "Cerrajería automotor", "Instalación de cerraduras digitales"] },
   { name: "Cuidado y asistencia", description: "Acompañamiento y cuidado responsable de personas y mascotas.", specialties: ["Cuidado de adultos mayores", "Niñera", "Acompañamiento", "Cuidado de mascotas", "Paseo de perros", "Adiestramiento básico"] },
   { name: "Servicios personales", description: "Bienestar, estética y cuidado personal.", specialties: ["Peluquería", "Barbería", "Manicuría", "Maquillaje", "Masajes", "Depilación"] },
+  { name: "Salud y rehabilitación", description: "Atención profesional para movilidad, recuperación física y bienestar corporal.", specialties: ["Kinesiología", "Osteopatía"] },
   { name: "Ropa y arreglos", description: "Confección, ajustes y reparación de prendas y calzado.", specialties: ["Costura", "Arreglo de pantalones", "Cambio de cierres", "Ajuste de prendas", "Confección de ropa", "Reparación de calzado"] },
   { name: "Servicios creativos", description: "Producción visual, contenido y comunicación para personas y negocios.", specialties: ["Fotografía", "Video", "Edición de fotos", "Diseño de flyers", "Diseño de logos", "Manejo de redes sociales"] },
   { name: "Servicios educativos", description: "Clases y acompañamiento para aprender o preparar exámenes.", specialties: ["Apoyo escolar", "Clases particulares", "Clases de computación", "Clases de idiomas", "Clases de música", "Preparación para exámenes"] },
@@ -31,7 +32,7 @@ export const providerServiceCatalog: ServiceFamily[] = [
 ];
 
 export const professionalSuggestions = [
-  "Gasista", "Electricista", "Plomero", "Técnico en calefacción", "Técnico en refrigeración", "Albañil", "Instalador de aberturas", "Pintor", "Carpintero", "Herrero", "Técnico en reparación de electrodomésticos", "Técnico en informática", "Mecánico", "Fletero", "Personal de limpieza", "Jardinero", "Cerrajero", "Cuidador de adultos mayores", "Niñera", "Peluquero", "Costurero", "Fotógrafo", "Profesor particular", "Guía turístico/a y excursiones", "Guía de senderismo", "Organizador/a de experiencias turísticas", "Planificador/a de itinerarios", "Candy", "Especialista en candy bar", "Wedding planner", "Coordinador/a de eventos",
+  "Gasista", "Electricista", "Plomero", "Técnico en calefacción", "Técnico en refrigeración", "Albañil", "Instalador de aberturas", "Pintor", "Carpintero", "Herrero", "Técnico en reparación de electrodomésticos", "Técnico en informática", "Mecánico", "Fletero", "Personal de limpieza", "Jardinero", "Cerrajero", "Cuidador de adultos mayores", "Niñera", "Peluquero", "Kinesiólogo/a", "Osteópata", "Costurero", "Fotógrafo", "Profesor particular", "Guía turístico/a y excursiones", "Guía de senderismo", "Organizador/a de experiencias turísticas", "Planificador/a de itinerarios", "Candy", "Especialista en candy bar", "Wedding planner", "Coordinador/a de eventos",
 ];
 
 export function normalizeProfessionalLabel(value: string) {
@@ -46,6 +47,7 @@ export function discoveryLabels(value: string) {
   return value
     .split(/\s*[·,]\s*/)
     .map(normalizeProfessionalLabel)
+    .map((label) => /^mecánic[oa]s?$/i.test(label) || /^mecánica$/i.test(label) ? "Mecánicos" : label)
     .filter(Boolean);
 }
 

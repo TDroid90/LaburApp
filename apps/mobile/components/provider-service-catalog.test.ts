@@ -6,6 +6,8 @@ describe("provider service catalog", () => {
     expect(normalizeProfessionalLabel("Electricista domiciliario")).toBe("Electricista");
     expect(normalizeProfessionalLabel("Electricidad domiciliaria")).toBe("Electricidad");
     expect(normalizeProfessionalLabel("Limpieza domiciliaria")).toBe("Limpieza general");
+    expect(discoveryLabels("Mecánico")).toEqual(["Mecánicos"]);
+    expect(discoveryLabels("Mecánica")).toEqual(["Mecánicos"]);
   });
 
   it("separates professions and services instead of producing one long filter", () => {
@@ -15,6 +17,8 @@ describe("provider service catalog", () => {
 
   it("does not accept arbitrary input as a profession", () => {
     expect(professionalSuggestionIsValid("Electricista domiciliario")).toBe(true);
+    expect(professionalSuggestionIsValid("Kinesiólogo/a")).toBe(true);
+    expect(professionalSuggestionIsValid("Osteópata")).toBe(true);
     expect(professionalSuggestionIsValid("Inventor de oficios automáticos")).toBe(false);
   });
 });

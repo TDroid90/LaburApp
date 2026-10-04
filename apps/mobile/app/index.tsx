@@ -588,7 +588,7 @@ const quickSearches = [
   "Pintura",
   "Fletes",
   "Jardinería",
-  "Mecánica",
+  "Mecánicos",
   "Costura",
   "Informática",
 ];
@@ -596,7 +596,7 @@ const quickSearches = [
 function buildHomeQuickSearches(directory: Provider[]) {
   const ranked = [...directory]
     .sort((a, b) => Number(b.jobs || 0) - Number(a.jobs || 0))
-    .map((provider) => normalizeProfessionalLabel(provider.trade))
+    .map((provider) => discoveryLabels(provider.trade)[0] ?? normalizeProfessionalLabel(provider.trade))
     .filter(Boolean);
   const topFive = [...new Set(ranked)].slice(0, 5);
   const candidates = [...new Set([
@@ -3893,15 +3893,16 @@ export default function Home() {
   const quoteBuilderRequest =
     requests.find((request) => request.id === quoteBuilderRequestId) ?? null;
   const providerRankingScope = `${providerSort}|${cityFilter}|${query.trim().toLocaleLowerCase("es")}`;
+  const normalizedProviderQuery = /^mecánicos$/i.test(query.trim()) ? "mecánic" : query.toLocaleLowerCase("es");
   const matchingProviders = useMemo(
     () => publishedProviders.filter(
       (provider) =>
         (cityFilter === "Todas" || provider.city === cityFilter) &&
         `${provider.name} ${provider.trade} ${provider.city} ${provider.skills}`
           .toLocaleLowerCase("es")
-          .includes(query.toLocaleLowerCase("es")),
+          .includes(normalizedProviderQuery),
     ),
-    [publishedProviders, query, cityFilter],
+    [publishedProviders, normalizedProviderQuery, cityFilter],
   );
   const filtered = useMemo(
     () => rankProviders(matchingProviders, providerSort, providerLeaderCycles[providerRankingScope]?.leaderId),
