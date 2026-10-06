@@ -728,6 +728,23 @@ type AdminSubscriptionRequest = {
 };
 
 const CONTACT_WARNING = "No está permitido compartir teléfonos de contacto o emails.";
+
+function notifyMailEvent(event: "subscription.received" | "subscription.activated", details: { requestId?: string; publicId?: string }) {
+  if (!supabase) return;
+  void (async () => {
+    try {
+      const token = (await supabase.auth.getSession()).data.session?.access_token;
+      if (!token) return;
+      await fetch(backendApiUrl("/api/mail", Platform.OS === "web"), {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+        body: JSON.stringify({ event, ...details }),
+      });
+    } catch {
+      // The email is a notification side effect; the existing app action remains authoritative.
+    }
+  })();
+}
 const FREE_WEEKLY_REQUEST_LIMIT = 3;
 const PREMIUM_WEEKLY_REQUEST_LIMIT = 7;
 const REQUEST_LIFETIME_MS = 5 * 24 * 60 * 60 * 1000;
@@ -3813,7 +3830,7 @@ export default function Home() {
       const amount = ({ 1: 3500, 3: 7500, 6: 12000, 12: 15000 } as const)[subscriptionMonths];
       const request = await supabase.from("subscription_requests").insert({
         client_id: auth.data.user.id, plan_months: subscriptionMonths, amount_ars: amount, receipt_path: storagePath,
-      });
+      }).select("id").single();
       if (request.error) throw request.error;
       const outbox = await supabase.from("receipt_drive_outbox").insert({
         owner_id: auth.data.user.id, receipt_kind: "subscription", source_storage_path: storagePath,
@@ -3821,6 +3838,7 @@ export default function Home() {
         target_file_name: fileName,
       });
       if (outbox.error) throw outbox.error;
+      if (request.data?.id) notifyMailEvent("subscription.received", { requestId: String(request.data.id) });
       const token = (await supabase.auth.getSession()).data.session?.access_token;
       if (token) void fetch("/api/drive-sync", { method: "POST", headers: { authorization: `Bearer ${token}` } }).catch(() => undefined);
       setSubscriptionModal(false);
@@ -3868,6 +3886,7 @@ export default function Home() {
     });
     setAdminPremiumBusy(false);
     if (result.error) return setAdminPremiumError("No pudimos modificar Premium. Verificá la transferencia y reintentá.");
+    if (!adminPremiumAccount.premium) notifyMailEvent("subscription.activated", { publicId: adminPremiumAccount.publicId });
     void lookupPremiumAccount();
     void loadAdminPlatformMetrics();
     void loadAdminSubscriptionRequests();
