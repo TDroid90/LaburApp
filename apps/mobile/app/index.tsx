@@ -650,6 +650,7 @@ type PublicProfileDetails = {
   reviews: Array<{ author: string; comment: string; rating: number; qualities?: string[]; createdAt?: string; price?: number; duration?: string }>;
 };
 type InfoPageKey = "terms" | "privacy" | "about" | "usage" | "certifications";
+type LegalPageKey = "terms" | "privacy" | "about";
 type RequestReceipt = {
   id: string;
   displayId: string;
@@ -771,6 +772,11 @@ async function openExternalUrl(url: string) {
   }
   await Linking.openURL(url);
 }
+const legalPageUrls: Record<LegalPageKey, string> = {
+  terms: "https://laburapp.work/legal/terms",
+  privacy: "https://laburapp.work/legal/privacy",
+  about: "https://laburapp.work/legal/about",
+};
 const reviewQualitySuggestions = [
   "Puntualidad",
   "Rapidez",
@@ -1565,9 +1571,7 @@ export default function Home() {
   }
 
   function openRegistrationInfo(key: "terms" | "privacy") {
-    setInfoReturnAuthMode(authMode);
-    setAuthMode(null);
-    setInfoPage(key);
+    void openExternalUrl(legalPageUrls[key]);
   }
 
   function closeInfoPage() {
@@ -5386,6 +5390,21 @@ export default function Home() {
                 )}
               </>
             )}
+            <View style={styles.profileLegalFooter}>
+              <Text style={styles.panelEyebrow}>LABURAPP</Text>
+              <View style={styles.profileLegalLinks}>
+                {([
+                  ["terms", "Términos y condiciones"],
+                  ["privacy", "Política de privacidad"],
+                  ["about", "Nosotros"],
+                ] as const).map(([key, label]) => (
+                  <TouchableOpacity key={key} accessibilityRole="link" onPress={() => void openExternalUrl(legalPageUrls[key])}>
+                    <Text style={styles.profileLegalLink}>{label} ↗</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <Text style={styles.profileLegalCaption}>Servicios locales, acuerdos claros.</Text>
+            </View>
           </View>
         )}
       </ScrollView>
@@ -5436,8 +5455,12 @@ export default function Home() {
                 style={styles.drawerItem}
                 onPress={() => {
                   setMenuOpen(false);
-                  setInfoReturnAuthMode(null);
-                  setInfoPage(key);
+                  if (key === "terms" || key === "privacy" || key === "about") {
+                    void openExternalUrl(legalPageUrls[key]);
+                  } else {
+                    setInfoReturnAuthMode(null);
+                    setInfoPage(key);
+                  }
                 }}
               >
                 <Text style={styles.drawerItemText}>{label}</Text>
@@ -7472,6 +7495,10 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     instagramDot: { position: "absolute", width: 3, height: 3, borderRadius: 2, backgroundColor: colors.blue, top: 4, right: 4 },
     infoPageCard: { backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 22, paddingBottom: 38, minHeight: 220 },
     infoPageBody: { color: colors.stone, fontSize: 15, lineHeight: 23, marginTop: 14, maxWidth: 680 },
+    profileLegalFooter: { width: "100%", borderTopWidth: 1, borderTopColor: colors.line, marginTop: 26, paddingTop: 20, paddingBottom: 12, gap: 12 },
+    profileLegalLinks: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+    profileLegalLink: { color: colors.blue, fontSize: 13, fontWeight: "800", textDecorationLine: "underline" },
+    profileLegalCaption: { color: colors.stone, fontSize: 12 },
     publicProfileCard: { width: "100%", maxWidth: 680, maxHeight: "92%", alignSelf: "center", backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
     publicProfileContent: { padding: 22, paddingBottom: 30 },
     publicProfileHeader: { flexDirection: "row", alignItems: "center", paddingRight: 38 },

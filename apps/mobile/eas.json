@@ -30,6 +30,11 @@
         "EXPO_PUBLIC_APP_ENV": "production",
         "EXPO_PUBLIC_DEMO_ACCESS": "false"
       }
+    },
+    "production-apk": {
+      "extends": "production",
+      "distribution": "internal",
+      "android": { "buildType": "apk" }
     }
   }
 }
