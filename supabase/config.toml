@@ -71,3 +71,6 @@ enabled = true
 
 [functions.delete-account]
 verify_jwt = true
+
+[functions.process-account-deletion]
+verify_jwt = false

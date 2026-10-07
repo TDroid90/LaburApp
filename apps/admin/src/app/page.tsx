@@ -18,7 +18,7 @@ export default function Home() {
   return <div className={styles.shell}>
     <aside className={styles.sidebar}>
       <div className={styles.brand}><Image src="/brand/laburapp-wordmark-clean.png" alt="LaburApp" width={185} height={48} priority /><small>Administración</small></div>
-      <nav>{["Resumen", "Usuarios", "Prestadores", "Matrículas", "Trabajos", "Pagos mock", "Denuncias", "Publicidad", "Configuración", "Auditoría"].map((item, index) => <a className={index === 0 ? styles.active : ""} href={`#${item.toLowerCase()}`} key={item}>{item}</a>)}</nav>
+      <nav>{["Resumen", "Usuarios", "Prestadores", "Matrículas", "Trabajos", "Pagos mock", "Denuncias", "Publicidad", "Configuración", "Auditoría"].map((item, index) => <a className={index === 0 ? styles.active : ""} href={`#${item.toLowerCase()}`} key={item}>{item}</a>)}<a href="/account-deletions">Solicitudes de eliminación</a></nav>
       <div className={styles.session}><span>AD</span><div><strong>Admin demo</strong><small>Entorno local</small></div></div>
     </aside>
     <main className={styles.main}>

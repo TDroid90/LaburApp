@@ -5,6 +5,7 @@ import {
   ImageBackground,
   Keyboard,
   KeyboardAvoidingView,
+  Linking as NativeLinking,
   Modal,
   Platform,
   Pressable,
@@ -22,6 +23,7 @@ import * as Clipboard from "expo-clipboard";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as Linking from "expo-linking";
+import * as Notifications from "expo-notifications";
 import Head from "expo-router/head";
 import QRCode from "react-native-qrcode-svg";
 import { containsContactAttempt, containsPriceAttempt, reviewIsEligible } from "@laburapp/shared";
@@ -1297,6 +1299,8 @@ export default function Home() {
   const [deleteAccountConfirmation, setDeleteAccountConfirmation] = useState("");
   const [deleteAccountBusy, setDeleteAccountBusy] = useState(false);
   const [deleteAccountError, setDeleteAccountError] = useState("");
+  const [notificationPromptVisible, setNotificationPromptVisible] = useState(false);
+  const [notificationPermissionBusy, setNotificationPermissionBusy] = useState(false);
   const [adminPremiumId, setAdminPremiumId] = useState("");
   const [adminPremiumAccount, setAdminPremiumAccount] = useState<{ id: string; name: string; publicId: string; premium: boolean; endsAt?: string; pendingMonths?: number; receiptUrl?: string } | null>(null);
   const [adminPremiumBusy, setAdminPremiumBusy] = useState(false);
@@ -1393,8 +1397,16 @@ export default function Home() {
         } else {
           const [rolesResult, profileResult] = await Promise.all([
             supabase.from("user_roles").select("role").eq("user_id", user.id),
-            supabase.from("profiles").select("full_name, avatar_path, must_change_password").eq("id", user.id).maybeSingle(),
+            supabase.from("profiles").select("full_name, avatar_path, must_change_password, account_status").eq("id", user.id).maybeSingle(),
           ]);
+          if (profileResult.data?.account_status === "deletion_requested") {
+            await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+            restoredSession = null;
+            setRequested("Tu solicitud de eliminación está pendiente de revisión manual. Para consultas, contactá a soporte.");
+          }
+          if (!restoredSession) {
+            setCurrentUserId(null);
+          } else {
           const role: SavedSession["role"] = rolesResult.data?.some((item) => item.role === "admin")
             ? "admin"
             : rolesResult.data?.some((item) => item.role === "provider")
@@ -1410,6 +1422,7 @@ export default function Home() {
           if (profileResult.data?.must_change_password === true) {
             setPasswordChangeRequired(true);
             setAuthMode("update-password");
+          }
           }
         }
       }
@@ -1437,6 +1450,22 @@ export default function Home() {
       setHydrated(true);
     });
   }, []);
+
+  useEffect(() => {
+    if (!hydrated || Platform.OS === "web") return;
+    let cancelled = false;
+    void AsyncStorage.getItem("laburapp:notification-permission-prompt-v1").then(async (choice) => {
+      if (choice) return;
+      const permission = await Notifications.getPermissionsAsync();
+      if (cancelled) return;
+      if (permission.granted) {
+        await AsyncStorage.setItem("laburapp:notification-permission-prompt-v1", "granted");
+      } else {
+        setNotificationPromptVisible(true);
+      }
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [hydrated]);
 
   useEffect(() => {
     if (hydrated && session) void AsyncStorage.setItem(LAST_TAB_STORAGE_KEY, tab);
@@ -2370,9 +2399,15 @@ export default function Home() {
             : "client";
         const profileResult = await supabase
           .from("profiles")
-          .select("full_name, avatar_path, must_change_password")
+          .select("full_name, avatar_path, must_change_password, account_status")
           .eq("id", result.data.user.id)
           .maybeSingle();
+        if (profileResult.data?.account_status === "deletion_requested") {
+          await supabase.auth.signOut({ scope: "local" }).catch(() => undefined);
+          setCurrentUserId(null);
+          setAuthBusy(false);
+          return setAuthError("Tu solicitud de eliminación está en revisión. Pasadas 72 horas, el equipo podrá confirmarla manualmente. Si querés cancelarla o consultar, contactá a soporte.");
+        }
         if (profileResult.data?.full_name) name = profileResult.data.full_name;
         photoUri = profileResult.data?.avatar_path ?? undefined;
         mustChangePassword = profileResult.data?.must_change_password === true;
@@ -3230,6 +3265,61 @@ export default function Home() {
     setRequested("Cerraste sesión en este dispositivo.");
   }
 
+  async function respondToNotificationPrompt(enable: boolean) {
+    if (!enable) {
+      await AsyncStorage.setItem("laburapp:notification-permission-prompt-v1", "later");
+      setNotificationPromptVisible(false);
+      return;
+    }
+    setNotificationPermissionBusy(true);
+    try {
+      if (Platform.OS === "android") {
+        await Notifications.setNotificationChannelAsync("general", {
+          name: "Avisos de LaburApp",
+          importance: Notifications.AndroidImportance.DEFAULT,
+          vibrationPattern: [0, 180, 120, 180],
+          lightColor: "#0B91E3",
+        });
+      }
+      const current = await Notifications.getPermissionsAsync();
+      const permission = current.granted
+        ? current
+        : current.canAskAgain
+          ? await Notifications.requestPermissionsAsync()
+          : null;
+      if (permission?.granted) {
+        await AsyncStorage.setItem("laburapp:notification-permission-prompt-v1", "granted");
+        setRequested("Notificaciones habilitadas en este dispositivo.");
+      } else if (permission === null) {
+        setNotificationPromptVisible(false);
+        setRequested("Podés habilitar las notificaciones desde Ajustes del dispositivo.");
+        await NativeLinking.openSettings().catch(() => undefined);
+      } else {
+        await AsyncStorage.setItem("laburapp:notification-permission-prompt-v1", "denied");
+        setRequested("No se habilitaron las notificaciones. Podés cambiarlo desde Ajustes.");
+      }
+      setNotificationPromptVisible(false);
+    } catch {
+      setRequested("No pudimos abrir el permiso de notificaciones. Probá desde Ajustes del dispositivo.");
+      setNotificationPromptVisible(false);
+    } finally {
+      setNotificationPermissionBusy(false);
+    }
+  }
+
+  async function openNotificationPreferences() {
+    if (Platform.OS === "web") {
+      setRequested("Los permisos de notificaciones se configuran en el navegador.");
+      return;
+    }
+    const permission = await Notifications.getPermissionsAsync().catch(() => null);
+    if (permission?.granted) {
+      setRequested("Las notificaciones ya están habilitadas en este dispositivo.");
+      return;
+    }
+    setNotificationPromptVisible(true);
+  }
+
   async function deleteAccount() {
     if (!supabase || !session || isDemoSession || deleteAccountBusy) return;
     if (deleteAccountConfirmation.trim() !== "ELIMINAR") {
@@ -3243,7 +3333,7 @@ export default function Home() {
       const result = await supabase.functions.invoke("delete-account", {
         body: { password: deleteAccountPassword, confirmation: "ELIMINAR" },
       });
-      if (result.error || result.data?.deleted !== true) {
+      if (result.error || result.data?.requested !== true || typeof result.data?.delete_after !== "string") {
         throw new Error("DELETE_FAILED");
       }
       suppressLocalSaveRef.current = true;
@@ -3266,9 +3356,10 @@ export default function Home() {
       setDeleteAccountConfirmation("");
       setGuestGateLocked(true);
       setAuthMode("login");
-      setRequested("Tu cuenta y tus datos personales fueron eliminados.");
+      const reviewDate = new Date(result.data.delete_after).toLocaleString("es-AR", { dateStyle: "medium", timeStyle: "short" });
+      setRequested(`Recibimos tu solicitud. Tu cuenta no se eliminó todavía: queda pendiente de revisión manual durante al menos 72 horas. El equipo podrá confirmarla después del ${reviewDate}.`);
     } catch {
-      setDeleteAccountError("No pudimos completar la eliminación. Verificá tu contraseña y reintentá; no mostraremos éxito hasta terminar.");
+      setDeleteAccountError("No pudimos registrar la solicitud. Verificá tu contraseña y reintentá.");
     } finally {
       setDeleteAccountBusy(false);
     }
@@ -5383,6 +5474,9 @@ export default function Home() {
                 <TouchableOpacity accessibilityRole="button" style={styles.logoutButton} onPress={signOut}>
                   <Text style={styles.logoutText}>Cerrar sesión</Text>
                 </TouchableOpacity>
+                <TouchableOpacity accessibilityRole="button" style={styles.deleteAccountButton} onPress={() => void openNotificationPreferences()}>
+                  <Text style={styles.profileLegalLink}>Configurar notificaciones</Text>
+                </TouchableOpacity>
                 {session.role !== "admin" && !isDemoSession && (
                   <TouchableOpacity accessibilityRole="button" style={styles.deleteAccountButton} onPress={() => { setDeleteAccountError(""); setDeleteAccountModal(true); }}>
                     <Text style={styles.deleteAccountButtonText}>Eliminar cuenta</Text>
@@ -6103,18 +6197,30 @@ export default function Home() {
             <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar eliminación de cuenta" disabled={deleteAccountBusy} style={styles.modalClose} onPress={() => setDeleteAccountModal(false)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
             <ScrollView style={styles.reviewModalScroll} contentContainerStyle={styles.reviewModalContent} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
               <Text style={styles.modalTitle}>Eliminar cuenta</Text>
-              <Text style={styles.modalCopy}>Esta acción elimina tu acceso, archivos privados, perfil público y datos personales. El historial contractual o financiero imprescindible se conserva sin tus datos identificatorios.</Text>
-              <Text style={styles.modalCopy}>La acción es permanente. Ingresá tu contraseña actual y escribí ELIMINAR.</Text>
+              <Text style={styles.modalCopy}>La solicitud no borra la cuenta de inmediato. Quedará pendiente por al menos 72 horas y requerirá revisión y confirmación manual del equipo antes de eliminar el acceso, archivos privados, perfil y datos personales.</Text>
+              <Text style={styles.modalCopy}>Al solicitarla se cerrará tu sesión. El historial contractual o financiero que deba conservarse por obligaciones legales o administrativas podrá mantenerse sin datos identificatorios. Ingresá tu contraseña actual y escribí ELIMINAR.</Text>
               <TextInput accessibilityLabel="Contraseña actual" secureTextEntry autoCapitalize="none" value={deleteAccountPassword} onChangeText={setDeleteAccountPassword} placeholder="Contraseña actual" placeholderTextColor="#71818B" style={styles.modalInput} />
               <TextInput accessibilityLabel="Confirmación de eliminación" autoCapitalize="characters" value={deleteAccountConfirmation} onChangeText={setDeleteAccountConfirmation} placeholder="Escribí ELIMINAR" placeholderTextColor="#71818B" style={styles.modalInput} />
               {!!deleteAccountError && <Text style={styles.modalError}>{deleteAccountError}</Text>}
               <TouchableOpacity accessibilityRole="button" disabled={deleteAccountBusy || deleteAccountConfirmation.trim() !== "ELIMINAR" || !deleteAccountPassword} style={[styles.deleteAccountConfirm, (deleteAccountBusy || deleteAccountConfirmation.trim() !== "ELIMINAR" || !deleteAccountPassword) && styles.buttonDisabled]} onPress={() => void deleteAccount()}>
-                <Text style={styles.deleteAccountConfirmText}>{deleteAccountBusy ? "Eliminando de forma segura…" : "Eliminar mi cuenta definitivamente"}</Text>
+                <Text style={styles.deleteAccountConfirmText}>{deleteAccountBusy ? "Enviando solicitud…" : "Solicitar eliminación de cuenta"}</Text>
               </TouchableOpacity>
               <TouchableOpacity accessibilityRole="button" disabled={deleteAccountBusy} style={styles.secondaryButton} onPress={() => setDeleteAccountModal(false)}><Text style={styles.secondaryText}>Cancelar</Text></TouchableOpacity>
             </ScrollView>
           </View></View>
         </KeyboardAvoidingView>
+      </AppModal>
+      <AppModal visible={notificationPromptVisible} onRequestClose={() => void respondToNotificationPrompt(false)}>
+        <View style={styles.modalBackdrop}><View style={styles.modalCard}>
+          <Text style={styles.modalTitle}>¿Querés recibir notificaciones?</Text>
+          <Text style={styles.modalCopy}>Podemos avisarte cuando haya novedades sobre tus solicitudes, presupuestos y trabajos. Vos elegís; podés cambiar este permiso en cualquier momento desde los ajustes del dispositivo.</Text>
+          <TouchableOpacity accessibilityRole="button" disabled={notificationPermissionBusy} style={[styles.modalPrimary, notificationPermissionBusy && styles.buttonDisabled]} onPress={() => void respondToNotificationPrompt(true)}>
+            <Text style={styles.modalPrimaryText}>{notificationPermissionBusy ? "Abriendo permiso…" : "Permitir notificaciones"}</Text>
+          </TouchableOpacity>
+          <TouchableOpacity accessibilityRole="button" disabled={notificationPermissionBusy} style={styles.secondaryButton} onPress={() => void respondToNotificationPrompt(false)}>
+            <Text style={styles.secondaryText}>Ahora no</Text>
+          </TouchableOpacity>
+        </View></View>
       </AppModal>
       <AppModal
         visible={chatRequest !== null}

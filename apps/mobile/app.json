@@ -3,12 +3,19 @@
     "name": "LaburApp",
     "slug": "trabajapp",
     "scheme": "laburapp",
-    "version": "0.9.0",
+    "version": "0.9.1",
     "orientation": "default",
     "icon": "./assets/laburapp-app-icon.png",
     "userInterfaceStyle": "light",
     "plugins": [
       "expo-router",
+      [
+        "expo-notifications",
+        {
+          "color": "#0B91E3",
+          "defaultChannel": "general"
+        }
+      ],
       [
         "expo-image-picker",
         {
@@ -35,9 +42,10 @@
         "expo-splash-screen",
         {
           "backgroundColor": "#020912",
-          "image": "./assets/laburapp-isologo.png",
-          "imageWidth": 190,
-          "resizeMode": "contain"
+          "image": "./assets/laburapp-launch-pattern.png",
+          "imageWidth": 420,
+          "resizeMode": "cover",
+          "enableFullScreenImage_legacy": true
         }
       ]
     ],
