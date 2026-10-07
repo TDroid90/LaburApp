@@ -1,14 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
+  Alert,
   Image,
   ImageBackground,
+  AppState,
   Keyboard,
   KeyboardAvoidingView,
   Linking as NativeLinking,
   Modal,
   Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -22,8 +25,10 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import * as Clipboard from "expo-clipboard";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
+import * as MailComposer from "expo-mail-composer";
 import * as Linking from "expo-linking";
 import * as Notifications from "expo-notifications";
+import Constants from "expo-constants";
 import Head from "expo-router/head";
 import QRCode from "react-native-qrcode-svg";
 import { containsContactAttempt, containsPriceAttempt, reviewIsEligible } from "@laburapp/shared";
@@ -54,6 +59,7 @@ import {
   SavedSession,
 } from "../lib/local-store";
 import { enqueueMirrorEvent, flushMirrorEvents } from "../lib/mirror-events";
+import { canonicalPublicId, displayPublicId } from "../lib/public-id";
 import { resilientRead, safeRemoteErrorMessage, withTimeout } from "../lib/network-resilience";
 import {
   backendApiUrl,
@@ -723,6 +729,7 @@ type AdminPlatformMetrics = {
 type AdminSubscriptionRequest = {
   id: string;
   publicId: string;
+  city: string | null;
   name: string;
   planMonths: number;
   amountArs: number;
@@ -1080,8 +1087,15 @@ const THEME_STORAGE_KEY = "laburapp-color-theme";
 const LAST_TAB_STORAGE_KEY = "laburapp:last-tab";
 const PROVIDER_LEADER_CYCLES_STORAGE_KEY = "laburapp:provider-leader-cycles:v1";
 const officialHorizontalLogo = require("../assets/brand/laburapp-logo-horizontal.png");
-const officialPrimaryLogo = require("../assets/brand/laburapp-logo-primary.png");
 const launchPattern = require("../assets/laburapp-launch-pattern.png");
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 const demoAccessEnabled = isDemoAccessEnabled(
   process.env.EXPO_PUBLIC_DEMO_ACCESS,
   process.env.EXPO_PUBLIC_APP_ENV,
@@ -1165,7 +1179,6 @@ export default function Home() {
   const [expandedProviderName, setExpandedProviderName] = useState<string | null>(null);
   const [publicProfileProvider, setPublicProfileProvider] = useState<Provider | null>(null);
   const [workPhoto, setWorkPhoto] = useState<{ provider: Provider; work: FeaturedWork } | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
   const [infoPage, setInfoPage] = useState<InfoPageKey | null>(null);
   const [infoReturnAuthMode, setInfoReturnAuthMode] = useState<
     "login" | "register" | "recovery" | "update-password" | null
@@ -1174,6 +1187,7 @@ export default function Home() {
   const [requested, setRequested] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [requestRefresh, setRequestRefresh] = useState(0);
+  const [isPullRefreshing, setIsPullRefreshing] = useState(false);
   const [providerLeaderCycles, setProviderLeaderCycles] = useState<Record<string, LeaderCycle>>({});
   const [providerLeaderCyclesLoaded, setProviderLeaderCyclesLoaded] = useState(false);
   const [hiddenRequestIds, setHiddenRequestIds] = useState<string[]>([]);
@@ -1188,6 +1202,9 @@ export default function Home() {
   const [adminPreviewRole, setAdminPreviewRole] = useState<"admin" | "client" | "provider">("admin");
   const [adminCredentialReviews, setAdminCredentialReviews] = useState<AdminCredentialReview[]>([]);
   const [adminReviewsLoading, setAdminReviewsLoading] = useState(false);
+  const [adminPublicReviews, setAdminPublicReviews] = useState<Array<{ id: string; created_at: string; rating: number; comment: string | null; moderated_at: string | null; client_name: string; provider_name: string }>>([]);
+  const [adminPublicReviewsError, setAdminPublicReviewsError] = useState("");
+  const [adminPublicReviewsBusy, setAdminPublicReviewsBusy] = useState(false);
   const [adminReviewError, setAdminReviewError] = useState("");
   const [adminReviewFeedback, setAdminReviewFeedback] = useState<{ tone: "success" | "warning"; message: string } | null>(null);
   const [expandedAdminCredentialId, setExpandedAdminCredentialId] = useState<string | null>(null);
@@ -1272,6 +1289,12 @@ export default function Home() {
   const [appealBusy, setAppealBusy] = useState(false);
   const [acceptQuoteRequestId, setAcceptQuoteRequestId] = useState<string | null>(null);
   const [completionQr, setCompletionQr] = useState<{ requestId: string; value: string } | null>(null);
+  const [completionQrCopied, setCompletionQrCopied] = useState(false);
+  const [thanksModalVisible, setThanksModalVisible] = useState(false);
+  const [contributionReceiptUri, setContributionReceiptUri] = useState<string | null>(null);
+  const [contributionError, setContributionError] = useState("");
+  const [contributionBusy, setContributionBusy] = useState(false);
+  const [contributionAliasCopied, setContributionAliasCopied] = useState(false);
   const [qrBusy, setQrBusy] = useState(false);
   const [qrScanned, setQrScanned] = useState(false);
   const [manualQrCode, setManualQrCode] = useState("");
@@ -1280,6 +1303,9 @@ export default function Home() {
   const [completionError, setCompletionError] = useState("");
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [cameraAvailable, setCameraAvailable] = useState<boolean | null>(null);
+  const [appIsActive, setAppIsActive] = useState(AppState.currentState === "active");
+  const [qrCameraReady, setQrCameraReady] = useState(false);
+  const [qrCameraMountKey, setQrCameraMountKey] = useState(0);
   const qrScanLockRef = useRef(false);
   const sessionRef = useRef<SavedSession | null>(null);
   const intentionalSignOutRef = useRef(false);
@@ -1287,6 +1313,7 @@ export default function Home() {
   const [clientPlan, setClientPlan] = useState<"free" | "plus">("free");
   const [membershipEndsAt, setMembershipEndsAt] = useState<string | null>(null);
   const [accountPublicId, setAccountPublicId] = useState<string | null>(null);
+  const [accountCity, setAccountCity] = useState<string | null>(null);
   const [subscriptionModal, setSubscriptionModal] = useState(false);
   const [aliasCopied, setAliasCopied] = useState(false);
   const [comparePlansOpen, setComparePlansOpen] = useState(false);
@@ -1301,8 +1328,9 @@ export default function Home() {
   const [deleteAccountError, setDeleteAccountError] = useState("");
   const [notificationPromptVisible, setNotificationPromptVisible] = useState(false);
   const [notificationPermissionBusy, setNotificationPermissionBusy] = useState(false);
+  const pushTokenRef = useRef<string | null>(null);
   const [adminPremiumId, setAdminPremiumId] = useState("");
-  const [adminPremiumAccount, setAdminPremiumAccount] = useState<{ id: string; name: string; publicId: string; premium: boolean; endsAt?: string; pendingMonths?: number; receiptUrl?: string } | null>(null);
+  const [adminPremiumAccount, setAdminPremiumAccount] = useState<{ id: string; name: string; publicId: string; city: string | null; premium: boolean; endsAt?: string; pendingMonths?: number; receiptUrl?: string } | null>(null);
   const [adminPremiumBusy, setAdminPremiumBusy] = useState(false);
   const [adminPremiumError, setAdminPremiumError] = useState("");
   const [adminSubscriptionRequests, setAdminSubscriptionRequests] = useState<AdminSubscriptionRequest[]>([]);
@@ -1348,6 +1376,24 @@ export default function Home() {
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      const active = nextState === "active";
+      setAppIsActive(active);
+      if (!active) setQrCameraReady(false);
+    });
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    if (tab !== "QR" || !appIsActive || !cameraPermission?.granted || pendingCompletionToken !== null) return;
+    const timer = setTimeout(() => {
+      setQrCameraMountKey((current) => current + 1);
+      setQrCameraReady(true);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [tab, appIsActive, cameraPermission?.granted, pendingCompletionToken]);
 
   useEffect(() => {
     if (Platform.OS !== "web") {
@@ -1466,6 +1512,27 @@ export default function Home() {
     }).catch(() => undefined);
     return () => { cancelled = true; };
   }, [hydrated]);
+
+  useEffect(() => {
+    if (!supabase || !currentUserId || isDemoSession || Platform.OS !== "android" || !appIsActive) return;
+    let cancelled = false;
+    void (async () => {
+      const permission = await Notifications.getPermissionsAsync();
+      if (!permission.granted || cancelled) return;
+      const projectId = Constants.expoConfig?.extra?.eas?.projectId ?? Constants.easConfig?.projectId;
+      if (!projectId) return;
+      const token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
+      if (cancelled) return;
+      const { error } = await supabase!.from("push_tokens").upsert({
+        user_id: currentUserId,
+        platform: "android",
+        token,
+        last_seen_at: new Date().toISOString(),
+      }, { onConflict: "token" });
+      if (!error && !cancelled) pushTokenRef.current = token;
+    })().catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [currentUserId, isDemoSession, appIsActive, notificationPromptVisible]);
 
   useEffect(() => {
     if (hydrated && session) void AsyncStorage.setItem(LAST_TAB_STORAGE_KEY, tab);
@@ -1596,7 +1663,6 @@ export default function Home() {
     setOpenFilter(null);
     setExpandedProviderName(null);
     setPublicProfileProvider(null);
-    setMenuOpen(false);
   }
 
   function openRegistrationInfo(key: "terms" | "privacy") {
@@ -1607,6 +1673,22 @@ export default function Home() {
     setInfoPage(null);
     if (infoReturnAuthMode) setAuthMode(infoReturnAuthMode);
     setInfoReturnAuthMode(null);
+  }
+
+  async function composeCertificationEmail() {
+    try {
+      if (!(await MailComposer.isAvailableAsync())) {
+        setRequested("No encontramos una aplicación de correo configurada en este dispositivo.");
+        return;
+      }
+      await MailComposer.composeAsync({
+        recipients: ["certificaciones@laburapp.work"],
+        subject: "Solicitud de revisión de certificaciones - LaburApp",
+        body: `Hola, quiero solicitar una revisión de identidad y certificaciones.\n\nNombre: ${session?.name ?? ""}\nCorreo de mi cuenta: ${session?.email ?? ""}\nOficio: ${providerProfile?.trade ?? ""}\n\nAdjunto la documentación para evaluación. La solicitud no activa Premium automáticamente.`,
+      });
+    } catch {
+      setRequested("No pudimos abrir el correo. Escribinos a certificaciones@laburapp.work.");
+    }
   }
 
   useEffect(() => {
@@ -1661,7 +1743,7 @@ export default function Home() {
         const list = reviewsByProvider.get(providerPublicId) ?? [];
         if (list.length < 3) list.push({
           id: `${providerPublicId}-${String((row as any).created_at ?? "review")}`,
-          authorName: "Cliente verificado",
+          authorName: String((row as any).author_name ?? "Cliente verificado"),
           rating: Number((row as any).rating ?? 0),
           comment: String((row as any).comment ?? ""),
           qualities: Array.isArray((row as any).qualities) ? (row as any).qualities.map(String) : [],
@@ -1754,9 +1836,14 @@ export default function Home() {
         supabase.from("credentials").select("id, kind, credential_number, private_path, status, updated_at").eq("provider_id", userId),
         supabase.from("provider_completed_works").select("id, service_label, description, position").eq("provider_id", userId).order("position"),
         supabase.from("provider_portfolio_items").select("id, work_id, storage_path, drive_file_id, watermarked, photo_position").eq("provider_id", userId).order("photo_position"),
-        supabase.from("reviews").select("id, rating, comment, qualities, created_at").eq("provider_id", userId).is("moderated_at", null).order("created_at", { ascending: false }).limit(3),
+        supabase.from("reviews").select("id, client_id, rating, comment, qualities, created_at").eq("provider_id", userId).is("moderated_at", null).order("created_at", { ascending: false }).limit(3),
       ]);
       if (cancelled) return;
+      const reviewerIds = [...new Set((reviewsResult.data ?? []).map((review) => String(review.client_id)).filter(Boolean))];
+      const reviewerProfilesResult = reviewerIds.length
+        ? await supabase.rpc("get_visible_profile_summaries", { target_ids: reviewerIds })
+        : { data: [] };
+      const reviewerNames = new Map<string, string>((reviewerProfilesResult.data ?? []).map((profile: any): [string, string] => [String(profile.id), String(profile.full_name ?? "").trim()]));
       const providerRow = providerResult.data;
       const availabilityStart = String(providerRow.availability_start ?? "08:00").slice(0, 5);
       const availabilityEnd = String(providerRow.availability_end ?? "18:00").slice(0, 5);
@@ -1813,7 +1900,7 @@ export default function Home() {
         })),
         profileReviews: (reviewsResult.data ?? []).map((item) => ({
           id: String(item.id),
-          authorName: "Cliente verificado",
+          authorName: reviewerNames.get(String(item.client_id)) || "Cliente verificado",
           rating: Number(item.rating ?? 0),
           comment: String(item.comment ?? ""),
           qualities: Array.isArray(item.qualities) ? item.qualities.map(String) : [],
@@ -1874,13 +1961,14 @@ export default function Home() {
           .from("client_memberships")
           .select("plan_code, status, current_period_ends_at")
           .eq("client_id", currentUserId)
-          .maybeSingle(), client.from("profiles").select("public_id").eq("id", currentUserId).maybeSingle()]);
+          .maybeSingle(), client.from("profiles").select("public_id, city").eq("id", currentUserId).maybeSingle()]);
         if (!cancelled) {
           const active = membership.data?.plan_code === "plus" && membership.data.status === "active"
             && (!membership.data.current_period_ends_at || new Date(membership.data.current_period_ends_at).getTime() > Date.now());
           setClientPlan(active ? "plus" : "free");
           setMembershipEndsAt(membership.data?.current_period_ends_at ?? null);
           setAccountPublicId(identity.data?.public_id ?? null);
+          setAccountCity(identity.data?.city ?? null);
         }
       }
       let result;
@@ -2014,13 +2102,48 @@ export default function Home() {
     setClientPlan("free");
     setMembershipEndsAt(null);
     setAccountPublicId(null);
+    setAccountCity(null);
   }, [session?.email]);
 
   useEffect(() => {
     if (tab !== "Panel" || session?.role !== "admin" || isDemoSession) return;
     void loadAdminCredentialReviews();
     void loadAdminPlatformMetrics();
+    void loadAdminPublicReviews();
   }, [tab, session?.role, isDemoSession]);
+
+  async function loadAdminPublicReviews() {
+    if (!supabase || session?.role !== "admin" || isDemoSession) return;
+    const result = await supabase.rpc("admin_list_reviews");
+    if (result.error) {
+      setAdminPublicReviewsError("No pudimos cargar las reseñas. Reintentá.");
+      return;
+    }
+    setAdminPublicReviews(Array.isArray(result.data) ? result.data : []);
+    setAdminPublicReviewsError("");
+  }
+
+  async function moderatePublicReview(id: string, action: "hide" | "restore" | "delete" | "delete-confirmed") {
+    if (!supabase || session?.role !== "admin" || adminPublicReviewsBusy) return;
+    if (action === "delete") {
+      if (Platform.OS === "web" && !window.confirm("¿Eliminar esta reseña definitivamente?")) return;
+      if (Platform.OS !== "web") {
+        Alert.alert("Eliminar reseña", "Esta acción es definitiva. ¿Querés continuar?", [
+          { text: "Cancelar", style: "cancel" },
+          { text: "Eliminar", style: "destructive", onPress: () => void moderatePublicReview(id, "delete-confirmed") },
+        ]);
+        return;
+      }
+    }
+    setAdminPublicReviewsBusy(true);
+    const result = await supabase.rpc("admin_moderate_review", { p_review_id: id, p_action: action === "delete-confirmed" ? "delete" : action });
+    setAdminPublicReviewsBusy(false);
+    if (result.error) {
+      setAdminPublicReviewsError("No se pudo moderar la reseña. Reintentá.");
+      return;
+    }
+    await loadAdminPublicReviews();
+  }
 
   useEffect(() => {
     if (tab !== "Panel" || session?.role !== "admin" || isDemoSession) return;
@@ -2041,7 +2164,7 @@ export default function Home() {
     const rows = result.data ?? [];
     const clientIds = [...new Set(rows.map((row) => row.client_id))];
     const profiles = clientIds.length
-      ? await supabase.from("profiles").select("id, public_id, full_name").in("id", clientIds)
+      ? await supabase.from("profiles").select("id, public_id, full_name, city").in("id", clientIds)
       : { data: [], error: null };
     if (profiles.error) {
       setAdminSubscriptionsError("No pudimos identificar a quienes enviaron comprobantes. Reintentá.");
@@ -2054,6 +2177,7 @@ export default function Home() {
       return {
         id: row.id,
         publicId: profile?.public_id ?? "ID no disponible",
+        city: profile?.city ?? null,
         name: profile?.full_name ?? "Cuenta sin nombre",
         planMonths: row.plan_months, amountArs: row.amount_ars,
         receiptPath: row.receipt_path, createdAt: row.created_at,
@@ -3248,7 +3372,11 @@ export default function Home() {
     }
   }
 
-  function signOut() {
+  async function signOut() {
+    if (supabase && pushTokenRef.current) {
+      await supabase.from("push_tokens").delete().eq("token", pushTokenRef.current);
+      pushTokenRef.current = null;
+    }
     if (supabase && session && !isDemoSession) {
       intentionalSignOutRef.current = true;
       void supabase.auth.signOut().catch(() => {
@@ -3289,6 +3417,7 @@ export default function Home() {
           : null;
       if (permission?.granted) {
         await AsyncStorage.setItem("laburapp:notification-permission-prompt-v1", "granted");
+        setNotificationPromptVisible(false);
         setRequested("Notificaciones habilitadas en este dispositivo.");
       } else if (permission === null) {
         setNotificationPromptVisible(false);
@@ -3348,6 +3477,7 @@ export default function Home() {
       setRequests([]);
       setSeenRequests(null);
       setAccountPublicId(null);
+      setAccountCity(null);
       setClientPlan("free");
       setMembershipEndsAt(null);
       setTab("Inicio");
@@ -3499,6 +3629,7 @@ export default function Home() {
         ...current,
         status: "client_confirmation_pending",
       }));
+      setCompletionQrCopied(false);
       setCompletionQr({ requestId: request.id, value: `laburapp://complete?token=${encodeURIComponent(token)}` });
     } catch {
       setRequested("No pudimos generar el QR. El trabajo debe estar coordinado o en curso.");
@@ -3515,8 +3646,25 @@ export default function Home() {
     setQrScanned(false);
   }
 
+  function navigateToTab(nextTab: string) {
+    if (nextTab === "QR" && tab !== "QR") {
+      setQrCameraReady(false);
+      setCompletionError("");
+    }
+    if (tab === "QR" && nextTab !== "QR") setQrCameraReady(false);
+    setTab(nextTab);
+  }
+
+  function refreshCurrentTab() {
+    if (isPullRefreshing) return;
+    setIsPullRefreshing(true);
+    setRequestRefresh((current) => current + 1);
+    setTimeout(() => setIsPullRefreshing(false), 900);
+  }
+
   async function requestQrCameraPermission() {
     setCompletionError("");
+    setQrCameraReady(false);
     try {
       if (cameraPermission?.canAskAgain === false) {
         await Linking.openSettings();
@@ -3902,6 +4050,49 @@ export default function Home() {
     }
   }
 
+  async function pickContributionReceipt() {
+    setContributionError("");
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], allowsEditing: false, quality: 0.9, legacy: Platform.OS === "android" });
+      if (result.canceled || !result.assets?.[0]) return;
+      const image = result.assets[0];
+      const validationError = pickedImageError(image, DOCUMENT_IMAGE_POLICY);
+      if (validationError) throw new Error(validationError);
+      const resized = await ImageManipulator.manipulateAsync(image.uri, longestSideResize(image.width, image.height, 1600), { compress: 0.82, format: ImageManipulator.SaveFormat.JPEG });
+      setContributionReceiptUri(resized.uri);
+    } catch (error) {
+      setContributionError(error instanceof Error && error.message ? error.message : "No pudimos abrir esa imagen. Probá con una captura guardada en el teléfono.");
+    }
+  }
+
+  async function sendContributionReceipt() {
+    if (contributionBusy) return;
+    if (!contributionReceiptUri) {
+      setContributionError("Adjuntá el comprobante de transferencia para continuar.");
+      return;
+    }
+    setContributionBusy(true);
+    setContributionError("");
+    try {
+      if (!(await MailComposer.isAvailableAsync())) throw new Error("MAIL_UNAVAILABLE");
+      await MailComposer.composeAsync({
+        recipients: ["contacto@laburapp.work"],
+        subject: "Aporte voluntario a LaburApp",
+        body: `Hola, quiero dejar constancia de un aporte voluntario a LaburApp.\n\nEl aporte sugerido es el 1% del valor acordado por el trabajo. Es voluntario, no se cobra automáticamente y no modifica el pago entre cliente y profesional.\n\nAdjunto el comprobante para la revisión del equipo.`,
+        attachments: [contributionReceiptUri],
+      });
+      setThanksModalVisible(false);
+      setContributionReceiptUri(null);
+      setRequested("Se abrió el correo con el comprobante adjunto. Revisalo y tocá Enviar para completarlo.");
+    } catch (error) {
+      setContributionError(error instanceof Error && error.message === "MAIL_UNAVAILABLE"
+        ? "No encontramos una aplicación de correo configurada en este dispositivo. Escribinos a contacto@laburapp.work y adjuntá el comprobante."
+        : "No pudimos preparar el correo. Tu comprobante sigue seleccionado; volvé a intentar.");
+    } finally {
+      setContributionBusy(false);
+    }
+  }
+
   async function requestSubscription() {
     if (subscriptionBusy) return;
     if (!supabase || !session || !subscriptionReceiptUri) return setSubscriptionError("Adjuntá una captura legible del comprobante de transferencia.");
@@ -3948,13 +4139,13 @@ export default function Home() {
 
   async function lookupPremiumAccount(targetPublicId = adminPremiumId) {
     if (!supabase || session?.role !== "admin") return;
-    const normalizedId = targetPublicId.trim().toUpperCase();
-    setAdminPremiumId(normalizedId);
+    const normalizedId = canonicalPublicId(targetPublicId);
+    setAdminPremiumId(targetPublicId.trim().toUpperCase());
     setAdminPremiumBusy(true);
     setAdminPremiumError("");
     setAdminPremiumAccount(null);
     try {
-      const account = await supabase.from("profiles").select("id, public_id, full_name").eq("public_id", normalizedId).maybeSingle();
+      const account = await supabase.from("profiles").select("id, public_id, full_name, city").eq("public_id", normalizedId).maybeSingle();
       if (account.error || !account.data) throw new Error("NOT_FOUND");
       const [membership, requestsResult] = await Promise.all([
         supabase.from("client_memberships").select("plan_code, status, current_period_ends_at").eq("client_id", account.data.id).maybeSingle(),
@@ -3962,7 +4153,7 @@ export default function Home() {
       ]);
       const pending = requestsResult.data?.[0];
       const signed = pending?.receipt_path ? await supabase.storage.from("private-receipts").createSignedUrl(pending.receipt_path, 600) : null;
-      setAdminPremiumAccount({ id: account.data.id, name: account.data.full_name, publicId: account.data.public_id,
+      setAdminPremiumAccount({ id: account.data.id, name: account.data.full_name, publicId: account.data.public_id, city: account.data.city,
         premium: membership.data?.plan_code === "plus" && membership.data?.status === "active" && (!membership.data.current_period_ends_at || new Date(membership.data.current_period_ends_at).getTime() > Date.now()),
         endsAt: membership.data?.current_period_ends_at ?? undefined,
         pendingMonths: pending?.plan_months,
@@ -4163,22 +4354,11 @@ export default function Home() {
       navigationItems={navigationItems}
       activeItem={tab}
       notificationCount={requestNotificationCount}
-      onNavigate={setTab}
+      onNavigate={navigateToTab}
       colors={colors}
     >
       <View style={[styles.header, compactHeader && styles.headerCompact, responsive.isDesktop && styles.headerDesktop, responsive.isDesktop && !!session && styles.headerDesktopSignedIn]}>
         <View style={[styles.brandRow, responsive.isDesktop && !!session && styles.brandRowDesktop]}>
-          <TouchableOpacity
-            accessibilityRole="button"
-            accessibilityLabel="Abrir menú"
-            accessibilityState={{ expanded: menuOpen }}
-            style={styles.menuButton}
-            onPress={() => setMenuOpen(true)}
-          >
-            <View style={styles.menuLine} />
-            <View style={styles.menuLine} />
-            <View style={styles.menuLine} />
-          </TouchableOpacity>
           <TouchableOpacity
             accessibilityRole="link"
             accessibilityLabel="Ir al inicio de LaburApp"
@@ -4235,15 +4415,25 @@ export default function Home() {
         </View>
       )}
       <ScrollView
+        style={{ flex: 1 }}
         contentContainerStyle={[
           styles.content,
           compactHeader && styles.contentCompact,
           responsive.isDesktop && styles.contentDesktop,
           !!session && !responsive.isDesktop && {
-            paddingBottom: 88 + Math.max(insets.bottom, 24) + Math.min(28, Math.max(0, responsive.fontScale - 1) * 28),
+            paddingBottom: 120 + Math.max(insets.bottom, 24) + Math.min(28, Math.max(0, responsive.fontScale - 1) * 28),
           },
         ]}
         keyboardShouldPersistTaps="handled"
+        refreshControl={(
+          <RefreshControl
+            refreshing={isPullRefreshing}
+            onRefresh={refreshCurrentTab}
+            tintColor={colors.orange}
+            colors={[colors.orange]}
+            progressBackgroundColor={colors.surface}
+          />
+        )}
       >
         {tab === "Inicio" ? (
           <>
@@ -4883,14 +5073,22 @@ export default function Home() {
                 </View>
               ) : (
                 <View style={styles.cameraFrame}>
-                  <CameraView
-                    active={tab === "QR" && requestSync.isAppActive && pendingCompletionToken === null}
-                    facing="back"
-                    barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-                    onBarcodeScanned={qrScanned ? undefined : ({ data }) => void confirmCompletionCode(data)}
-                    onMountError={() => setCompletionError("No pudimos iniciar la cámara. Cerrá otras apps que puedan estar usándola o ingresá el código manualmente.")}
-                    style={styles.camera}
-                  />
+                  {qrCameraReady && appIsActive ? (
+                    <CameraView
+                      key={qrCameraMountKey}
+                      active={tab === "QR" && appIsActive && pendingCompletionToken === null}
+                      facing="back"
+                      barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
+                      onBarcodeScanned={qrScanned ? undefined : ({ data }) => void confirmCompletionCode(data)}
+                      onMountError={() => {
+                        setQrCameraReady(false);
+                        setCompletionError("No pudimos iniciar la cámara. Volvé a ingresar a QR para reintentar o ingresá el código manualmente.");
+                      }}
+                      style={styles.camera}
+                    />
+                  ) : (
+                    <Text style={styles.centerCopy}>Preparando la cámara…</Text>
+                  )}
                   <View pointerEvents="none" style={styles.cameraGuide} />
                 </View>
               )}
@@ -4980,6 +5178,23 @@ export default function Home() {
             <Text style={styles.adminViewHelp}>Estas vistas no cambian tus permisos de administrador.</Text>
             <View style={styles.providerPanel}>
               <View style={styles.adminQueueHeader}>
+                <View><Text style={styles.panelEyebrow}>MODERACIÓN</Text><Text style={styles.adminModuleTitle}>Revisión de reseñas</Text></View>
+                <TouchableOpacity accessibilityRole="button" style={styles.adminRefresh} onPress={() => void loadAdminPublicReviews()}><Text style={styles.adminRefreshText}>Actualizar</Text></TouchableOpacity>
+              </View>
+              {!!adminPublicReviewsError && <Text style={styles.modalError}>{adminPublicReviewsError}</Text>}
+              {!adminPublicReviews.length && !adminPublicReviewsError && <Text style={styles.adminModuleCopy}>No hay reseñas para revisar.</Text>}
+              {adminPublicReviews.map((review) => <View key={review.id} style={styles.workCard}>
+                <Text style={styles.workProvider}>{review.client_name} → {review.provider_name} · {"★".repeat(review.rating)}</Text>
+                <Text style={styles.adminModuleCopy}>{review.comment || "Sin comentario"}</Text>
+                <Text style={styles.adminModuleCopy}>{new Date(review.created_at).toLocaleDateString("es-AR")} · {review.moderated_at ? "Oculta" : "Visible"}</Text>
+                <View style={styles.adminSubscriptionActions}>
+                  <TouchableOpacity accessibilityRole="button" disabled={adminPublicReviewsBusy} style={styles.adminRefresh} onPress={() => void moderatePublicReview(review.id, review.moderated_at ? "restore" : "hide")}><Text style={styles.adminRefreshText}>{review.moderated_at ? "Restaurar" : "Ocultar"}</Text></TouchableOpacity>
+                  <TouchableOpacity accessibilityRole="button" disabled={adminPublicReviewsBusy} style={styles.adminRefresh} onPress={() => void moderatePublicReview(review.id, "delete")}><Text style={styles.adminRefreshText}>Eliminar</Text></TouchableOpacity>
+                </View>
+              </View>)}
+            </View>
+            <View style={styles.providerPanel}>
+              <View style={styles.adminQueueHeader}>
                 <View>
                   <Text style={styles.panelEyebrow}>DATOS REALES DE LA PLATAFORMA</Text>
                   <Text style={styles.adminModuleTitle}>Resumen general</Text>
@@ -5034,7 +5249,7 @@ export default function Home() {
                 {!!adminSubscriptionsError && <Text style={styles.modalError}>{adminSubscriptionsError}</Text>}
                 {!adminSubscriptionsLoading && !adminSubscriptionRequests.length && <Text style={styles.adminModuleCopy}>No hay comprobantes pendientes.</Text>}
                 {adminSubscriptionRequests.map((item) => <View key={item.id} style={styles.adminSubscriptionItem}>
-                  <Text style={styles.workProvider}>{item.name} · {item.publicId}</Text>
+                  <Text style={styles.workProvider}>{item.name} · {displayPublicId(item.publicId, item.city)}</Text>
                   <Text style={styles.adminModuleCopy}>{item.planMonths} {item.planMonths === 1 ? "mes" : "meses"} · ${item.amountArs.toLocaleString("es-AR")} · Recibido {new Date(item.createdAt).toLocaleString("es-AR")}</Text>
                   <View style={styles.adminSubscriptionActions}>
                     <TouchableOpacity accessibilityRole="link" style={styles.adminRefresh} onPress={() => void openAdminSubscriptionReceipt(item.receiptPath)}><Text style={styles.adminRefreshText}>Ver comprobante ↗</Text></TouchableOpacity>
@@ -5042,14 +5257,14 @@ export default function Home() {
                   </View>
                 </View>)}
               </View>
-              <Text style={styles.adminModuleCopy}>¿Tenés un ID concreto? Buscalo acá. Sin comprobante pendiente, la activación manual dura un mes.</Text>
+              <Text style={styles.adminModuleCopy}>¿Tenés un ID concreto? Buscalo acá. Acepta LP000001 o USH-LP000001. Sin comprobante pendiente, la activación manual dura un mes.</Text>
               <View style={styles.customQualityRow}>
                 <TextInput accessibilityLabel="ID público de la cuenta" value={adminPremiumId} onChangeText={setAdminPremiumId} autoCapitalize="characters" placeholder="LP000001" placeholderTextColor="#71818B" style={[styles.modalInput, styles.customQualityInput]} onSubmitEditing={() => void lookupPremiumAccount()} />
                 <TouchableOpacity accessibilityRole="button" style={styles.customQualityButton} onPress={() => void lookupPremiumAccount()} disabled={adminPremiumBusy}><Text style={styles.customQualityButtonText}>Buscar</Text></TouchableOpacity>
               </View>
               {!!adminPremiumError && <Text style={styles.modalError}>{adminPremiumError}</Text>}
               {adminPremiumAccount && <View style={styles.workCard}>
-                <Text style={styles.workProvider}>{adminPremiumAccount.name} · {adminPremiumAccount.publicId}</Text>
+                <Text style={styles.workProvider}>{adminPremiumAccount.name} · {displayPublicId(adminPremiumAccount.publicId, adminPremiumAccount.city)}</Text>
                 <Text style={styles.adminModuleCopy}>{adminPremiumAccount.pendingMonths ? `Transferencia pendiente · plan de ${adminPremiumAccount.pendingMonths} meses` : "Sin comprobante pendiente"}</Text>
                 {!!adminPremiumAccount.receiptUrl && <TouchableOpacity accessibilityRole="link" onPress={() => void openExternalUrl(adminPremiumAccount.receiptUrl!)}><Text style={styles.cardLink}>Ver comprobante privado ↗</Text></TouchableOpacity>}
                 {!!adminPremiumAccount.endsAt && <Text style={styles.adminModuleCopy}>Vence: {new Date(adminPremiumAccount.endsAt).toLocaleDateString("es-AR")}</Text>}
@@ -5211,7 +5426,7 @@ export default function Home() {
                       </View>
                       {hasProviderProfile && !!providerProfile?.diagnosticPrice && <Text style={styles.diagnosticBadge}>Diagnóstico desde ${providerProfile.diagnosticPrice.toLocaleString("es-AR")}</Text>}
                       <Text style={styles.clientJobsCount}>{session.role === "provider" ? `${contractedRequests.length} trabajos gestionados` : `${clientHistory.length} trabajos contratados en los últimos 6 meses`}</Text>
-                      {!!accountPublicId && <Text style={styles.clientJobsCount}>ID de cuenta: {accountPublicId}</Text>}
+                      {!!accountPublicId && <Text style={styles.clientJobsCount}>ID de cuenta: {displayPublicId(accountPublicId, accountCity)}</Text>}
                       {isDemoSession && <Text style={styles.localBadge}>Cuenta de demostración</Text>}
                     </View>
                   </View>
@@ -5295,30 +5510,6 @@ export default function Home() {
                         <Text style={styles.profileSectionText}>
                           {providerProfile.training}
                         </Text>
-                      </View>
-                    )}
-                    {!!providerProfile.certifications?.length && (
-                      <View style={styles.profileSection}>
-                        <Text style={styles.panelEyebrow}>CERTIFICACIONES</Text>
-                        <View style={styles.certificationList}>
-                          {providerProfile.certifications.map(
-                            (certification) => {
-                              const reviewStatus = providerProfile.credentials?.find((credential) => credential.certification === certification)?.status ?? "missing";
-                              const isVerified = reviewStatus === "verified";
-                              return (
-                              <View
-                                key={certification}
-                                style={[styles.certificationBadge, !isVerified && styles.certificationPendingBadge]}
-                              >
-                                <Text style={[styles.certificationIcon, !isVerified && styles.certificationPendingIcon]}>{isVerified ? "✓" : "…"}</Text>
-                                <Text style={[styles.certificationText, !isVerified && styles.certificationPendingText]}>
-                                  {certification}{isVerified ? "" : reviewStatus === "pending" ? " · en revisión" : reviewStatus === "rejected" ? " · observada" : reviewStatus === "expired" ? " · actualizar" : " · sin validar"}
-                                </Text>
-                              </View>
-                              );
-                            },
-                          )}
-                        </View>
                       </View>
                     )}
                     <View style={styles.profileSection}>
@@ -5471,6 +5662,30 @@ export default function Home() {
                     </Text>
                   </View>
                 )}
+                {session.role === "provider" && providerProfile && (
+                  <View style={styles.providerPanel}>
+                    <View style={styles.workCardTop}>
+                      <View><Text style={styles.panelEyebrow}>PERFIL PROFESIONAL</Text><Text style={styles.adminModuleTitle}>Certificaciones e insignias</Text></View>
+                      <Text style={styles.certificationCardIcon}>✓</Text>
+                    </View>
+                    <Text style={styles.adminModuleCopy}>Mostrá qué documentación se revisó y cuál es su estado. Cada insignia tiene un alcance concreto.</Text>
+                    <View style={styles.certificationList}>
+                      <View style={[styles.certificationBadge, providerProfile.verified ? undefined : styles.certificationPendingBadge]}>
+                        <Text style={[styles.certificationIcon, !providerProfile.verified && styles.certificationPendingIcon]}>{providerProfile.verified ? "✓" : "…"}</Text>
+                        <Text style={[styles.certificationText, !providerProfile.verified && styles.certificationPendingText]}>{providerProfile.verified ? "Identidad revisada" : "Identidad pendiente de revisión"}</Text>
+                      </View>
+                      {(providerProfile.certifications ?? []).map((certification) => {
+                        const status = providerProfile.credentials?.find((item) => item.certification === certification)?.status ?? "missing";
+                        const verified = status === "verified";
+                        const statusLabel = verified ? "verificada" : status === "pending" ? "en revisión" : status === "rejected" ? "observada" : status === "expired" ? "actualizar" : "sin validar";
+                        return <View key={certification} style={[styles.certificationBadge, !verified && styles.certificationPendingBadge]}><Text style={[styles.certificationIcon, !verified && styles.certificationPendingIcon]}>{verified ? "✓" : "…"}</Text><Text style={[styles.certificationText, !verified && styles.certificationPendingText]}>{certification} · {statusLabel}</Text></View>;
+                      })}
+                    </View>
+                    {!providerProfile.certifications?.length && <Text style={styles.profileSectionText}>Todavía no agregaste certificaciones al perfil.</Text>}
+                    <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => { setInfoPage("certifications"); setInfoReturnAuthMode(null); }}><Text style={styles.secondaryText}>Cómo se revisan las insignias</Text></TouchableOpacity>
+                    <TouchableOpacity accessibilityRole="button" style={styles.usageCardLink} onPress={() => void composeCertificationEmail()}><Text style={styles.cardLink}>Solicitar certificación por email</Text></TouchableOpacity>
+                  </View>
+                )}
                 <TouchableOpacity accessibilityRole="button" style={styles.logoutButton} onPress={signOut}>
                   <Text style={styles.logoutText}>Cerrar sesión</Text>
                 </TouchableOpacity>
@@ -5491,12 +5706,24 @@ export default function Home() {
                   ["terms", "Términos y condiciones"],
                   ["privacy", "Política de privacidad"],
                   ["about", "Nosotros"],
+                  ["usage", "Mecánica de uso"],
                 ] as const).map(([key, label]) => (
-                  <TouchableOpacity key={key} accessibilityRole="link" onPress={() => void openExternalUrl(legalPageUrls[key])}>
+                  <TouchableOpacity key={key} accessibilityRole="link" onPress={() => key === "usage" ? (setInfoReturnAuthMode(null), setInfoPage("usage")) : void openExternalUrl(legalPageUrls[key])}>
                     <Text style={styles.profileLegalLink}>{label} ↗</Text>
                   </TouchableOpacity>
                 ))}
               </View>
+              <View style={styles.profileSocialRow}>
+                <TouchableOpacity accessibilityRole="link" accessibilityLabel="Facebook de LaburApp" style={styles.profileSocialButton} onPress={() => setRequested("La cuenta oficial de Facebook todavía no está vinculada.")}><Text style={styles.profileFacebookIcon}>f</Text></TouchableOpacity>
+                <TouchableOpacity accessibilityRole="link" accessibilityLabel="Instagram de LaburApp" style={styles.profileSocialButton} onPress={() => setRequested("La cuenta oficial de Instagram todavía no está vinculada.")}><View style={styles.profileInstagramIcon}><View style={styles.profileInstagramLens} /><View style={styles.profileInstagramDot} /></View></TouchableOpacity>
+              </View>
+              {session && session.role !== "admin" && (
+                <View style={styles.thanksCard}>
+                  <Text style={styles.thanksTitle}>¿Querés ayudar a que la comunidad siga creciendo?</Text>
+                  <Text style={styles.thanksCopy}>La contribución es voluntaria. Si querés acompañar, podés transferir el 1% del valor acordado y enviarnos el comprobante.</Text>
+                  <TouchableOpacity accessibilityRole="button" style={styles.thanksButton} onPress={() => { setContributionError(""); setThanksModalVisible(true); }}><Text style={styles.thanksButtonText}>Gracias</Text></TouchableOpacity>
+                </View>
+              )}
               <Text style={styles.profileLegalCaption}>Servicios locales, acuerdos claros.</Text>
             </View>
           </View>
@@ -5518,68 +5745,84 @@ export default function Home() {
           </TouchableOpacity>
         </View>
       )}
-      <AppModal visible={menuOpen} onRequestClose={() => setMenuOpen(false)}>
-        <View style={styles.drawerBackdrop}>
-          <View style={styles.drawerPanel}>
-            <View style={styles.drawerHeader}>
-              <Image
-                accessible
-                accessibilityLabel="LaburApp"
-                source={officialPrimaryLogo}
-                resizeMode="contain"
-                style={styles.drawerLogo}
-              />
-              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar menú" style={styles.drawerClose} onPress={() => setMenuOpen(false)}>
-                <Text style={styles.drawerCloseText}>×</Text>
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.drawerEyebrow}>INFORMACIÓN</Text>
-            {(
-              [
-                ["terms", "Términos y condiciones"],
-                ["privacy", "Política de privacidad"],
-                ["about", "Nosotros"],
-                ["usage", "Mecánica de uso"],
-                ["certifications", "Certificaciones"],
-              ] as const
-            ).map(([key, label]) => (
-              <TouchableOpacity
-                key={key}
-                accessibilityRole="link"
-                style={styles.drawerItem}
-                onPress={() => {
-                  setMenuOpen(false);
-                  if (key === "terms" || key === "privacy" || key === "about") {
-                    void openExternalUrl(legalPageUrls[key]);
-                  } else {
-                    setInfoReturnAuthMode(null);
-                    setInfoPage(key);
-                  }
-                }}
-              >
-                <Text style={styles.drawerItemText}>{label}</Text>
-                <Text style={styles.drawerItemArrow}>›</Text>
-              </TouchableOpacity>
-            ))}
-            <View style={styles.socialRow}>
-              <TouchableOpacity accessibilityRole="link" accessibilityLabel="Facebook de LaburApp" style={styles.socialButton} onPress={() => setRequested("Falta vincular la cuenta oficial de Facebook.")}>
-                <Text style={styles.facebookIcon}>f</Text>
-              </TouchableOpacity>
-              <TouchableOpacity accessibilityRole="link" accessibilityLabel="Instagram de LaburApp" style={styles.socialButton} onPress={() => setRequested("Falta vincular la cuenta oficial de Instagram.")}>
-                <View style={styles.instagramIcon}><View style={styles.instagramLens} /><View style={styles.instagramDot} /></View>
-              </TouchableOpacity>
-            </View>
-          </View>
-          <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar menú lateral" style={styles.drawerDismissArea} onPress={() => setMenuOpen(false)} />
-        </View>
-      </AppModal>
       <AppModal visible={infoPage !== null} onRequestClose={closeInfoPage}>
         <View style={styles.modalBackdrop}>
           {infoPage && <View style={styles.infoPageCard}>
             <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar información" style={styles.modalClose} onPress={closeInfoPage}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
-            <Text style={styles.modalTitle}>{infoPages[infoPage].title}</Text>
-            <Text style={styles.infoPageBody}>{infoPages[infoPage].body}</Text>
+            {infoPage === "usage" ? (
+              <ScrollView style={styles.usageGuideScroll} contentContainerStyle={styles.usageGuideContent}>
+                <Text style={styles.modalTitle}>Mecánica de uso</Text>
+                <Text style={styles.infoPageBody}>Un recorrido simple, desde encontrar a alguien hasta compartir cómo salió.</Text>
+                <Text style={styles.usageGroupTitle}>PARA QUIEN CONTRATA</Text>
+                {[
+                  ["⌕", "Elegí un perfil", "Buscá un oficio y revisá servicios, zona, certificaciones y trabajos publicados."],
+                  ["1", "Pedí presupuesto", "Contá qué necesitás y agregá fotos o disponibilidad si ayudan."],
+                  ["☏", "Conversen por el chat", "Aclararen alcance, materiales, fechas y precio. El chat deja el acuerdo por escrito."],
+                  ["✓", "Aceptá la propuesta final", "Revisá el monto y las condiciones antes de confirmar. Los pagos se acuerdan y realizan entre ustedes, fuera de LaburApp."],
+                  ["▣", "Confirmen el trabajo", "Al terminar, el profesional muestra un QR. Escanealo desde QR o ingresá el código corto manualmente."],
+                  ["★", "Dejá una reseña", "Una vez confirmada la finalización, contá cómo fue el trabajo. La reseña queda vinculada a ese servicio."],
+                ].map(([icon, title, copy], index) => (
+                  <View key={title} style={styles.usageStepCard}>
+                    <View style={styles.usageStepIcon}><Text style={styles.usageStepIconText}>{icon}</Text></View>
+                    <View style={styles.usageStepCopy}><Text style={styles.usageStepTitle}>{index + 1}. {title}</Text><Text style={styles.usageStepBody}>{copy}</Text></View>
+                  </View>
+                ))}
+                <Text style={styles.usageGroupTitle}>PARA PROFESIONALES</Text>
+                {[
+                  ["◎", "Armá tu perfil", "Elegí oficio, zona, disponibilidad y describí claramente qué ofrecés."],
+                  ["▧", "Mostrá tu trabajo", "Subí fotos propias, cargá certificaciones y publicá ejemplos reales terminados."],
+                  ["$", "Prepará tus precios", "Guardá tareas frecuentes en tu tarifario privado para responder presupuestos con claridad y rapidez."],
+                  ["✉", "Solicitá una revisión de certificaciones", "Escribinos para que el equipo revise la identidad y documentación dentro del alcance de cada insignia. La revisión no activa Premium automáticamente."],
+                ].map(([icon, title, copy], index) => (
+                  <View key={title} style={styles.usageStepCard}>
+                    <View style={styles.usageStepIcon}><Text style={styles.usageStepIconText}>{icon}</Text></View>
+                    <View style={styles.usageStepCopy}><Text style={styles.usageStepTitle}>{index + 1}. {title}</Text><Text style={styles.usageStepBody}>{copy}</Text></View>
+                  </View>
+                ))}
+                <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => void composeCertificationEmail()}>
+                  <Text style={styles.secondaryText}>Escribir a Certificaciones</Text>
+                </TouchableOpacity>
+                <Text style={styles.usageGroupTitle}>APORTE VOLUNTARIO Y PLANES</Text>
+                <View style={styles.usageHighlightCard}>
+                  <Text style={styles.usageStepTitle}>La contribución es voluntaria</Text>
+                  <Text style={styles.usageStepBody}>Al cerrar un trabajo, quien quiera puede aportar voluntariamente el 1% del valor acordado para ayudar a sostener eventos y mejoras propuestas por la comunidad. No es una comisión obligatoria, no se descuenta del pago y no condiciona el uso de la app. Las personas acuerdan y pagan el trabajo entre sí.</Text>
+                </View>
+                <View style={styles.usageHighlightCard}>
+                  <Text style={styles.usageStepTitle}>Gratis y Premium</Text>
+                  <Text style={styles.usageStepBody}>Gratis: hasta 3 solicitudes de presupuesto por semana, 2 servicios de prestador y 3 trabajos publicados. Premium: 7 solicitudes semanales, más cualidades en reseñas, hasta 6 servicios y 6 trabajos destacados. El plan semestral ofrece los topes ampliados que se muestran en la pantalla de planes.</Text>
+                  <TouchableOpacity accessibilityRole="button" style={styles.usageCardLink} onPress={() => { setInfoPage(null); setSubscriptionError(""); setSubscriptionModal(true); }}><Text style={styles.cardLink}>Ver planes Premium</Text></TouchableOpacity>
+                </View>
+                <Text style={styles.usageContact}>Consultas y sugerencias: contacto@laburapp.work</Text>
+              </ScrollView>
+            ) : infoPage === "certifications" ? (
+              <View style={styles.certificationInfoContent}>
+                <Text style={styles.modalTitle}>Certificaciones e insignias</Text>
+                <Text style={styles.infoPageBody}>Podés solicitar una revisión humana de identidad y documentación profesional. Cada insignia indica qué se revisó; no reemplaza la decisión de cada persona al contratar.</Text>
+                <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => void composeCertificationEmail()}><Text style={styles.secondaryText}>Solicitar revisión por email</Text></TouchableOpacity>
+              </View>
+            ) : (
+              <View style={styles.certificationInfoContent}><Text style={styles.modalTitle}>{infoPages[infoPage].title}</Text><Text style={styles.infoPageBody}>{infoPages[infoPage].body}</Text></View>
+            )}
           </View>}
+        </View>
+      </AppModal>
+      <AppModal visible={thanksModalVisible} onRequestClose={() => setThanksModalVisible(false)}>
+        <View style={styles.modalBackdrop}>
+          <ScrollView style={styles.thanksModal} contentContainerStyle={styles.thanksModalContent}>
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar aporte voluntario" style={styles.modalClose} onPress={() => setThanksModalVisible(false)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+            <Text style={styles.panelEyebrow}>APORTE VOLUNTARIO</Text>
+            <Text style={styles.modalTitle}>Gracias por apoyar la comunidad</Text>
+            <Text style={styles.modalCopy}>Si lo deseás, podés aportar voluntariamente el 1% del valor acordado por el trabajo. No es obligatorio, no se cobra automáticamente y no reemplaza ni modifica el pago entre cliente y profesional.</Text>
+            <View style={styles.contributionBankCard}>
+              <Text style={styles.usageStepTitle}>Transferencia · BBVA</Text>
+              <View style={styles.contributionAliasRow}><Text style={styles.contributionAlias}>ALSEMA.BBVA</Text><TouchableOpacity accessibilityRole="button" accessibilityLabel="Copiar alias de transferencia" style={styles.subscriptionCopyButton} onPress={() => { void Clipboard.setStringAsync("ALSEMA.BBVA").then(() => { setContributionAliasCopied(true); setRequested("Alias copiado."); }); }}><Text style={styles.subscriptionCopyIcon}>{contributionAliasCopied ? "✓" : "▢"}</Text></TouchableOpacity></View>
+              <Text style={styles.usageStepBody}>Antes de transferir, verificá el nombre del destinatario en tu banco. El equipo destina estos aportes a eventos de la app y mejoras sugeridas por la comunidad.</Text>
+            </View>
+            <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => void pickContributionReceipt()}><Text style={styles.secondaryText}>{contributionReceiptUri ? "✓ Comprobante adjuntado" : "Adjuntar comprobante"}</Text></TouchableOpacity>
+            {!!contributionError && <Text style={styles.modalError}>{contributionError}</Text>}
+            <TouchableOpacity accessibilityRole="button" disabled={contributionBusy || !contributionReceiptUri} style={[styles.thanksButton, (contributionBusy || !contributionReceiptUri) && styles.buttonDisabled]} onPress={() => void sendContributionReceipt()}><Text style={styles.thanksButtonText}>{contributionBusy ? "Preparando correo…" : "Enviar comprobante a contacto"}</Text></TouchableOpacity>
+            <Text style={styles.contributionNote}>Se abrirá tu aplicación de correo con el comprobante adjunto. Revisá el mensaje y presioná Enviar. Consultas: contacto@laburapp.work</Text>
+          </ScrollView>
         </View>
       </AppModal>
       <AppModal visible={publicProfileProvider !== null} onRequestClose={() => setPublicProfileProvider(null)}>
@@ -6129,7 +6372,17 @@ export default function Home() {
             <Text style={styles.modalTitle}>Mostrale este QR al cliente</Text>
             <Text style={styles.modalCopy}>El cliente debe abrir el botón QR de su menú y escanearlo. Vence en 15 minutos y sólo puede usarse una vez.</Text>
             {completionQr && <View style={styles.qrCodeSurface}><QRCode value={completionQr.value} size={220} backgroundColor="#FFFFFF" color="#063C78" /></View>}
-            <Text style={styles.qrShortCode}>{completionQr?.value.match(/[?&]token=([^&]+)/)?.[1] ?? ""}</Text>
+            <View style={styles.qrShortCodeRow}>
+              <Text selectable style={styles.qrShortCode}>{completionQr?.value.match(/[?&]token=([^&]+)/)?.[1] ?? ""}</Text>
+              <TouchableOpacity accessibilityRole="button" accessibilityLabel="Copiar código de finalización" style={styles.qrCopyButton} onPress={() => {
+                const shortCode = completionQr?.value.match(/[?&]token=([^&]+)/)?.[1];
+                if (!shortCode) return;
+                void Clipboard.setStringAsync(decodeURIComponent(shortCode)).then(() => {
+                  setCompletionQrCopied(true);
+                  setRequested("Código copiado. Ya podés compartirlo por WhatsApp.");
+                });
+              }}><Text style={styles.qrCopyIcon}>{completionQrCopied ? "✓" : "▢"}</Text></TouchableOpacity>
+            </View>
             <Text style={styles.privacyHint}>El código no contiene datos personales ni precios.</Text>
           </View>
         </View>
@@ -6154,7 +6407,7 @@ export default function Home() {
           <ScrollView style={styles.reviewModalScroll} contentContainerStyle={styles.reviewModalContent} keyboardShouldPersistTaps="handled">
             <Text style={styles.modalTitle}>Suscripción Premium</Text>
             <Text style={styles.modalCopy}>Elegí un período.{"\n"}El pago es únicamente por transferencia.{"\n"}Premium se activa después de verificar tu comprobante, puede demorar hasta 72 hs.</Text>
-            {!!accountPublicId && <Text style={styles.subscriptionAccountId}>Tu ID de cuenta: {accountPublicId}</Text>}
+            {!!accountPublicId && <Text style={styles.subscriptionAccountId}>Tu ID de cuenta: {displayPublicId(accountPublicId, accountCity)}</Text>}
             <View style={styles.subscriptionBankCard}>
               <View style={styles.subscriptionAliasRow}>
                 <Text style={styles.subscriptionAlias}>ALSEMA.BBVA <Text style={styles.subscriptionAliasCheck}>✓</Text></Text>
@@ -6481,18 +6734,6 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     headerDesktopSignedIn: { justifyContent: "flex-end" },
     brandRow: { flexDirection: "row", alignItems: "center", gap: 7, flexShrink: 1 },
     brandRowDesktop: { display: "none" },
-    menuButton: {
-      width: 44,
-      height: 44,
-      borderRadius: 10,
-      borderWidth: 1,
-      borderColor: "rgba(102,208,245,0.72)",
-      backgroundColor: "#0B2035",
-      alignItems: "center",
-      justifyContent: "center",
-      gap: 4,
-    },
-    menuLine: { width: 15, height: 2, borderRadius: 2, backgroundColor: "white" },
     wordmarkLogo: { width: 168, height: 68 },
     wordmarkLogoCompact: { width: 116, height: 50 },
     wordmarkLogoWide: { width: 190, height: 76 },
@@ -7160,6 +7401,7 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
       padding: 17,
       marginTop: 14,
     },
+    certificationCardIcon: { width: 31, height: 31, borderRadius: 16, overflow: "hidden", color: "#FFFFFF", backgroundColor: colors.green, textAlign: "center", lineHeight: 31, fontSize: 17, fontWeight: "900" },
     panelEyebrow: { color: colors.stone, fontSize: 11, fontWeight: "900" },
     providerHeaderActions: {
       flexDirection: "row",
@@ -7563,48 +7805,45 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     navTextCompact: { fontSize: 10 },
     navActive: { color: colors.orange },
     navAlert: { color: "#FF4D4D", fontSize: 18, lineHeight: 18, fontWeight: "900" },
-    drawerBackdrop: {
-      position: Platform.OS === "web" ? ("fixed" as "absolute") : "absolute",
-      top: 0,
-      right: 0,
-      bottom: 0,
-      left: 0,
-      zIndex: 1150,
-      elevation: 28,
-      backgroundColor: "rgba(0,6,12,0.76)",
-      flexDirection: "row",
-    },
-    drawerPanel: {
-      width: "82%",
-      maxWidth: 350,
-      height: "100%",
-      backgroundColor: colors.surface,
-      borderRightWidth: 1,
-      borderRightColor: colors.line,
-      paddingTop: 24,
-      paddingHorizontal: 20,
-    },
-    drawerDismissArea: { flex: 1 },
-    drawerHeader: { minHeight: 48, flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 24 },
-    drawerLogo: { width: 128, height: 128, marginTop: -16, marginBottom: -14 },
-    drawerClose: { width: 36, height: 36, alignItems: "center", justifyContent: "center" },
-    drawerCloseText: { color: colors.navy, fontSize: 30, lineHeight: 32, fontWeight: "800" },
-    drawerEyebrow: { color: colors.orange, fontSize: 10, fontWeight: "900", letterSpacing: 1, marginBottom: 8 },
-    drawerItem: { minHeight: 54, borderBottomWidth: 1, borderBottomColor: colors.line, flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
-    drawerItemText: { color: colors.navy, fontSize: 15, fontWeight: "800" },
-    drawerItemArrow: { color: colors.blue, fontSize: 24, fontWeight: "700" },
-    socialRow: { flexDirection: "row", alignItems: "center", gap: 18, marginTop: 24 },
-    socialButton: { width: 38, height: 38, alignItems: "center", justifyContent: "center" },
-    facebookIcon: { color: colors.blue, fontSize: 31, lineHeight: 36, fontWeight: "900" },
-    instagramIcon: { width: 25, height: 25, borderRadius: 7, borderWidth: 2.5, borderColor: colors.blue, alignItems: "center", justifyContent: "center" },
-    instagramLens: { width: 9, height: 9, borderRadius: 5, borderWidth: 2, borderColor: colors.blue },
-    instagramDot: { position: "absolute", width: 3, height: 3, borderRadius: 2, backgroundColor: colors.blue, top: 4, right: 4 },
-    infoPageCard: { backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 22, paddingBottom: 38, minHeight: 220 },
+    infoPageCard: { width: "100%", maxWidth: 760, maxHeight: "92%", overflow: "hidden", alignSelf: "center", backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24, padding: 22, paddingBottom: 18, minHeight: 220 },
     infoPageBody: { color: colors.stone, fontSize: 15, lineHeight: 23, marginTop: 14, maxWidth: 680 },
+    usageGuideScroll: { flexGrow: 0, maxHeight: "100%", width: "100%" },
+    usageGuideContent: { padding: 22, paddingBottom: 34 },
+    certificationInfoContent: { padding: 22, paddingTop: 34, paddingBottom: 30 },
+    usageGroupTitle: { color: colors.orange, fontSize: 11, fontWeight: "900", letterSpacing: 0.8, marginTop: 19, marginBottom: 8 },
+    usageStepCard: { flexDirection: "row", alignItems: "flex-start", gap: 11, padding: 12, marginTop: 7, borderRadius: 14, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.raised },
+    usageStepIcon: { width: 34, height: 34, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: colors.avatar },
+    usageStepIconText: { color: colors.blue, fontSize: 18, fontWeight: "900" },
+    usageStepCopy: { flex: 1 },
+    usageStepTitle: { color: colors.navy, fontSize: 13, fontWeight: "900" },
+    usageStepBody: { color: colors.stone, fontSize: 11, lineHeight: 16, marginTop: 4 },
+    usageHighlightCard: { borderRadius: 14, padding: 13, marginTop: 8, backgroundColor: colors.raised, borderWidth: 1, borderColor: colors.line },
+    usageCardLink: { alignSelf: "flex-start", marginTop: 9 },
+    usageContact: { color: colors.blue, fontSize: 12, fontWeight: "800", marginTop: 15 },
     profileLegalFooter: { width: "100%", borderTopWidth: 1, borderTopColor: colors.line, marginTop: 26, paddingTop: 20, paddingBottom: 12, gap: 12 },
     profileLegalLinks: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
     profileLegalLink: { color: colors.blue, fontSize: 13, fontWeight: "800", textDecorationLine: "underline" },
+    profileSocialRow: { flexDirection: "row", alignItems: "center", gap: 7, marginTop: 2 },
+    profileSocialButton: { width: 27, height: 27, alignItems: "center", justifyContent: "center" },
+    profileFacebookIcon: { color: colors.blue, fontSize: 20, lineHeight: 23, fontWeight: "900" },
+    profileInstagramIcon: { width: 17, height: 17, borderRadius: 5, borderWidth: 2, borderColor: colors.blue, alignItems: "center", justifyContent: "center" },
+    profileInstagramLens: { width: 6, height: 6, borderRadius: 3, borderWidth: 1.5, borderColor: colors.blue },
+    profileInstagramDot: { position: "absolute", width: 2.5, height: 2.5, borderRadius: 2, backgroundColor: colors.blue, top: 2, right: 2 },
     profileLegalCaption: { color: colors.stone, fontSize: 12 },
+    thanksCard: { width: "100%", borderRadius: 15, padding: 14, marginTop: 12, backgroundColor: colors.successSurface, borderWidth: 1, borderColor: colors.green, gap: 8 },
+    thanksTitle: { color: colors.navy, fontSize: 14, fontWeight: "900" },
+    thanksCopy: { color: colors.stone, fontSize: 11, lineHeight: 16 },
+    thanksButton: { minHeight: 45, borderRadius: 12, paddingHorizontal: 16, alignItems: "center", justifyContent: "center", backgroundColor: colors.green },
+    thanksButtonText: { color: "#FFFFFF", fontSize: 14, fontWeight: "900", textAlign: "center" },
+    thanksModal: { width: "100%", maxWidth: 520, maxHeight: "90%", alignSelf: "center", backgroundColor: colors.surface, borderTopLeftRadius: 22, borderTopRightRadius: 22 },
+    thanksModalContent: { padding: 22, paddingTop: 38, paddingBottom: 28 },
+    contributionBankCard: { marginTop: 12, marginBottom: 10, padding: 13, borderRadius: 14, backgroundColor: colors.successSurface, borderWidth: 1, borderColor: colors.green },
+    contributionAliasRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 6, marginBottom: 7 },
+    contributionAlias: { color: colors.navy, fontSize: 17, fontWeight: "900" },
+    contributionNote: { color: colors.stone, fontSize: 10, lineHeight: 15, marginTop: 11 },
+    qrShortCodeRow: { maxWidth: "100%", alignSelf: "center", flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 9, marginTop: 12, paddingHorizontal: 6 },
+    qrCopyButton: { width: 30, height: 30, borderRadius: 8, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.blue, backgroundColor: colors.raised },
+    qrCopyIcon: { color: colors.blue, fontSize: 18, lineHeight: 21, fontWeight: "900" },
     publicProfileCard: { width: "100%", maxWidth: 680, maxHeight: "92%", alignSelf: "center", backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
     publicProfileContent: { padding: 22, paddingBottom: 30 },
     publicProfileHeader: { flexDirection: "row", alignItems: "center", paddingRight: 38 },

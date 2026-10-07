@@ -11,6 +11,7 @@ coverage/
 *.log
 apps/mobile/android/
 apps/mobile/ios/
+*firebase-service-account*.json
 supabase/.temp/
 supabase/.branches/
 

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "673708299442",
+    "project_id": "laburapp-push",
+    "storage_bucket": "laburapp-push.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:673708299442:android:acdeadefd3659c533de5ab",
+        "android_client_info": {
+          "package_name": "com.alsema.laburapp"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAxgFxiI1xmhnDXC-y1ATaDdYbILPOoLQQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

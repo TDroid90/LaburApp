@@ -47,7 +47,8 @@
           "resizeMode": "cover",
           "enableFullScreenImage_legacy": true
         }
-      ]
+      ],
+      "expo-mail-composer"
     ],
     "ios": {
       "supportsTablet": true,
@@ -55,6 +56,7 @@
     },
     "android": {
       "package": "com.alsema.laburapp",
+      "googleServicesFile": "./google-services.json",
       "allowBackup": false,
       "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
