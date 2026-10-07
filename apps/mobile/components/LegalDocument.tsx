@@ -24,7 +24,7 @@ const documents: Record<LegalDocumentKey, { title: string; intro: string; sectio
     title: "Política de privacidad",
     intro: "En LaburApp usamos los datos necesarios para operar la plataforma, coordinar trabajos y proteger las cuentas. Esta política describe qué información tratamos, para qué y cómo podés ejercer tus derechos conforme a la Ley 25.326 de Protección de los Datos Personales.",
     sections: [
-      { title: "1. Responsable y contacto", paragraphs: ["LaburApp es una marca de ALSEMA. Para consultas sobre privacidad o para ejercer derechos sobre tus datos, escribí a soporte@laburapp.work e indicá el correo de tu cuenta y el pedido que querés realizar. No envíes contraseñas, códigos de acceso ni datos bancarios secretos."] },
+      { title: "1. Responsable y contacto", paragraphs: ["El responsable es Albonio Sergio Martin (CUIT 23-35631129-9), con domicilio en Pioneros Fueguinos 554. Corroborá la [Data Fiscal](#). Para consultas sobre privacidad o para ejercer derechos sobre tus datos, escribí a soporte@laburapp.work e indicá el correo de tu cuenta y el pedido que querés realizar. No envíes contraseñas, códigos de acceso ni datos bancarios secretos."] },
       { title: "2. Datos que podemos tratar", paragraphs: ["Datos de cuenta: correo electrónico, nombre, rol e identificador de cuenta; la contraseña es administrada por el proveedor de autenticación y no se muestra en la app. Datos de perfil: ciudad, foto, oficio, descripción, zonas de atención, disponibilidad, servicios, tarifas y, cuando corresponda, información de matrícula o certificación.", "Datos de uso del servicio: solicitudes, presupuestos, mensajes, estados del trabajo, reseñas, reportes y datos necesarios para confirmar su finalización. También podemos tratar imágenes que elijas cargar, como fotos de perfil, trabajos, solicitudes, comprobantes de transferencia y documentación profesional.", "Datos técnicos mínimos necesarios para que la app funcione, proteger las cuentas y diagnosticar errores. La app no incorpora SDK de publicidad ni seguimiento analítico en esta versión."] },
       { title: "3. Para qué los usamos", paragraphs: ["Usamos la información para crear y proteger cuentas; mostrar los perfiles que decidís publicar; conectar solicitudes con profesionales; facilitar presupuestos, mensajes, confirmaciones y reseñas; verificar manualmente comprobantes de suscripción; enviar avisos operativos; atender consultas y reclamos; prevenir abusos; cumplir obligaciones legales y defender derechos.", "Los datos de perfil público se muestran en la medida necesaria para las funciones que elegís publicar. Los mensajes, solicitudes, comprobantes y documentos privados se limitan a las personas autorizadas por la función y a quienes administran la plataforma cuando resulta necesario."] },
       { title: "4. Proveedores y comunicación de datos", paragraphs: ["La operación puede requerir proveedores tecnológicos que alojan la app, la autenticación, la base de datos, los archivos y los correos transaccionales. Actualmente usamos servicios como Supabase, Vercel y Resend. Ciertos archivos o registros operativos pueden copiarse a Google Drive o Google Sheets cuando esos flujos se encuentren habilitados.", "Estos proveedores tratan información para prestar sus servicios y pueden procesarla en infraestructura ubicada fuera de Argentina. No vendemos datos personales ni compartimos listas para publicidad de terceros. Podemos comunicar datos cuando una obligación legal, una orden válida o la protección de derechos así lo requiera."] },
@@ -61,9 +61,19 @@ export function LegalDocument({ document }: { document: LegalDocumentKey }) {
       {content.sections.map((section, index) => (
         <View key={section.title} style={styles.section}>
           <Text accessibilityRole="header" style={styles.sectionTitle}>{section.title}</Text>
-          {section.paragraphs.map((paragraph, paragraphIndex) => (
-            <Text key={`${section.title}-${paragraphIndex}`} style={styles.paragraph}>{paragraph}</Text>
-          ))}
+          {section.paragraphs.map((paragraph, paragraphIndex) => {
+            const fiscalLink = "[Data Fiscal](#)";
+            const fiscalLinkIndex = paragraph.indexOf(fiscalLink);
+            return (
+              <Text key={`${section.title}-${paragraphIndex}`} style={styles.paragraph}>
+                {fiscalLinkIndex < 0 ? paragraph : <>
+                  {paragraph.slice(0, fiscalLinkIndex)}
+                  <Text accessibilityRole="link" onPress={() => undefined} style={styles.referenceLink}>Data Fiscal</Text>
+                  {paragraph.slice(fiscalLinkIndex + fiscalLink.length)}
+                </>}
+              </Text>
+            );
+          })}
           {document === "privacy" && index === 5 && (
             <View style={styles.references}>
               <Text style={styles.referenceLabel}>Normativa y autoridad</Text>
