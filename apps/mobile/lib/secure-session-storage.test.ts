@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import * as aesjs from "aes-js";
 import { SecureSessionStorage, type AsyncStringStorage } from "./secure-session-storage";
 
 function memoryStorage(initial: Record<string, string> = {}): AsyncStringStorage & { values: Map<string, string> } {
@@ -34,12 +35,36 @@ describe("SecureSessionStorage", () => {
     await expect(storage.getItem("session")).resolves.toBe(session);
   });
 
+  it("keeps the encryption key stable while Supabase refreshes the session", async () => {
+    const { storage, data, keys } = adapter();
+    await storage.setItem("session", session);
+    const originalKey = keys.values.get("session");
+    const originalCiphertext = data.values.get("session");
+    const refreshed = JSON.stringify({ access_token: "new-access", refresh_token: "new-refresh" });
+    await storage.setItem("session", refreshed);
+    expect(keys.values.get("session")).toBe(originalKey);
+    expect(data.values.get("session")).not.toBe(originalCiphertext);
+    expect(data.values.get("session")).not.toContain("new-access");
+    await expect(storage.getItem("session")).resolves.toBe(refreshed);
+  });
+
   it("migrates a valid legacy AsyncStorage session", async () => {
     const data = memoryStorage({ session });
     const { storage, keys } = adapter(data);
     await expect(storage.getItem("session")).resolves.toBe(session);
     expect(data.values.get("session")).not.toBe(session);
     expect(keys.values.has("session")).toBe(true);
+  });
+
+  it("reads sessions encrypted by the previous adapter and upgrades their format", async () => {
+    const key = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
+    const oldCipher = new aesjs.ModeOfOperation.ctr(key, new aesjs.Counter(1));
+    const data = memoryStorage({ session: aesjs.utils.hex.fromBytes(oldCipher.encrypt(aesjs.utils.utf8.toBytes(session))) });
+    const keys = memoryStorage({ session: aesjs.utils.hex.fromBytes(key) });
+    const { storage } = adapter(data, keys);
+    await expect(storage.getItem("session")).resolves.toBe(session);
+    expect(data.values.get("session")).toMatch(/^v2:/);
+    await expect(storage.getItem("session")).resolves.toBe(session);
   });
 
   it("deletes ciphertext and Keystore material on logout", async () => {

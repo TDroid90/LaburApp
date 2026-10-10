@@ -24,14 +24,20 @@ function isLegacySupabaseSession(value: string) {
 }
 
 export class SecureSessionStorage implements AsyncStringStorage {
+  private readonly pendingWrites = new Map<string, Promise<void>>();
+
   constructor(private readonly options: SecureSessionStorageOptions) {}
 
   private async encrypt(key: string, value: string) {
-    const encryptionKey = this.options.randomBytes(256 / 8);
-    const cipher = new aesjs.ModeOfOperation.ctr(encryptionKey, new aesjs.Counter(1));
-    const encrypted = aesjs.utils.hex.fromBytes(cipher.encrypt(aesjs.utils.utf8.toBytes(value)));
+    const existingKey = await this.options.keyStorage.getItem(key);
+    const encryptionKey = existingKey
+      ? aesjs.utils.hex.toBytes(existingKey)
+      : this.options.randomBytes(256 / 8);
+    const nonce = this.options.randomBytes(16);
+    const cipher = new aesjs.ModeOfOperation.ctr(encryptionKey, new aesjs.Counter(nonce));
+    const encrypted = `v2:${aesjs.utils.hex.fromBytes(nonce)}:${aesjs.utils.hex.fromBytes(cipher.encrypt(aesjs.utils.utf8.toBytes(value)))}`;
 
-    await this.options.keyStorage.setItem(key, aesjs.utils.hex.fromBytes(encryptionKey));
+    if (!existingKey) await this.options.keyStorage.setItem(key, aesjs.utils.hex.fromBytes(encryptionKey));
     return encrypted;
   }
 
@@ -40,11 +46,14 @@ export class SecureSessionStorage implements AsyncStringStorage {
     if (!storedKey) return null;
 
     try {
+      const parts = value.startsWith("v2:") ? value.split(":") : null;
       const cipher = new aesjs.ModeOfOperation.ctr(
         aesjs.utils.hex.toBytes(storedKey),
-        new aesjs.Counter(1),
+        new aesjs.Counter(parts ? aesjs.utils.hex.toBytes(parts[1]) : 1),
       );
-      return aesjs.utils.utf8.fromBytes(cipher.decrypt(aesjs.utils.hex.toBytes(value)));
+      const decrypted = aesjs.utils.utf8.fromBytes(cipher.decrypt(aesjs.utils.hex.toBytes(parts ? parts[2] : value)));
+      if (!parts) await this.setItem(key, decrypted);
+      return decrypted;
     } catch {
       await this.removeItem(key);
       return null;
@@ -52,6 +61,7 @@ export class SecureSessionStorage implements AsyncStringStorage {
   }
 
   async getItem(key: string) {
+    await this.pendingWrites.get(key);
     const stored = await this.options.dataStorage.getItem(key);
     if (!stored) return null;
 
@@ -67,11 +77,18 @@ export class SecureSessionStorage implements AsyncStringStorage {
   }
 
   async setItem(key: string, value: string) {
-    const encrypted = await this.encrypt(key, value);
-    await this.options.dataStorage.setItem(key, encrypted);
+    const previous = this.pendingWrites.get(key) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(async () => {
+      const encrypted = await this.encrypt(key, value);
+      await this.options.dataStorage.setItem(key, encrypted);
+    });
+    this.pendingWrites.set(key, next);
+    try { await next; }
+    finally { if (this.pendingWrites.get(key) === next) this.pendingWrites.delete(key); }
   }
 
   async removeItem(key: string) {
+    await this.pendingWrites.get(key);
     await this.options.dataStorage.removeItem(key);
     await this.options.keyStorage.removeItem(key);
   }

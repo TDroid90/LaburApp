@@ -1,4 +1,6 @@
-import { StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from "react-native";
+import { Image, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from "react-native";
+
+const qrIcon = require("../../assets/qr-flaticon.png");
 
 export type AppNavigationColors = {
   surface: string;
@@ -30,7 +32,7 @@ export function AppNavigation({
 }: Props) {
   const bottom = variant === "bottom";
   const { fontScale } = useWindowDimensions();
-  const scaledNavigationHeight = 64 + Math.min(28, Math.max(0, fontScale - 1) * 28);
+  const scaledNavigationHeight = 54 + Math.min(28, Math.max(0, fontScale - 1) * 28);
   return (
     <View
       role="navigation"
@@ -62,10 +64,9 @@ export function AppNavigation({
             ]}
           >
             {isQr && bottom ? (
-              <>
-                <Text style={[styles.qrIcon, { backgroundColor: colors.orange }]}>▣</Text>
-                <Text style={[styles.bottomLabel, { color: active ? colors.orange : colors.stone }]}>QR</Text>
-              </>
+              <View style={[styles.qrButton, { backgroundColor: colors.orange }]}>
+                <Image source={qrIcon} accessibilityIgnoresInvertColors style={styles.qrIcon} />
+              </View>
             ) : (
               <View style={styles.labelRow}>
                 <Text
@@ -101,19 +102,9 @@ const styles = StyleSheet.create({
   },
   bottomItem: { flex: 1, minWidth: 44, alignItems: "center", justifyContent: "center" },
   bottomText: { fontSize: 10, lineHeight: 14, fontWeight: "700", textAlign: "center" },
-  bottomLabel: { fontSize: 9, lineHeight: 13, fontWeight: "900", marginTop: 2 },
-  qrBottomItem: { marginTop: -8 },
-  qrIcon: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    color: "white",
-    textAlign: "center",
-    lineHeight: 46,
-    fontSize: 22,
-    fontWeight: "900",
-    overflow: "hidden",
-  },
+  qrBottomItem: { minHeight: 48 },
+  qrButton: { width: 44, height: 44, borderRadius: 22, alignItems: "center", justifyContent: "center" },
+  qrIcon: { width: 25, height: 25, tintColor: "white" },
   sidebar: { width: 236, borderRightWidth: 1, paddingHorizontal: 14, paddingTop: 112, gap: 8 },
   sidebarItem: {
     minHeight: 48,

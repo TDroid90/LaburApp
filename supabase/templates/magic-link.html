@@ -3,6 +3,7 @@
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#06131f;padding:28px 12px"><tr><td align="center">
 <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:560px;background:#102536;border:1px solid #28485d;border-radius:20px;overflow:hidden">
 <tr><td align="center" style="padding:24px 28px 18px"><img src="https://laburapp.work/assets/assets/brand/laburapp-logo-horizontal.c8dd949ebe9f9ac4e86a7427ca24d8f4.png" width="220" alt="LaburApp" style="display:block;width:220px;max-width:100%;height:auto;border:0"></td></tr>
-<tr><td style="padding:4px 34px 34px"><h1 style="font-size:25px;margin:0 0 14px">Tu contraseña fue actualizada</h1><p style="color:#c7d6df;line-height:1.6;margin:0 0 16px">La contraseña de la cuenta {{ .Email }} se cambió correctamente.</p>
-<p style="color:#ffb36e;line-height:1.6;margin:0">Si no fuiste vos, solicitá una recuperación de contraseña de inmediato.</p></td></tr>
+<tr><td style="padding:4px 34px 34px"><h1 style="font-size:25px;margin:0 0 14px">Ingresá a LaburApp</h1><p style="color:#c7d6df;line-height:1.6;margin:0 0 24px">Usá este enlace para ingresar a tu cuenta. Si la app te solicita un código, ingresá <strong>{{ .Token }}</strong>.</p>
+<p style="text-align:center;margin:28px 0"><a href="{{ .ConfirmationURL }}" style="background:#ff861b;color:#ffffff;text-decoration:none;font-weight:700;padding:14px 24px;border-radius:10px;display:inline-block">Ingresar a mi cuenta</a></p>
+<p style="color:#8da4b3;font-size:12px;line-height:1.5;margin:22px 0 0">Si no pediste este acceso, ignorá el correo. No compartas el enlace ni el código.</p></td></tr>
 </table></td></tr></table></body></html>

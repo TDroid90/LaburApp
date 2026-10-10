@@ -23,6 +23,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as Clipboard from "expo-clipboard";
+import { File } from "expo-file-system";
 import * as ImagePicker from "expo-image-picker";
 import * as ImageManipulator from "expo-image-manipulator";
 import * as MailComposer from "expo-mail-composer";
@@ -844,6 +845,15 @@ function activeRequest(request: SavedRequest) {
   return hiredStatuses.has(request.status) || requestExpiresAt(request) > Date.now();
 }
 
+function chatConfirmationFlags(request: SavedRequest | null) {
+  const text = (request?.messages ?? []).map((message) => message.body).join(" ").toLocaleLowerCase("es-AR");
+  return {
+    day: /\b(d[ií]a|fecha|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|\d{1,2}[/-]\d{1,2})\b/.test(text),
+    time: /\b(hora|horario|hs|am|pm|\d{1,2}:\d{2})\b/.test(text),
+    address: /\b(direcci[oó]n|domicilio|calle|altura|barrio|n[uú]mero|nro\.?|puerta)\b/.test(text),
+  };
+}
+
 const featuredWorks: Record<string, FeaturedWork> = {
   "Martín Gómez": { title: "Reparación de calefón", description: "Diagnóstico, cambio de componentes y prueba final de funcionamiento seguro.", photoUri: "https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=900&q=75" },
   "Laura Torres": { title: "Armado de tablero eléctrico", description: "Reordenamiento del tablero, protecciones nuevas y rotulado completo de circuitos.", photoUri: "https://images.unsplash.com/photo-1621905252507-b35492cc74b4?auto=format&fit=crop&w=900&q=75" },
@@ -1108,6 +1118,10 @@ const cityChoices = [
   "Ushuaia",
 ];
 const GUEST_PREVIEW_MS = 15_000;
+const BACKGROUND_SESSION_GRACE_MS = 15 * 60 * 1000;
+const BACKGROUND_SESSION_KEY = "laburapp:session-background-at";
+const IDENTITY_FRONT_KIND = "Identidad · frente";
+const IDENTITY_BACK_KIND = "Identidad · dorso";
 
 function readableProfileError(message: string) {
   const normalized = message.toLowerCase();
@@ -1180,6 +1194,11 @@ export default function Home() {
   const [publicProfileProvider, setPublicProfileProvider] = useState<Provider | null>(null);
   const [workPhoto, setWorkPhoto] = useState<{ provider: Provider; work: FeaturedWork } | null>(null);
   const [infoPage, setInfoPage] = useState<InfoPageKey | null>(null);
+  const [identityModalVisible, setIdentityModalVisible] = useState(false);
+  const [identityFrontUri, setIdentityFrontUri] = useState<string | null>(null);
+  const [identityBackUri, setIdentityBackUri] = useState<string | null>(null);
+  const [identityUploadBusy, setIdentityUploadBusy] = useState(false);
+  const [identityUploadError, setIdentityUploadError] = useState("");
   const [infoReturnAuthMode, setInfoReturnAuthMode] = useState<
     "login" | "register" | "recovery" | "update-password" | null
   >(null);
@@ -1191,6 +1210,8 @@ export default function Home() {
   const [providerLeaderCycles, setProviderLeaderCycles] = useState<Record<string, LeaderCycle>>({});
   const [providerLeaderCyclesLoaded, setProviderLeaderCyclesLoaded] = useState(false);
   const [hiddenRequestIds, setHiddenRequestIds] = useState<string[]>([]);
+  const [hiddenRequestIdsLoaded, setHiddenRequestIdsLoaded] = useState(false);
+  const [hiddenRequestIdsAccount, setHiddenRequestIdsAccount] = useState<string | null>(null);
   const [undoCancellation, setUndoCancellation] = useState<UndoCancellation | null>(null);
   const [authMode, setAuthMode] = useState<
     "login" | "register" | "recovery" | "update-password" | null
@@ -1270,7 +1291,9 @@ export default function Home() {
   const [portfolioModal, setPortfolioModal] = useState(false);
   const [portfolioError, setPortfolioError] = useState("");
   const [portfolioBusy, setPortfolioBusy] = useState(false);
-  const [followersVisible, setFollowersVisible] = useState(false);
+  const [providerCompletedJobs, setProviderCompletedJobs] = useState(0);
+  const [followingPublicProvider, setFollowingPublicProvider] = useState(false);
+  const [followBusy, setFollowBusy] = useState(false);
   const [chatRequestId, setChatRequestId] = useState<string | null>(null);
   const [chatMessage, setChatMessage] = useState("");
   const [chatError, setChatError] = useState("");
@@ -1308,6 +1331,7 @@ export default function Home() {
   const [qrCameraMountKey, setQrCameraMountKey] = useState(0);
   const qrScanLockRef = useRef(false);
   const sessionRef = useRef<SavedSession | null>(null);
+  const backgroundAtRef = useRef<number | null>(null);
   const intentionalSignOutRef = useRef(false);
   const suppressLocalSaveRef = useRef(false);
   const [clientPlan, setClientPlan] = useState<"free" | "plus">("free");
@@ -1344,6 +1368,8 @@ export default function Home() {
   >(null);
   const [quoteBuilderBusy, setQuoteBuilderBusy] = useState(false);
   const compactHeader = responsive.isCompact;
+  const mobileNavigationHeight = 54 + Math.min(28, Math.max(0, responsive.fontScale - 1) * 28)
+    + (Platform.OS === "android" ? Math.max(insets.bottom, 24) : insets.bottom);
   const authButtonLabel = signedInName
     ? `Hola, ${signedInName.split(" ")[0]}`
     : "Ingresar";
@@ -1382,6 +1408,27 @@ export default function Home() {
       const active = nextState === "active";
       setAppIsActive(active);
       if (!active) setQrCameraReady(false);
+      if (nextState === "background" && sessionRef.current && backgroundAtRef.current === null) {
+        backgroundAtRef.current = Date.now();
+        void AsyncStorage.setItem(BACKGROUND_SESSION_KEY, String(backgroundAtRef.current));
+      }
+      if (active && backgroundAtRef.current !== null) {
+        const elapsed = Date.now() - backgroundAtRef.current;
+        backgroundAtRef.current = null;
+        void AsyncStorage.removeItem(BACKGROUND_SESSION_KEY);
+        if (elapsed >= BACKGROUND_SESSION_GRACE_MS && sessionRef.current) {
+          intentionalSignOutRef.current = true;
+          void supabase?.auth.signOut({ scope: "local" });
+          setSession(null);
+          setCurrentUserId(null);
+          setSignedInName(null);
+          setRequests([]);
+          setProviderProfile(null);
+          setTab("Inicio");
+          setAuthMode("login");
+          setRequested("Por seguridad, ingresá nuevamente después de 15 minutos fuera de la app.");
+        }
+      }
     });
     return () => subscription.remove();
   }, []);
@@ -1426,6 +1473,29 @@ export default function Home() {
   }, [session?.email, seenRequests]);
 
   useEffect(() => {
+    setHiddenRequestIds([]);
+    setHiddenRequestIdsLoaded(false);
+    setHiddenRequestIdsAccount(null);
+    if (!session?.email) return;
+    let active = true;
+    void AsyncStorage.getItem(`laburapp:hidden-requests:${session.email.toLowerCase()}`).then((saved) => {
+      if (!active) return;
+      try {
+        const parsed: unknown = saved ? JSON.parse(saved) : [];
+        setHiddenRequestIds(Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : []);
+      } catch { setHiddenRequestIds([]); }
+      setHiddenRequestIdsAccount(session.email.toLowerCase());
+      setHiddenRequestIdsLoaded(true);
+    });
+    return () => { active = false; };
+  }, [session?.email]);
+
+  useEffect(() => {
+    if (!session?.email || !hiddenRequestIdsLoaded || hiddenRequestIdsAccount !== session.email.toLowerCase()) return;
+    void AsyncStorage.setItem(`laburapp:hidden-requests:${session.email.toLowerCase()}`, JSON.stringify(hiddenRequestIds));
+  }, [session?.email, hiddenRequestIds, hiddenRequestIdsLoaded, hiddenRequestIdsAccount]);
+
+  useEffect(() => {
     void AsyncStorage.getItem(THEME_STORAGE_KEY).then((savedTheme) => {
       if (savedTheme === "light") setDarkMode(false);
       if (savedTheme === "dark") setDarkMode(true);
@@ -1433,12 +1503,26 @@ export default function Home() {
     void flushMirrorEvents();
     loadLocalState().then(async (saved) => {
       let restoredSession = saved.session;
+      const lastBackgroundAt = Number(await AsyncStorage.getItem(BACKGROUND_SESSION_KEY));
+      if (restoredSession && lastBackgroundAt > 0 && Date.now() - lastBackgroundAt >= BACKGROUND_SESSION_GRACE_MS) {
+        await supabase?.auth.signOut({ scope: "local" }).catch(() => undefined);
+        restoredSession = null;
+        setAuthMode("login");
+        setRequested("Por seguridad, ingresá nuevamente después de 15 minutos fuera de la app.");
+      }
+      void AsyncStorage.removeItem(BACKGROUND_SESSION_KEY);
       if (restoredSession?.email.endsWith("@laburapp.demo") && !demoAccessEnabled) {
         restoredSession = null;
       } else if (restoredSession && supabase && !restoredSession.email.endsWith("@laburapp.demo")) {
-        const authResult = await supabase.auth.getUser();
+        const authResult = await supabase.auth.getUser().catch((error: unknown) => ({ data: { user: null }, error }));
         const user = authResult.data.user;
-        if (!user || user.email?.toLowerCase() !== restoredSession.email.toLowerCase()) {
+        const authError = authResult.error as { name?: string; message?: string } | null;
+        const temporaryAuthFailure = !user && !!authError && (
+          authError.name === "AuthRetryableFetchError" || /network|fetch|timeout|offline/i.test(authError.message ?? "")
+        );
+        if (temporaryAuthFailure) {
+          setRequested("No pudimos verificar tu sesión por un problema de conexión. Reintentá cuando vuelva Internet.");
+        } else if (!user || user.email?.toLowerCase() !== restoredSession.email.toLowerCase()) {
           restoredSession = null;
         } else {
           const [rolesResult, profileResult] = await Promise.all([
@@ -1683,12 +1767,91 @@ export default function Home() {
       }
       await MailComposer.composeAsync({
         recipients: ["certificaciones@laburapp.work"],
-        subject: "Solicitud de revisión de certificaciones - LaburApp",
-        body: `Hola, quiero solicitar una revisión de identidad y certificaciones.\n\nNombre: ${session?.name ?? ""}\nCorreo de mi cuenta: ${session?.email ?? ""}\nOficio: ${providerProfile?.trade ?? ""}\n\nAdjunto la documentación para evaluación. La solicitud no activa Premium automáticamente.`,
+        subject: "Consulta por Certificación LaburApp",
+        body: `Hola, quiero recibir información sobre la Certificación LaburApp, su revisión especial y el costo adicional.\n\nNombre: ${session?.name ?? ""}\nCorreo de mi cuenta: ${session?.email ?? ""}\nOficio: ${providerProfile?.trade ?? ""}`,
       });
     } catch {
       setRequested("No pudimos abrir el correo. Escribinos a certificaciones@laburapp.work.");
     }
+  }
+
+  async function pickIdentityDocument(side: "front" | "back", source: "camera" | "gallery") {
+    setIdentityUploadError("");
+    try {
+      if (source === "camera") {
+        const permission = await ImagePicker.requestCameraPermissionsAsync();
+        if (!permission.granted) return setIdentityUploadError("Permití el uso de la cámara para fotografiar el documento.");
+      }
+      const result = source === "camera"
+        ? await ImagePicker.launchCameraAsync({ mediaTypes: ["images"], quality: 0.82 })
+        : await ImagePicker.launchImageLibraryAsync({ mediaTypes: ["images"], quality: 0.82 });
+      if (result.canceled || !result.assets[0]) return;
+      const asset = result.assets[0];
+      const validationError = pickedImageError(asset, DOCUMENT_IMAGE_POLICY);
+      if (validationError) return setIdentityUploadError(validationError);
+      const optimized = await ImageManipulator.manipulateAsync(
+        asset.uri,
+        longestSideResize(asset.width, asset.height, 1600),
+        { compress: 0.68, format: ImageManipulator.SaveFormat.JPEG },
+      );
+      if (side === "front") setIdentityFrontUri(optimized.uri);
+      else setIdentityBackUri(optimized.uri);
+    } catch {
+      setIdentityUploadError("No pudimos preparar la foto. Reintentá con buena luz y el documento completo.");
+    }
+  }
+
+  async function saveIdentityDocuments() {
+    if (!supabase || identityUploadBusy || !providerProfile) return;
+    const existing = providerProfile.credentials ?? [];
+    const front = existing.find((item) => item.certification === IDENTITY_FRONT_KIND);
+    const back = existing.find((item) => item.certification === IDENTITY_BACK_KIND);
+    if ((!identityFrontUri && !front?.privatePath) || (!identityBackUri && !back?.privatePath)) {
+      return setIdentityUploadError("Necesitamos el frente y el dorso para iniciar la revisión.");
+    }
+    if (!identityFrontUri && !identityBackUri) return setIdentityModalVisible(false);
+    setIdentityUploadBusy(true);
+    setIdentityUploadError("");
+    try {
+      const userResult = await supabase.auth.getUser();
+      const userId = userResult.data.user?.id;
+      if (!userId) throw new Error("Volvé a ingresar para enviar tu documento.");
+      for (const [kind, uri, old] of [
+        [IDENTITY_FRONT_KIND, identityFrontUri, front],
+        [IDENTITY_BACK_KIND, identityBackUri, back],
+      ] as const) {
+        if (!uri) continue;
+        const blob = await (await fetch(uri)).blob();
+        if (blob.size > 3 * 1024 * 1024) throw new Error("Una foto supera 3 MB. Sacala de nuevo con buena luz.");
+        const path = `${userId}/${Date.now()}-${kind === IDENTITY_FRONT_KIND ? "identidad-frente" : "identidad-dorso"}.jpg`;
+        const upload = await supabase.storage.from("provider-credentials").upload(path, blob, { contentType: "image/jpeg", upsert: false });
+        if (upload.error) throw new Error("No pudimos subir una de las fotos. Reintentá.");
+        const row = { provider_id: userId, kind, private_path: path, credential_number: null, number_masked: null };
+        const result = old?.id
+          ? await supabase.from("credentials").update(row).eq("id", old.id).select("id, status, updated_at").single()
+          : await supabase.from("credentials").insert(row).select("id, status, updated_at").single();
+        if (result.error || !result.data) {
+          await supabase.storage.from("provider-credentials").remove([path]);
+          throw new Error("No pudimos registrar una de las fotos. Reintentá.");
+        }
+        if (old?.privatePath && old.privatePath !== path) {
+          void supabase.storage.from("provider-credentials").remove([old.privatePath]);
+        }
+        const saved: SavedCredentialEvidence = { id: String(result.data.id), certification: kind, privatePath: path, status: result.data.status as SavedCredentialEvidence["status"], updatedAt: String(result.data.updated_at) };
+        setProviderProfile((current) => current ? {
+          ...current,
+          credentials: [...(current.credentials ?? []).filter((item) => item.certification !== kind), saved],
+        } : current);
+        if (kind === IDENTITY_FRONT_KIND) setIdentityFrontUri(null);
+        else setIdentityBackUri(null);
+      }
+      setRequestRefresh((current) => current + 1);
+      setIdentityModalVisible(false);
+      setRequested("Documento recibido. La identidad queda pendiente de revisión humana.");
+    } catch (error) {
+      setRequestRefresh((current) => current + 1);
+      setIdentityUploadError(error instanceof Error ? error.message : "No pudimos enviar el documento. Reintentá.");
+    } finally { setIdentityUploadBusy(false); }
   }
 
   useEffect(() => {
@@ -1805,7 +1968,7 @@ export default function Home() {
       if (!userId || cancelled) return;
       const [identityResult, providerResult] = await Promise.all([
         supabase.from("profiles").select("full_name, city, avatar_path, public_id").eq("id", userId).maybeSingle(),
-        supabase.from("provider_profiles").select("trade_title, diagnostic_price, bio, skills_text, training, certifications, zones, availability, availability_start, availability_end, published, verified_at, followers_count").eq("user_id", userId).maybeSingle(),
+        supabase.from("provider_profiles").select("trade_title, diagnostic_price, bio, skills_text, training, certifications, zones, availability, availability_start, availability_end, published, verified_at, followers_count, completed_jobs").eq("user_id", userId).maybeSingle(),
       ]);
       if (cancelled) return;
       if (!providerResult.data) {
@@ -1845,6 +2008,7 @@ export default function Home() {
         : { data: [] };
       const reviewerNames = new Map<string, string>((reviewerProfilesResult.data ?? []).map((profile: any): [string, string] => [String(profile.id), String(profile.full_name ?? "").trim()]));
       const providerRow = providerResult.data;
+      setProviderCompletedJobs(Number(providerRow.completed_jobs ?? 0));
       const availabilityStart = String(providerRow.availability_start ?? "08:00").slice(0, 5);
       const availabilityEnd = String(providerRow.availability_end ?? "18:00").slice(0, 5);
       const tradeRows = tradesResult.data ?? [];
@@ -1941,6 +2105,16 @@ export default function Home() {
     });
     return () => { cancelled = true; };
   }, [hydrated, session?.email, session?.role, isDemoSession, requestRefresh]);
+
+  useEffect(() => {
+    const providerId = publicProfileProvider?.providerId;
+    setFollowingPublicProvider(false);
+    if (!supabase || !currentUserId || !providerId || providerId === currentUserId) return;
+    let active = true;
+    void supabase.from("provider_followers").select("provider_id").eq("provider_id", providerId).eq("follower_id", currentUserId).maybeSingle()
+      .then(({ data }) => { if (active) setFollowingPublicProvider(!!data); });
+    return () => { active = false; };
+  }, [publicProfileProvider?.providerId, currentUserId]);
 
   useEffect(() => {
     if (!hydrated || !session || !supabase || isDemoSession) return;
@@ -2554,6 +2728,7 @@ export default function Home() {
       photoUri,
     };
     suppressLocalSaveRef.current = false;
+    void AsyncStorage.removeItem(BACKGROUND_SESSION_KEY);
     setSession(nextSession);
     setSignedInName(name);
     if (authMode === "register")
@@ -2656,6 +2831,12 @@ export default function Home() {
 
   async function submitQuote() {
     if (!quoteProvider || quoteBusy) return;
+    if ((quoteProvider.providerId && quoteProvider.providerId === currentUserId)
+      || (quoteProvider.publicId && quoteProvider.publicId === (accountPublicId ?? providerProfile?.publicId))) {
+      setQuoteProvider(null);
+      setRequested("No podés solicitar un presupuesto a tu propio perfil.");
+      return;
+    }
     setQuoteError("");
     const weeklyRequests = requests.filter(
       (request) =>
@@ -2852,10 +3033,43 @@ export default function Home() {
     }
   }
 
+  async function togglePublicProviderFollow() {
+    const providerId = publicProfileProvider?.providerId;
+    if (!session) {
+      setAuthMode("login");
+      setRequested("Ingresá para seguir a este profesional.");
+      return;
+    }
+    if (!supabase || !providerId || followBusy) return;
+    setFollowBusy(true);
+    try {
+      const followerId = currentUserId ?? (await supabase.auth.getUser()).data.user?.id;
+      if (!followerId || followerId === providerId) throw new Error("unavailable");
+      const currentFollow = await supabase.from("provider_followers").select("provider_id").eq("provider_id", providerId).eq("follower_id", followerId).maybeSingle();
+      if (currentFollow.error) throw currentFollow.error;
+      const wasFollowing = !!currentFollow.data;
+      const result = wasFollowing
+        ? await supabase.from("provider_followers").delete().eq("provider_id", providerId).eq("follower_id", followerId)
+        : await supabase.from("provider_followers").insert({ provider_id: providerId, follower_id: followerId });
+      if (result.error) throw result.error;
+      setFollowingPublicProvider(!wasFollowing);
+      setRequestRefresh((current) => current + 1);
+    } catch {
+      setRequested("No pudimos actualizar el seguimiento. Reintentá.");
+    } finally {
+      setFollowBusy(false);
+    }
+  }
+
   async function startQuote(provider: Provider) {
     if (!session) {
       setAuthMode("register");
       setRequested("Creá una cuenta o ingresá para solicitar un presupuesto.");
+      return;
+    }
+    if ((provider.providerId && provider.providerId === currentUserId)
+      || (provider.publicId && provider.publicId === (accountPublicId ?? providerProfile?.publicId))) {
+      setRequested("No podés solicitar un presupuesto a tu propio perfil.");
       return;
     }
     setQuoteError("");
@@ -3040,7 +3254,7 @@ export default function Home() {
         setProfileBusy(false);
         return setProfileError(readableProfileError(existingCredentialsResult.error.message));
       }
-      const selectedCertifications = new Set(nextDraft.certifications ?? []);
+      const selectedCertifications = new Set([...(nextDraft.certifications ?? []), IDENTITY_FRONT_KIND, IDENTITY_BACK_KIND]);
       const staleCredentials = (existingCredentialsResult.data ?? []).filter(
         (credential) => !selectedCertifications.has(String(credential.kind)),
       );
@@ -3540,6 +3754,11 @@ export default function Home() {
   }
 
   async function acceptQuote(request: SavedRequest) {
+    const details = chatConfirmationFlags(request);
+    if (!details.day || !details.time || !details.address) {
+      setRequested("Antes de aceptar, acuerden día, horario y dirección exacta en el chat.");
+      return;
+    }
     try {
       let jobId = request.jobId;
       if (supabase && !isDemoSession && /^[0-9a-f-]{36}$/i.test(request.id)) {
@@ -3584,7 +3803,6 @@ export default function Home() {
         message: effectiveReason === "provider_declined" ? "Solicitud desestimada. El cliente verá la notificación." : "Solicitud cancelada.",
         expiresAt: Date.now() + 10000,
       });
-      setTimeout(() => setHiddenRequestIds((current) => current.includes(request.id) ? current : [...current, request.id]), 5000);
       setTimeout(() => setUndoCancellation((current) => current?.request.id === request.id ? null : current), 10000);
     } catch {
       setRequested(viewerRole === "provider" ? "Esta solicitud ya no se puede desestimar." : "Esta solicitud ya no se puede cancelar.");
@@ -3712,6 +3930,7 @@ export default function Home() {
     if (!token || qrBusy) return;
     setQrBusy(true);
     setCompletionError("");
+    let confirmationStage: "receipt" | "token" = completionReceiptUri ? "receipt" : "token";
     try {
       let requestId = token.startsWith("DEMO-") ? token.slice(5) : "";
       let receiptPath: string | null = null;
@@ -3719,12 +3938,16 @@ export default function Home() {
         const user = (await supabase.auth.getUser()).data.user;
         if (!user) throw new Error("SESSION_EXPIRED");
         if (completionReceiptUri) {
-          const blob = await (await fetch(completionReceiptUri)).blob();
-          if (blob.size > 3145728) throw new Error("IMAGE_TOO_LARGE");
+          const imageData = Platform.OS === "web"
+            ? await (await fetch(completionReceiptUri)).arrayBuffer()
+            : await new File(completionReceiptUri).arrayBuffer();
+          if (!imageData.byteLength) throw new Error("RECEIPT_UPLOAD_FAILED");
+          if (imageData.byteLength > 3145728) throw new Error("IMAGE_TOO_LARGE");
           receiptPath = `${user.id}/completion/${globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}.jpg`;
-          const upload = await supabase.storage.from("private-receipts").upload(receiptPath, blob, { contentType: "image/jpeg" });
-          if (upload.error) throw upload.error;
+          const upload = await supabase.storage.from("private-receipts").upload(receiptPath, imageData, { contentType: "image/jpeg" });
+          if (upload.error) throw new Error("RECEIPT_UPLOAD_FAILED");
         }
+        confirmationStage = "token";
         const result = await supabase.rpc("confirm_completion_token", { raw_token: token, receipt_path: receiptPath });
         if (result.error) throw result.error;
         requestId = String(result.data);
@@ -3760,9 +3983,22 @@ export default function Home() {
       setTab("Contratados");
       setRequested(completedWithReceipt ? "Comprobante adjuntado. Trabajo finalizado; ya podés dejar tu reseña." : "Confirmación enviada. El prestador debe confirmar la finalización antes de habilitar la reseña.");
     } catch (error) {
-      setCompletionError(error instanceof Error && error.message === "IMAGE_TOO_LARGE"
+      const message = error instanceof Error ? error.message : "";
+      setCompletionError(message === "SESSION_EXPIRED"
+        ? "Tu sesión venció. Ingresá nuevamente antes de confirmar el trabajo."
+        : message === "IMAGE_TOO_LARGE"
         ? "La captura supera 3 MB. Elegí una imagen más liviana."
-        : "No pudimos confirmar el QR. Puede haber vencido o ya haberse usado.");
+        : confirmationStage === "receipt"
+          ? "No pudimos adjuntar el comprobante. El QR no se usó; reintentá con otra imagen o continuá sin comprobante."
+          : message.includes("INVALID_OR_EXPIRED_QR")
+            ? "Este QR ya se usó o venció. Pedile al profesional que genere uno nuevo."
+            : message.includes("QR_NOT_FOR_CLIENT")
+              ? "Este QR corresponde a otro cliente."
+              : message.includes("JOB_NOT_AWAITING_QR")
+                ? "El trabajo ya no espera confirmación por QR. Actualizá Contratados."
+                : message.includes("INVALID_RECEIPT")
+                  ? "No pudimos validar el comprobante adjunto. Probá con otra imagen; el QR no se usó."
+                  : "No pudimos confirmar el trabajo. Reintentá; si persiste, pedile al profesional un QR nuevo.");
     } finally {
       setQrBusy(false);
     }
@@ -4027,6 +4263,8 @@ export default function Home() {
         if (profileUpdate.error) throw profileUpdate.error;
       }
       setSession((current) => current ? { ...current, photoUri } : current);
+      setProviderProfile((current) => current ? { ...current, photoUri } : current);
+      setRequestRefresh((current) => current + 1);
       setRequested("Foto de perfil actualizada.");
     } catch (error) {
       setRequested(error instanceof Error && error.message ? error.message : "No pudimos actualizar la foto.");
@@ -4195,6 +4433,8 @@ export default function Home() {
     requests.find((request) => request.id === reviewRequestId) ?? null;
   const acceptQuoteRequest =
     requests.find((request) => request.id === acceptQuoteRequestId) ?? null;
+  const acceptedQuoteDetails = chatConfirmationFlags(acceptQuoteRequest);
+  const canAcceptQuote = acceptedQuoteDetails.day && acceptedQuoteDetails.time && acceptedQuoteDetails.address;
   const quoteBuilderRequest =
     requests.find((request) => request.id === quoteBuilderRequestId) ?? null;
   const providerRankingScope = `${providerSort}|${cityFilter}|${query.trim().toLocaleLowerCase("es")}`;
@@ -4246,7 +4486,15 @@ export default function Home() {
     }));
   }, [providerLeaderCyclesLoaded, providerRankingScope, requestRefresh, topProviderTieSignature]);
 
-  const visibleProviders = session ? filtered : filtered.slice(0, 4);
+  const otherProviders = session ? filtered.filter((provider) =>
+    !(provider.providerId && provider.providerId === currentUserId)
+    && !(provider.publicId && provider.publicId === (accountPublicId ?? providerProfile?.publicId)),
+  ) : filtered;
+  const visibleProviders = session ? otherProviders : otherProviders.slice(0, 4);
+  const ownPublicProfileOpen = !!publicProfileProvider && !!session && (
+    (!!publicProfileProvider.providerId && publicProfileProvider.providerId === currentUserId)
+    || (!!publicProfileProvider.publicId && publicProfileProvider.publicId === (accountPublicId ?? providerProfile?.publicId))
+  );
   const selectedPublicWorks = publicProfileProvider
     ? publicPortfolioFor(publicProfileProvider)
     : [];
@@ -4325,6 +4573,10 @@ export default function Home() {
     .slice()
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .slice(0, 3);
+  const identityFrontCredential = providerProfile?.credentials?.find((item) => item.certification === IDENTITY_FRONT_KIND);
+  const identityBackCredential = providerProfile?.credentials?.find((item) => item.certification === IDENTITY_BACK_KIND);
+  const identityVerified = !!providerProfile?.verified || (identityFrontCredential?.status === "verified" && identityBackCredential?.status === "verified");
+  const identitySubmitted = !!identityFrontCredential?.privatePath && !!identityBackCredential?.privatePath;
 
   if (!hydrated) {
     return (
@@ -4421,7 +4673,7 @@ export default function Home() {
           compactHeader && styles.contentCompact,
           responsive.isDesktop && styles.contentDesktop,
           !!session && !responsive.isDesktop && {
-            paddingBottom: 120 + Math.max(insets.bottom, 24) + Math.min(28, Math.max(0, responsive.fontScale - 1) * 28),
+            paddingBottom: mobileNavigationHeight + 34,
           },
         ]}
         keyboardShouldPersistTaps="handled"
@@ -4512,9 +4764,9 @@ export default function Home() {
             <View style={[styles.sectionHeader, compactHeader && styles.sectionHeaderCompact]}>
               <Text style={[styles.sectionTitle, compactHeader && styles.sectionTitleCompact]}>
                 {query || cityFilter !== "Todas"
-                  ? `Resultados · ${session ? filtered.length : visibleProviders.length}`
+                  ? `Resultados · ${visibleProviders.length}`
                   : session
-                    ? `Profesionales cerca tuyo · ${filtered.length}`
+                    ? `Profesionales cerca tuyo · ${visibleProviders.length}`
                     : "Profesionales destacados"}
               </Text>
               <View
@@ -5042,6 +5294,11 @@ export default function Home() {
                           </Text>
                         </TouchableOpacity>
                       )}
+                      {request.status === "cancelled" && (
+                        <TouchableOpacity accessibilityRole="button" accessibilityLabel="Ocultar solicitud desestimada de esta lista" onPress={() => setHiddenRequestIds((current) => current.includes(request.id) ? current : [...current, request.id])}>
+                          <Text style={styles.cancelLink}>🗑 Ocultar de esta lista</Text>
+                        </TouchableOpacity>
+                      )}
                     </View>
                   </View>
                 );
@@ -5414,61 +5671,33 @@ export default function Home() {
               <>
                 <View style={styles.accountCard}>
                   <View style={styles.accountIdentity}>
-                    {(providerProfile?.photoUri ?? session.photoUri) ? (
-                      <Image accessibilityLabel="Foto de perfil" source={{ uri: providerProfile?.photoUri ?? session.photoUri }} style={styles.profilePhoto} />
-                    ) : (
-                      <View style={styles.profileAvatar}><Text style={styles.profileAvatarText}>{session.name.slice(0, 1).toUpperCase()}</Text></View>
-                    )}
+                    <TouchableOpacity accessibilityRole="button" accessibilityLabel={session.photoUri ? "Cambiar foto de perfil" : "Agregar foto de perfil"} disabled={session.role === "admin" || clientPhotoBusy} onPress={() => void pickClientPhoto()}>
+                      {(session.photoUri ?? providerProfile?.photoUri) ? (
+                        <Image source={{ uri: session.photoUri ?? providerProfile?.photoUri }} style={styles.profilePhoto} />
+                      ) : (
+                        <View style={styles.profileAvatar}><Text style={styles.profileAvatarText}>{clientPhotoBusy ? "…" : session.name.slice(0, 1).toUpperCase()}</Text></View>
+                      )}
+                    </TouchableOpacity>
                     <View style={styles.accountBody}>
-                      <View style={styles.verifiedNameRow}>
-                        <Text style={styles.accountName}>{session.name}</Text>
-                        {hasProviderProfile && providerProfile?.verified && <Text accessibilityLabel="Perfil verificado" style={styles.verifiedIcon}>✓</Text>}
+                      <View style={styles.accountNameRow}>
+                        <View style={styles.verifiedNameRow}>
+                          <Text style={styles.accountName}>{session.name}</Text>
+                          {hasProviderProfile && providerProfile?.verified && <Text accessibilityLabel="Perfil verificado" style={styles.verifiedIcon}>✓</Text>}
+                        </View>
+                        {hasProviderProfile && <View style={styles.followersButton}><Text style={styles.followersCount}>{providerProfile.followersCount ?? 0}</Text><Text style={styles.followersLabel}>seguidores</Text></View>}
                       </View>
                       {hasProviderProfile && !!providerProfile?.diagnosticPrice && <Text style={styles.diagnosticBadge}>Diagnóstico desde ${providerProfile.diagnosticPrice.toLocaleString("es-AR")}</Text>}
-                      <Text style={styles.clientJobsCount}>{session.role === "provider" ? `${contractedRequests.length} trabajos gestionados` : `${clientHistory.length} trabajos contratados en los últimos 6 meses`}</Text>
+                      <Text style={styles.clientJobsCount}>{session.role === "provider" ? `${providerCompletedJobs} trabajos realizados` : `${clientHistory.length} trabajos contratados en los últimos 6 meses`}</Text>
                       {!!accountPublicId && <Text style={styles.clientJobsCount}>ID de cuenta: {displayPublicId(accountPublicId, accountCity)}</Text>}
                       {isDemoSession && <Text style={styles.localBadge}>Cuenta de demostración</Text>}
                     </View>
                   </View>
-                  <View style={styles.accountActions}>
-                    {session.role !== "admin" && <TouchableOpacity accessibilityRole="button" disabled={clientPhotoBusy} style={[styles.editProfileButton, styles.accountPhotoButton]} onPress={() => void pickClientPhoto()}><Text style={styles.editProfileButtonText}>{clientPhotoBusy ? "CARGANDO…" : session.photoUri ? "CAMBIAR FOTO" : "AGREGAR FOTO"}</Text></TouchableOpacity>}
-                    {hasProviderProfile && <TouchableOpacity accessibilityRole="button" style={styles.followersButton} onPress={() => setFollowersVisible((current) => !current)}><Text style={styles.followersCount}>{providerProfile.followersCount ?? 0}</Text><Text style={styles.followersLabel}>seguidores</Text></TouchableOpacity>}
-                  </View>
                 </View>
                 {session.role !== "admin" && <View style={styles.providerPanel}>
-                  <View style={styles.workCardTop}><View><Text style={styles.panelEyebrow}>SUSCRIPCIÓN</Text><Text style={styles.adminModuleTitle}>{clientPlan === "plus" ? "Premium activo" : "Conocé Premium"}</Text></View><Text style={styles.publishedBadge}>{clientPlan === "plus" ? "PREMIUM" : "GRATIS"}</Text></View>
+                  <View style={styles.subscriptionStatusRow}><Text style={styles.panelEyebrow}>SUSCRIPCIÓN</Text><Text style={styles.publishedBadge}>{clientPlan === "plus" ? "PREMIUM" : "GRATIS"}</Text></View>
+                  <View style={styles.subscriptionPlanRow}><Text style={styles.adminModuleTitle}>{clientPlan === "plus" ? "Premium activo" : "Conocé Premium"}</Text><TouchableOpacity accessibilityRole="button" style={styles.subscriptionCompareButton} onPress={() => { setSubscriptionError(""); setSubscriptionModal(true); }}><Text style={styles.subscriptionCompareText}>Compará planes</Text></TouchableOpacity></View>
                   {!!membershipEndsAt && clientPlan === "plus" && <Text style={styles.adminModuleCopy}>Vigente hasta {new Date(membershipEndsAt).toLocaleDateString("es-AR")}.</Text>}
-                  <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => { setSubscriptionError(""); setSubscriptionModal(true); }}><Text style={styles.secondaryText}>Ver planes y solicitar suscripción</Text></TouchableOpacity>
                 </View>}
-                {hasProviderProfile && followersVisible && (
-                  <View style={styles.followersPanel}>
-                    <View style={styles.workCardTop}>
-                      <Text style={styles.panelEyebrow}>SEGUIDORES</Text>
-                      <TouchableOpacity
-                        accessibilityRole="button"
-                        onPress={() => setFollowersVisible(false)}
-                      >
-                        <Text style={styles.cardLink}>Ocultar</Text>
-                      </TouchableOpacity>
-                    </View>
-                    {[
-                      "María Fernández",
-                      "Jorge Acosta",
-                      "Lucía Pereyra",
-                      "Carlos Díaz",
-                    ].map((name) => (
-                      <View key={name} style={styles.followerRow}>
-                        <View style={styles.followerAvatar}>
-                          <Text style={styles.followerInitial}>
-                            {name.slice(0, 1)}
-                          </Text>
-                        </View>
-                        <Text style={styles.followerName}>{name}</Text>
-                        <Text style={styles.followingBadge}>Siguiendo</Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
                 {hasProviderProfile ? (
                   <View style={styles.providerPanel}>
                     <View style={styles.workCardTop}>
@@ -5670,10 +5899,10 @@ export default function Home() {
                     </View>
                     <Text style={styles.adminModuleCopy}>Mostrá qué documentación se revisó y cuál es su estado. Cada insignia tiene un alcance concreto.</Text>
                     <View style={styles.certificationList}>
-                      <View style={[styles.certificationBadge, providerProfile.verified ? undefined : styles.certificationPendingBadge]}>
-                        <Text style={[styles.certificationIcon, !providerProfile.verified && styles.certificationPendingIcon]}>{providerProfile.verified ? "✓" : "…"}</Text>
-                        <Text style={[styles.certificationText, !providerProfile.verified && styles.certificationPendingText]}>{providerProfile.verified ? "Identidad revisada" : "Identidad pendiente de revisión"}</Text>
-                      </View>
+                      <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cargar frente y dorso del documento de identidad" style={[styles.certificationBadge, identityVerified ? undefined : styles.certificationPendingBadge]} onPress={() => { setIdentityUploadError(""); setIdentityModalVisible(true); }}>
+                        <Text style={[styles.certificationIcon, !identityVerified && styles.certificationPendingIcon]}>{identityVerified ? "✓" : "…"}</Text>
+                        <Text style={[styles.certificationText, !identityVerified && styles.certificationPendingText]}>{identityVerified ? "Identidad revisada" : identitySubmitted ? "Identidad en revisión · tocar para ver" : "Identidad: subir frente y dorso"}</Text>
+                      </TouchableOpacity>
                       {(providerProfile.certifications ?? []).map((certification) => {
                         const status = providerProfile.credentials?.find((item) => item.certification === certification)?.status ?? "missing";
                         const verified = status === "verified";
@@ -5682,56 +5911,62 @@ export default function Home() {
                       })}
                     </View>
                     {!providerProfile.certifications?.length && <Text style={styles.profileSectionText}>Todavía no agregaste certificaciones al perfil.</Text>}
-                    <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => { setInfoPage("certifications"); setInfoReturnAuthMode(null); }}><Text style={styles.secondaryText}>Cómo se revisan las insignias</Text></TouchableOpacity>
-                    <TouchableOpacity accessibilityRole="button" style={styles.usageCardLink} onPress={() => void composeCertificationEmail()}><Text style={styles.cardLink}>Solicitar certificación por email</Text></TouchableOpacity>
+                    <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => { setInfoPage("certifications"); setInfoReturnAuthMode(null); }}><Text style={styles.secondaryText}>Certificación LaburApp</Text></TouchableOpacity>
                   </View>
-                )}
-                <TouchableOpacity accessibilityRole="button" style={styles.logoutButton} onPress={signOut}>
-                  <Text style={styles.logoutText}>Cerrar sesión</Text>
-                </TouchableOpacity>
-                <TouchableOpacity accessibilityRole="button" style={styles.deleteAccountButton} onPress={() => void openNotificationPreferences()}>
-                  <Text style={styles.profileLegalLink}>Configurar notificaciones</Text>
-                </TouchableOpacity>
-                {session.role !== "admin" && !isDemoSession && (
-                  <TouchableOpacity accessibilityRole="button" style={styles.deleteAccountButton} onPress={() => { setDeleteAccountError(""); setDeleteAccountModal(true); }}>
-                    <Text style={styles.deleteAccountButtonText}>Eliminar cuenta</Text>
-                  </TouchableOpacity>
                 )}
               </>
             )}
             <View style={styles.profileLegalFooter}>
-              <Text style={styles.panelEyebrow}>LABURAPP</Text>
-              <View style={styles.profileLegalLinks}>
-                {([
-                  ["terms", "Términos y condiciones"],
-                  ["privacy", "Política de privacidad"],
-                  ["about", "Nosotros"],
-                  ["usage", "Mecánica de uso"],
-                ] as const).map(([key, label]) => (
-                  <TouchableOpacity key={key} accessibilityRole="link" onPress={() => key === "usage" ? (setInfoReturnAuthMode(null), setInfoPage("usage")) : void openExternalUrl(legalPageUrls[key])}>
-                    <Text style={styles.profileLegalLink}>{label} ↗</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
-              <View style={styles.profileSocialRow}>
-                <TouchableOpacity accessibilityRole="link" accessibilityLabel="Facebook de LaburApp" style={styles.profileSocialButton} onPress={() => setRequested("La cuenta oficial de Facebook todavía no está vinculada.")}><Text style={styles.profileFacebookIcon}>f</Text></TouchableOpacity>
-                <TouchableOpacity accessibilityRole="link" accessibilityLabel="Instagram de LaburApp" style={styles.profileSocialButton} onPress={() => setRequested("La cuenta oficial de Instagram todavía no está vinculada.")}><View style={styles.profileInstagramIcon}><View style={styles.profileInstagramLens} /><View style={styles.profileInstagramDot} /></View></TouchableOpacity>
-              </View>
-              {session && session.role !== "admin" && (
-                <View style={styles.thanksCard}>
-                  <Text style={styles.thanksTitle}>¿Querés ayudar a que la comunidad siga creciendo?</Text>
-                  <Text style={styles.thanksCopy}>La contribución es voluntaria. Si querés acompañar, podés transferir el 1% del valor acordado y enviarnos el comprobante.</Text>
-                  <TouchableOpacity accessibilityRole="button" style={styles.thanksButton} onPress={() => { setContributionError(""); setThanksModalVisible(true); }}><Text style={styles.thanksButtonText}>Gracias</Text></TouchableOpacity>
+              <View style={styles.profileFooterColumns}>
+                <View style={styles.profileFooterColumn}>
+                  <Text style={styles.panelEyebrow}>TU CUENTA</Text>
+                  {session && <>
+                    <TouchableOpacity accessibilityRole="button" style={styles.profileFooterLinkButton} onPress={signOut}><Text style={styles.logoutText}>Cerrar sesión</Text></TouchableOpacity>
+                    <TouchableOpacity accessibilityRole="button" style={styles.profileFooterLinkButton} onPress={() => void openNotificationPreferences()}><Text style={styles.profileLegalLink}>Notificaciones</Text></TouchableOpacity>
+                    {session.role !== "admin" && !isDemoSession && <TouchableOpacity accessibilityRole="button" style={styles.profileFooterLinkButton} onPress={() => { setDeleteAccountError(""); setDeleteAccountModal(true); }}><Text style={styles.deleteAccountButtonText}>Eliminar cuenta</Text></TouchableOpacity>}
+                  </>}
                 </View>
-              )}
+                <View style={styles.profileFooterColumn}>
+                  <Text style={styles.panelEyebrow}>LABURAPP</Text>
+                  {([
+                    ["terms", "Términos y condiciones"],
+                    ["privacy", "Política de privacidad"],
+                    ["about", "Nosotros"],
+                    ["usage", "Mecánica de uso"],
+                  ] as const).map(([key, label]) => (
+                    <TouchableOpacity key={key} accessibilityRole="link" style={styles.profileFooterLinkButton} onPress={() => key === "usage" ? (setInfoReturnAuthMode(null), setInfoPage("usage")) : void openExternalUrl(legalPageUrls[key])}>
+                      <Text style={styles.profileLegalLink}>{label} ↗</Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+              </View>
+              <View style={styles.profileFooterColumns}>
+                <View style={styles.profileFooterColumn}>
+                  <Text style={styles.panelEyebrow}>SEGUINOS</Text>
+                  <View style={styles.profileSocialRow}>
+                    <TouchableOpacity accessibilityRole="link" accessibilityLabel="Facebook de LaburApp" style={styles.profileSocialButton} onPress={() => setRequested("La cuenta oficial de Facebook todavía no está vinculada.")}><Text style={styles.profileFacebookIcon}>f</Text></TouchableOpacity>
+                    <TouchableOpacity accessibilityRole="link" accessibilityLabel="Instagram de LaburApp" style={styles.profileSocialButton} onPress={() => setRequested("La cuenta oficial de Instagram todavía no está vinculada.")}><View style={styles.profileInstagramIcon}><View style={styles.profileInstagramLens} /><View style={styles.profileInstagramDot} /></View></TouchableOpacity>
+                  </View>
+                </View>
+                {session && session.role !== "admin" && <View style={styles.profileFooterColumn}>
+                  <View style={styles.thanksCard}>
+                    <Text style={styles.thanksTitle}>Acompañá a la comunidad</Text>
+                    <Text style={styles.thanksCopy}>Aporte voluntario del 1% por trabajo terminado.</Text>
+                    <TouchableOpacity accessibilityRole="button" style={styles.thanksButton} onPress={() => { setContributionError(""); setThanksModalVisible(true); }}><Text style={styles.thanksButtonText}>Acompañanos</Text></TouchableOpacity>
+                  </View>
+                </View>}
+              </View>
               <Text style={styles.profileLegalCaption}>Servicios locales, acuerdos claros.</Text>
+              <TouchableOpacity accessibilityRole="link" onPress={() => void openExternalUrl("https://www.flaticon.com/free-icon/qr-code_2678167")}>
+                <Text style={styles.qrAttribution}>Ícono QR: mim_studio / Flaticon ↗</Text>
+              </TouchableOpacity>
             </View>
           </View>
         )}
       </ScrollView>
       {requested && (
         <View style={styles.toast}>
-          <Text style={styles.toastText}>{requested}</Text>
+          <Text numberOfLines={2} style={styles.toastText}>{requested}</Text>
           <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar notificación" onPress={() => setRequested(null)}>
             <Text style={styles.toastClose}>Cerrar</Text>
           </TouchableOpacity>
@@ -5739,7 +5974,7 @@ export default function Home() {
       )}
       {undoCancellation && (
         <View style={styles.undoToast}>
-          <Text style={styles.undoToastText}>{undoCancellation.message}</Text>
+          <Text numberOfLines={2} style={styles.undoToastText}>{undoCancellation.message}</Text>
           <TouchableOpacity accessibilityRole="button" onPress={() => void undoRequestCancellation()}>
             <Text style={styles.undoToastAction}>Deshacer</Text>
           </TouchableOpacity>
@@ -5796,14 +6031,40 @@ export default function Home() {
               </ScrollView>
             ) : infoPage === "certifications" ? (
               <View style={styles.certificationInfoContent}>
-                <Text style={styles.modalTitle}>Certificaciones e insignias</Text>
-                <Text style={styles.infoPageBody}>Podés solicitar una revisión humana de identidad y documentación profesional. Cada insignia indica qué se revisó; no reemplaza la decisión de cada persona al contratar.</Text>
-                <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => void composeCertificationEmail()}><Text style={styles.secondaryText}>Solicitar revisión por email</Text></TouchableOpacity>
+                <Text style={styles.modalTitle}>Certificación LaburApp</Text>
+                <Text style={styles.infoPageBody}>Es una insignia especial que otorga LaburApp después de una verificación humana adicional del perfil y de la documentación correspondiente. No se obtiene automáticamente por subir archivos ni por contratar Premium.</Text>
+                <Text style={styles.infoPageBody}>Esta evaluación tiene un costo adicional. Para conocer los requisitos, el alcance y el precio antes de decidir, escribinos a certificaciones@laburapp.work.</Text>
+                <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => void composeCertificationEmail()}><Text style={styles.secondaryText}>Solicitar información por correo</Text></TouchableOpacity>
               </View>
             ) : (
               <View style={styles.certificationInfoContent}><Text style={styles.modalTitle}>{infoPages[infoPage].title}</Text><Text style={styles.infoPageBody}>{infoPages[infoPage].body}</Text></View>
             )}
           </View>}
+        </View>
+      </AppModal>
+      <AppModal visible={identityModalVisible} onRequestClose={() => setIdentityModalVisible(false)}>
+        <View style={styles.modalBackdrop}>
+          <ScrollView style={styles.thanksModal} contentContainerStyle={styles.thanksModalContent} keyboardShouldPersistTaps="handled">
+            <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar carga de identidad" style={styles.modalClose} onPress={() => setIdentityModalVisible(false)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
+            <Text style={styles.panelEyebrow}>VERIFICACIÓN PRIVADA</Text>
+            <Text style={styles.modalTitle}>Documento de identidad</Text>
+            <Text style={styles.modalCopy}>Subí una foto legible del frente y otra del dorso, desde tu galería o usando la cámara. Sólo vos y el equipo de revisión pueden verlas. La insignia no se activa automáticamente.</Text>
+            {([
+              ["front", "Frente", identityFrontUri, identityFrontCredential],
+              ["back", "Dorso", identityBackUri, identityBackCredential],
+            ] as const).map(([side, label, uri, credential]) => <View key={side} style={styles.identitySideCard}>
+              <Text style={styles.usageStepTitle}>{label}</Text>
+              {uri ? <Image accessibilityLabel={`Vista previa de ${label.toLowerCase()}`} source={{ uri }} resizeMode="contain" style={styles.identityPreview} />
+                : <Text style={styles.usageStepBody}>{credential?.privatePath ? "Archivo enviado · podés reemplazarlo" : "Todavía falta esta foto"}</Text>}
+              <View style={styles.identityActions}>
+                <TouchableOpacity accessibilityRole="button" style={styles.identityActionButton} disabled={identityUploadBusy} onPress={() => void pickIdentityDocument(side, "camera")}><Text style={styles.cardLink}>Usar cámara</Text></TouchableOpacity>
+                <TouchableOpacity accessibilityRole="button" style={styles.identityActionButton} disabled={identityUploadBusy} onPress={() => void pickIdentityDocument(side, "gallery")}><Text style={styles.cardLink}>Elegir foto</Text></TouchableOpacity>
+              </View>
+            </View>)}
+            {!!identityUploadError && <Text style={styles.modalError}>{identityUploadError}</Text>}
+            <TouchableOpacity accessibilityRole="button" disabled={identityUploadBusy || ((!identityFrontUri && !identityFrontCredential?.privatePath) || (!identityBackUri && !identityBackCredential?.privatePath))} style={[styles.modalPrimary, identityUploadBusy && styles.buttonDisabled]} onPress={() => void saveIdentityDocuments()}><Text style={styles.modalPrimaryText}>{identityUploadBusy ? "Enviando…" : "Enviar para revisión"}</Text></TouchableOpacity>
+            <Text style={styles.contributionNote}>Los originales se conservan por un plazo operativo máximo de 5 días, según la política vigente. No compartas estas fotos por chat.</Text>
+          </ScrollView>
         </View>
       </AppModal>
       <AppModal visible={thanksModalVisible} onRequestClose={() => setThanksModalVisible(false)}>
@@ -5825,7 +6086,7 @@ export default function Home() {
           </ScrollView>
         </View>
       </AppModal>
-      <AppModal visible={publicProfileProvider !== null} onRequestClose={() => setPublicProfileProvider(null)}>
+      <AppModal visible={publicProfileProvider !== null && !ownPublicProfileOpen} onRequestClose={() => setPublicProfileProvider(null)}>
         <View style={styles.modalBackdrop}>
           {publicProfileProvider && <ScrollView style={styles.publicProfileCard} contentContainerStyle={styles.publicProfileContent}>
             <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar perfil profesional" style={styles.modalClose} onPress={() => setPublicProfileProvider(null)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
@@ -5834,6 +6095,7 @@ export default function Home() {
               <View style={styles.publicProfileIdentity}><View style={styles.verifiedNameRow}><Text style={styles.publicProfileName}>{publicProfileProvider.name}</Text><Text accessibilityLabel="Perfil verificado" style={styles.verifiedIcon}>✓</Text></View><Text style={styles.publicProfileTrade}>{publicProfileProvider.trade} · {publicProfileProvider.city}</Text><Text style={styles.publicProfileSkills}>{publicProfileProvider.skills}</Text></View>
             </View>
             <View style={styles.publicProfileStats}><View style={styles.publicProfileStat}><Text style={styles.publicProfileStatValue}>★ {publicProfileProvider.rating}</Text><Text style={styles.publicProfileStatLabel}>calificación</Text></View><View style={styles.publicProfileStat}><Text style={styles.publicProfileStatValue}>{publicProfileProvider.jobs}</Text><Text style={styles.publicProfileStatLabel}>trabajos</Text></View><View style={styles.publicProfileStat}><Text style={styles.publicProfileStatValue}>✓</Text><Text style={styles.publicProfileStatLabel}>{publicProfileProvider.badge}</Text></View></View>
+            {!!publicProfileProvider.providerId && <TouchableOpacity accessibilityRole="button" disabled={followBusy} style={styles.publicProfileFollowButton} onPress={() => void togglePublicProviderFollow()}><Text style={styles.publicProfileFollowText}>{followBusy ? "Actualizando…" : followingPublicProvider ? "✓ Siguiendo · dejar de seguir" : "+ Seguir al profesional"}</Text></TouchableOpacity>}
             {selectedPublicDetails && <>
               <View style={styles.publicProfileSection}>
                 <Text style={styles.panelEyebrow}>SOBRE EL PROFESIONAL</Text>
@@ -6272,6 +6534,7 @@ export default function Home() {
               placeholderTextColor="#71818B"
               style={styles.modalInput}
             />
+            <Text style={styles.fieldExamples}>Ejemplos: “la semana del 12” · “antes del fin de semana”</Text>
             <TextInput
               accessibilityLabel="Fecha estimada"
               value={quoteDate}
@@ -6353,7 +6616,19 @@ export default function Home() {
             {!!acceptQuoteRequest?.quote && (
               <Text style={styles.confirmAmount}>${acceptQuoteRequest.quote.amount.toLocaleString("es-AR")}</Text>
             )}
-            <TouchableOpacity accessibilityRole="button" style={styles.modalPrimary} onPress={() => acceptQuoteRequest && void acceptQuote(acceptQuoteRequest)}>
+            <Text style={styles.confirmChecklistTitle}>Confirmá que ya quedó acordado en el chat:</Text>
+            {([
+              ["day", "Día acordado"],
+              ["time", "Horario acordado"],
+              ["address", "Dirección exacta acordada"],
+            ] as const).map(([key, label]) => {
+              const confirmed = acceptedQuoteDetails[key];
+              return <View key={key} style={[styles.confirmChecklistRow, confirmed ? styles.confirmChecklistOk : styles.confirmChecklistPending]}>
+                <Text style={styles.confirmChecklistIcon}>{confirmed ? "✓" : "!"}</Text>
+                <Text style={styles.confirmChecklistText}>{label}{confirmed ? "" : " · falta mencionarlo en el chat"}</Text>
+              </View>;
+            })}
+            <TouchableOpacity accessibilityRole="button" disabled={!canAcceptQuote} style={[styles.modalPrimary, !canAcceptQuote && styles.buttonDisabled]} onPress={() => acceptQuoteRequest && void acceptQuote(acceptQuoteRequest)}>
               <Text style={styles.modalPrimaryText}>Sí, acepto</Text>
             </TouchableOpacity>
             <TouchableOpacity accessibilityRole="button" style={styles.secondaryButton} onPress={() => setAcceptQuoteRequestId(null)}>
@@ -6373,6 +6648,7 @@ export default function Home() {
             <Text style={styles.modalCopy}>El cliente debe abrir el botón QR de su menú y escanearlo. Vence en 15 minutos y sólo puede usarse una vez.</Text>
             {completionQr && <View style={styles.qrCodeSurface}><QRCode value={completionQr.value} size={220} backgroundColor="#FFFFFF" color="#063C78" /></View>}
             <View style={styles.qrShortCodeRow}>
+              <View style={styles.qrCodeBalance} />
               <Text selectable style={styles.qrShortCode}>{completionQr?.value.match(/[?&]token=([^&]+)/)?.[1] ?? ""}</Text>
               <TouchableOpacity accessibilityRole="button" accessibilityLabel="Copiar código de finalización" style={styles.qrCopyButton} onPress={() => {
                 const shortCode = completionQr?.value.match(/[?&]token=([^&]+)/)?.[1];
@@ -6383,7 +6659,7 @@ export default function Home() {
                 });
               }}><Text style={styles.qrCopyIcon}>{completionQrCopied ? "✓" : "▢"}</Text></TouchableOpacity>
             </View>
-            <Text style={styles.privacyHint}>El código no contiene datos personales ni precios.</Text>
+            <Text style={[styles.privacyHint, styles.qrPrivacyHint]}>El código no contiene datos personales ni precios.</Text>
           </View>
         </View>
       </AppModal>
@@ -6480,6 +6756,11 @@ export default function Home() {
         onRequestClose={() => setChatRequestId(null)}
       >
         <View style={styles.modalBackdrop}>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === "ios" ? "padding" : "height"}
+            keyboardVerticalOffset={Platform.OS === "ios" ? 12 : 0}
+            style={styles.keyboardModal}
+          >
           <View style={styles.modalCard}>
             <TouchableOpacity
               accessibilityRole="button"
@@ -6565,6 +6846,7 @@ export default function Home() {
               <Text style={styles.modalPrimaryText}>{chatBusy ? "Enviando…" : "Enviar mensaje"}</Text>
             </TouchableOpacity>
           </View>
+          </KeyboardAvoidingView>
         </View>
       </AppModal>
       <AppModal
@@ -7304,8 +7586,7 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
       marginTop: 8,
     },
     accountIdentity: { flexDirection: "row", alignItems: "flex-start", minWidth: 0 },
-    accountActions: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", flexWrap: "wrap", gap: 10, marginTop: 12, paddingTop: 12, borderTopWidth: 1, borderTopColor: colors.line },
-    accountPhotoButton: { flexGrow: 1, minWidth: 150 },
+    accountNameRow: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", gap: 6 },
     profileAvatar: {
       width: 56,
       height: 56,
@@ -7357,42 +7638,10 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     followersButton: {
       alignItems: "center",
       justifyContent: "center",
-      paddingHorizontal: 8,
+      minWidth: 47,
     },
     followersCount: { color: colors.navy, fontSize: 17, fontWeight: "900" },
     followersLabel: { color: colors.blue, fontSize: 9, fontWeight: "800" },
-    followersPanel: {
-      backgroundColor: colors.surface,
-      borderWidth: 1,
-      borderColor: colors.line,
-      borderRadius: 15,
-      padding: 14,
-      marginTop: 10,
-    },
-    followerRow: {
-      minHeight: 45,
-      flexDirection: "row",
-      alignItems: "center",
-      borderTopWidth: 1,
-      borderTopColor: colors.line,
-    },
-    followerAvatar: {
-      width: 29,
-      height: 29,
-      borderRadius: 15,
-      backgroundColor: colors.avatar,
-      alignItems: "center",
-      justifyContent: "center",
-      marginRight: 9,
-    },
-    followerInitial: { color: colors.navy, fontWeight: "900" },
-    followerName: {
-      flex: 1,
-      color: colors.navy,
-      fontSize: 12,
-      fontWeight: "800",
-    },
-    followingBadge: { color: colors.green, fontSize: 9, fontWeight: "900" },
     providerPanel: {
       backgroundColor: colors.surface,
       borderWidth: 1,
@@ -7401,6 +7650,12 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
       padding: 17,
       marginTop: 14,
     },
+    subscriptionStatusRow: { flexDirection: "row", alignItems: "center", gap: 9 },
+    subscriptionPlanRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginTop: 8 },
+    subscriptionCompareButton: { minHeight: 40, justifyContent: "center", borderColor: colors.blue, borderWidth: 1, borderRadius: 10, paddingHorizontal: 12 },
+    subscriptionCompareText: { color: colors.blue, fontSize: 12, fontWeight: "800" },
+    publicProfileFollowButton: { minHeight: 44, borderColor: colors.blue, borderWidth: 1, borderRadius: 11, alignItems: "center", justifyContent: "center", marginTop: 14, paddingHorizontal: 12 },
+    publicProfileFollowText: { color: colors.blue, fontSize: 13, fontWeight: "800" },
     certificationCardIcon: { width: 31, height: 31, borderRadius: 16, overflow: "hidden", color: "#FFFFFF", backgroundColor: colors.green, textAlign: "center", lineHeight: 31, fontSize: 17, fontWeight: "900" },
     panelEyebrow: { color: colors.stone, fontSize: 11, fontWeight: "900" },
     providerHeaderActions: {
@@ -7754,17 +8009,22 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     adminLinkArrow: { color: colors.blue, fontSize: 25 },
     toast: {
       position: "absolute",
-      bottom: 72,
       left: 18,
       right: 18,
+      top: safeTop + 8,
+      zIndex: 200,
+      elevation: 20,
       backgroundColor: colors.green,
       borderRadius: 14,
-      padding: 14,
+      minHeight: 36,
+      maxHeight: 56,
+      paddingHorizontal: 11,
+      paddingVertical: 7,
       flexDirection: "row",
       justifyContent: "space-between",
       alignItems: "center",
     },
-    toastText: { color: "white", fontWeight: "700", flex: 1 },
+    toastText: { color: "white", fontWeight: "700", fontSize: 12, lineHeight: 16, flex: 1 },
     toastClose: {
       color: "white",
       textDecorationLine: "underline",
@@ -7772,19 +8032,24 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     },
     undoToast: {
       position: "absolute",
-      bottom: 72,
       left: 18,
       right: 18,
+      top: safeTop + 8,
+      zIndex: 200,
+      elevation: 20,
       backgroundColor: colors.navy,
       borderWidth: 1,
       borderColor: colors.orange,
       borderRadius: 14,
-      padding: 14,
+      minHeight: 36,
+      maxHeight: 56,
+      paddingHorizontal: 11,
+      paddingVertical: 7,
       flexDirection: "row",
       justifyContent: "space-between",
       alignItems: "center",
     },
-    undoToastText: { color: colors.snow, fontWeight: "800", flex: 1 },
+    undoToastText: { color: colors.snow, fontWeight: "800", fontSize: 12, lineHeight: 16, flex: 1 },
     undoToastAction: { color: colors.orange, fontWeight: "900", marginLeft: 14, textDecorationLine: "underline" },
     nav: {
       position: "absolute",
@@ -7810,6 +8075,10 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     usageGuideScroll: { flexGrow: 0, maxHeight: "100%", width: "100%" },
     usageGuideContent: { padding: 22, paddingBottom: 34 },
     certificationInfoContent: { padding: 22, paddingTop: 34, paddingBottom: 30 },
+    identitySideCard: { borderWidth: 1, borderColor: colors.line, backgroundColor: colors.raised, borderRadius: 13, padding: 12, marginTop: 12, gap: 8 },
+    identityPreview: { width: "100%", height: 140, backgroundColor: colors.surface, borderRadius: 9 },
+    identityActions: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+    identityActionButton: { minHeight: 44, borderWidth: 1, borderColor: colors.blue, borderRadius: 10, paddingHorizontal: 12, justifyContent: "center" },
     usageGroupTitle: { color: colors.orange, fontSize: 11, fontWeight: "900", letterSpacing: 0.8, marginTop: 19, marginBottom: 8 },
     usageStepCard: { flexDirection: "row", alignItems: "flex-start", gap: 11, padding: 12, marginTop: 7, borderRadius: 14, borderWidth: 1, borderColor: colors.line, backgroundColor: colors.raised },
     usageStepIcon: { width: 34, height: 34, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: colors.avatar },
@@ -7820,9 +8089,12 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     usageHighlightCard: { borderRadius: 14, padding: 13, marginTop: 8, backgroundColor: colors.raised, borderWidth: 1, borderColor: colors.line },
     usageCardLink: { alignSelf: "flex-start", marginTop: 9 },
     usageContact: { color: colors.blue, fontSize: 12, fontWeight: "800", marginTop: 15 },
-    profileLegalFooter: { width: "100%", borderTopWidth: 1, borderTopColor: colors.line, marginTop: 26, paddingTop: 20, paddingBottom: 12, gap: 12 },
+    profileLegalFooter: { width: "100%", borderTopWidth: 1, borderTopColor: colors.line, marginTop: 26, paddingTop: 20, paddingBottom: 12, gap: 18 },
+    profileFooterColumns: { width: "100%", flexDirection: "row", alignItems: "flex-start", gap: 12 },
+    profileFooterColumn: { flex: 1, minWidth: 0, alignItems: "flex-start" },
+    profileFooterLinkButton: { minHeight: 36, justifyContent: "center", paddingVertical: 5 },
     profileLegalLinks: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-    profileLegalLink: { color: colors.blue, fontSize: 13, fontWeight: "800", textDecorationLine: "underline" },
+    profileLegalLink: { color: colors.blue, fontSize: 12, lineHeight: 17, fontWeight: "800", textDecorationLine: "underline" },
     profileSocialRow: { flexDirection: "row", alignItems: "center", gap: 7, marginTop: 2 },
     profileSocialButton: { width: 27, height: 27, alignItems: "center", justifyContent: "center" },
     profileFacebookIcon: { color: colors.blue, fontSize: 20, lineHeight: 23, fontWeight: "900" },
@@ -7830,7 +8102,8 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     profileInstagramLens: { width: 6, height: 6, borderRadius: 3, borderWidth: 1.5, borderColor: colors.blue },
     profileInstagramDot: { position: "absolute", width: 2.5, height: 2.5, borderRadius: 2, backgroundColor: colors.blue, top: 2, right: 2 },
     profileLegalCaption: { color: colors.stone, fontSize: 12 },
-    thanksCard: { width: "100%", borderRadius: 15, padding: 14, marginTop: 12, backgroundColor: colors.successSurface, borderWidth: 1, borderColor: colors.green, gap: 8 },
+    qrAttribution: { color: colors.stone, fontSize: 10, textDecorationLine: "underline" },
+    thanksCard: { width: "100%", borderRadius: 15, padding: 11, backgroundColor: colors.successSurface, borderWidth: 1, borderColor: colors.green, gap: 7 },
     thanksTitle: { color: colors.navy, fontSize: 14, fontWeight: "900" },
     thanksCopy: { color: colors.stone, fontSize: 11, lineHeight: 16 },
     thanksButton: { minHeight: 45, borderRadius: 12, paddingHorizontal: 16, alignItems: "center", justifyContent: "center", backgroundColor: colors.green },
@@ -7841,7 +8114,8 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     contributionAliasRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 6, marginBottom: 7 },
     contributionAlias: { color: colors.navy, fontSize: 17, fontWeight: "900" },
     contributionNote: { color: colors.stone, fontSize: 10, lineHeight: 15, marginTop: 11 },
-    qrShortCodeRow: { maxWidth: "100%", alignSelf: "center", flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 9, marginTop: 12, paddingHorizontal: 6 },
+    qrShortCodeRow: { width: "100%", flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 9, marginTop: 12 },
+    qrCodeBalance: { width: 30 },
     qrCopyButton: { width: 30, height: 30, borderRadius: 8, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.blue, backgroundColor: colors.raised },
     qrCopyIcon: { color: colors.blue, fontSize: 18, lineHeight: 21, fontWeight: "900" },
     publicProfileCard: { width: "100%", maxWidth: 680, maxHeight: "92%", alignSelf: "center", backgroundColor: colors.surface, borderTopLeftRadius: 24, borderTopRightRadius: 24 },
@@ -7932,6 +8206,7 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
       marginTop: 6,
       marginBottom: 14,
     },
+    keyboardModal: { width: "100%", alignItems: "center", justifyContent: "center" },
     modalInput: {
       minHeight: 48,
       borderWidth: 1,
@@ -7987,6 +8262,7 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
       transform: [{ rotate: "45deg" }],
     },
     modalFieldLabel: { color: colors.navy, fontSize: 12, fontWeight: "900", marginBottom: 7 },
+    fieldExamples: { color: colors.stone, fontSize: 10, lineHeight: 14, marginTop: -5, marginBottom: 9 },
     availabilityHint: { color: colors.green, fontSize: 11, fontWeight: "800", marginTop: -3, marginBottom: 8 },
     quoteTimeRow: { flexDirection: "row", gap: 9, marginBottom: 10, zIndex: 4 },
     quoteTimeField: { flex: 1 },
@@ -8218,10 +8494,10 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     },
     chatEmptyTitle: { color: colors.navy, fontWeight: "900", marginBottom: 6 },
     messageBubble: { maxWidth: "88%", borderRadius: 13, padding: 11 },
-    messageClient: { alignSelf: "flex-end", backgroundColor: colors.avatar },
+    messageClient: { alignSelf: "flex-end", backgroundColor: "#B7F0D4" },
     messageProvider: {
       alignSelf: "flex-start",
-      backgroundColor: colors.raised,
+      backgroundColor: "#9ED2F5",
     },
     messageSystem: {
       alignSelf: "center",
@@ -8275,6 +8551,12 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
       alignItems: "stretch",
     },
     confirmIcon: { color: colors.green, fontSize: 42, fontWeight: "900", textAlign: "center", marginBottom: 8 },
+    confirmChecklistTitle: { color: colors.navy, fontSize: 12, fontWeight: "900", marginTop: 4, marginBottom: 8 },
+    confirmChecklistRow: { minHeight: 34, borderRadius: 10, borderWidth: 1, paddingHorizontal: 10, flexDirection: "row", alignItems: "center", marginBottom: 6 },
+    confirmChecklistOk: { borderColor: colors.green, backgroundColor: "#DDF8EA" },
+    confirmChecklistPending: { borderColor: colors.orange, backgroundColor: "#FFF2DF" },
+    confirmChecklistIcon: { width: 22, color: colors.green, fontWeight: "900", fontSize: 15 },
+    confirmChecklistText: { color: colors.navy, fontSize: 11, fontWeight: "800", flex: 1 },
     confirmAmount: { color: colors.navy, fontSize: 30, fontWeight: "900", textAlign: "center", marginVertical: 15 },
     receiptDetails: { borderRadius: 13, backgroundColor: colors.raised, padding: 13, marginVertical: 14, gap: 7 },
     receiptId: { color: colors.navy, fontSize: 10, fontWeight: "900" },
@@ -8290,7 +8572,8 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
       alignSelf: "center",
     },
     qrCodeSurface: { backgroundColor: "white", borderRadius: 18, padding: 18, alignSelf: "center", marginVertical: 16 },
-    qrShortCode: { color: colors.navy, fontSize: 16, fontWeight: "900", letterSpacing: 2, textAlign: "center", marginBottom: 12 },
+    qrShortCode: { flex: 1, color: colors.navy, fontSize: 16, fontWeight: "900", letterSpacing: 2, textAlign: "center" },
+    qrPrivacyHint: { textAlign: "center", marginTop: 8 },
     qrScannerCard: { borderRadius: 18, overflow: "hidden", borderWidth: 1, borderColor: colors.line, backgroundColor: colors.surface, marginBottom: 14 },
     qrPermissionBox: { minHeight: 300, padding: 24, alignItems: "center", justifyContent: "center" },
     cameraPermissionIcon: { color: colors.blue, fontSize: 34, fontWeight: "900", marginBottom: 14 },
