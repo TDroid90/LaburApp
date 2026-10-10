@@ -736,6 +736,8 @@ type AdminSubscriptionRequest = {
   amountArs: number;
   receiptPath: string;
   createdAt: string;
+  submissionName: string | null;
+  contactWhatsapp: string | null;
 };
 
 const CONTACT_WARNING = "No está permitido compartir teléfonos de contacto o emails.";
@@ -785,7 +787,7 @@ async function openExternalUrl(url: string) {
 
 function premiumExternalUrl(accountPublicId: string | null) {
   const account = accountPublicId ? `?account=${encodeURIComponent(accountPublicId)}` : "";
-  return `https://alsema.world/#premium${account}`;
+  return `https://alsema.world/laburapp${account}`;
 }
 const legalPageUrls: Record<LegalPageKey, string> = {
   terms: "https://laburapp.work/legal/terms",
@@ -1359,9 +1361,11 @@ export default function Home() {
   const [notificationPermissionBusy, setNotificationPermissionBusy] = useState(false);
   const pushTokenRef = useRef<string | null>(null);
   const [adminPremiumId, setAdminPremiumId] = useState("");
-  const [adminPremiumAccount, setAdminPremiumAccount] = useState<{ id: string; name: string; publicId: string; city: string | null; premium: boolean; endsAt?: string; pendingMonths?: number; receiptUrl?: string } | null>(null);
+  const [adminPremiumAccount, setAdminPremiumAccount] = useState<{ id: string; name: string; publicId: string; city: string | null; premium: boolean; endsAt?: string; pendingMonths?: number; receiptUrl?: string; submissionName?: string; contactWhatsapp?: string } | null>(null);
   const [adminPremiumBusy, setAdminPremiumBusy] = useState(false);
   const [adminPremiumError, setAdminPremiumError] = useState("");
+  const [adminPremiumMonths, setAdminPremiumMonths] = useState<1 | 3 | 6 | 12>(1);
+  const [adminPremiumMonthsOpen, setAdminPremiumMonthsOpen] = useState(false);
   const [adminSubscriptionRequests, setAdminSubscriptionRequests] = useState<AdminSubscriptionRequest[]>([]);
   const [adminSubscriptionsLoading, setAdminSubscriptionsLoading] = useState(true);
   const [adminSubscriptionsError, setAdminSubscriptionsError] = useState("");
@@ -2331,7 +2335,7 @@ export default function Home() {
     if (!supabase || session?.role !== "admin" || isDemoSession) return;
     if (!quiet) setAdminSubscriptionsLoading(true);
     const result = await supabase.from("subscription_requests")
-      .select("id, client_id, plan_months, amount_ars, receipt_path, created_at")
+      .select("id, client_id, plan_months, amount_ars, receipt_path, created_at, submission_name, contact_whatsapp")
       .eq("status", "pending").order("created_at", { ascending: true }).limit(50);
     if (result.error) {
       setAdminSubscriptionsError("No pudimos cargar los comprobantes. Reintentá.");
@@ -2358,6 +2362,7 @@ export default function Home() {
         name: profile?.full_name ?? "Cuenta sin nombre",
         planMonths: row.plan_months, amountArs: row.amount_ars,
         receiptPath: row.receipt_path, createdAt: row.created_at,
+        submissionName: row.submission_name ?? null, contactWhatsapp: row.contact_whatsapp ?? null,
       };
     }));
     setAdminSubscriptionsError("");
@@ -4389,16 +4394,20 @@ export default function Home() {
       const account = await supabase.from("profiles").select("id, public_id, full_name, city").eq("public_id", normalizedId).maybeSingle();
       if (account.error || !account.data) throw new Error("NOT_FOUND");
       const [membership, requestsResult] = await Promise.all([
-        supabase.from("client_memberships").select("plan_code, status, current_period_ends_at").eq("client_id", account.data.id).maybeSingle(),
-        supabase.from("subscription_requests").select("plan_months, receipt_path").eq("client_id", account.data.id).eq("status", "pending").order("created_at", { ascending: false }).limit(1),
+        supabase.from("client_memberships").select("plan_code, status, current_period_ends_at, active_plan_months").eq("client_id", account.data.id).maybeSingle(),
+        supabase.from("subscription_requests").select("plan_months, receipt_path, submission_name, contact_whatsapp").eq("client_id", account.data.id).eq("status", "pending").order("created_at", { ascending: false }).limit(1),
       ]);
       const pending = requestsResult.data?.[0];
+      const selectedMonths = pending?.plan_months ?? membership.data?.active_plan_months;
+      if (selectedMonths === 1 || selectedMonths === 3 || selectedMonths === 6 || selectedMonths === 12) setAdminPremiumMonths(selectedMonths);
       const signed = pending?.receipt_path ? await supabase.storage.from("private-receipts").createSignedUrl(pending.receipt_path, 600) : null;
       setAdminPremiumAccount({ id: account.data.id, name: account.data.full_name, publicId: account.data.public_id, city: account.data.city,
         premium: membership.data?.plan_code === "plus" && membership.data?.status === "active" && (!membership.data.current_period_ends_at || new Date(membership.data.current_period_ends_at).getTime() > Date.now()),
         endsAt: membership.data?.current_period_ends_at ?? undefined,
         pendingMonths: pending?.plan_months,
         receiptUrl: signed?.data?.signedUrl,
+        submissionName: pending?.submission_name ?? undefined,
+        contactWhatsapp: pending?.contact_whatsapp ?? undefined,
       });
     } catch { setAdminPremiumError("No encontramos ese ID. Revisá el identificador de la cuenta."); }
     finally { setAdminPremiumBusy(false); }
@@ -4408,8 +4417,8 @@ export default function Home() {
     if (!supabase || session?.role !== "admin" || !adminPremiumAccount) return;
     setAdminPremiumBusy(true);
     setAdminPremiumError("");
-    const result = await supabase.rpc("admin_set_premium_by_public_id", {
-      target_public_id: adminPremiumAccount.publicId, enable_premium: !adminPremiumAccount.premium,
+    const result = await supabase.rpc("admin_set_premium_by_public_id_for_months", {
+      target_public_id: adminPremiumAccount.publicId, enable_premium: !adminPremiumAccount.premium, selected_plan_months: adminPremiumMonths,
     });
     setAdminPremiumBusy(false);
     if (result.error) return setAdminPremiumError("No pudimos modificar Premium. Verificá la transferencia y reintentá.");
@@ -5509,8 +5518,9 @@ export default function Home() {
                 {!!adminSubscriptionsError && <Text style={styles.modalError}>{adminSubscriptionsError}</Text>}
                 {!adminSubscriptionsLoading && !adminSubscriptionRequests.length && <Text style={styles.adminModuleCopy}>No hay comprobantes pendientes.</Text>}
                 {adminSubscriptionRequests.map((item) => <View key={item.id} style={styles.adminSubscriptionItem}>
-                  <Text style={styles.workProvider}>{item.name} · {displayPublicId(item.publicId, item.city)}</Text>
+                  <Text style={styles.workProvider}>{item.submissionName || item.name} · {displayPublicId(item.publicId, item.city)}</Text>
                   <Text style={styles.adminModuleCopy}>{item.planMonths} {item.planMonths === 1 ? "mes" : "meses"} · ${item.amountArs.toLocaleString("es-AR")} · Recibido {new Date(item.createdAt).toLocaleString("es-AR")}</Text>
+                  {!!item.contactWhatsapp && <Text style={styles.adminModuleCopy}>WhatsApp de contacto: {item.contactWhatsapp}</Text>}
                   <View style={styles.adminSubscriptionActions}>
                     <TouchableOpacity accessibilityRole="link" style={styles.adminRefresh} onPress={() => void openAdminSubscriptionReceipt(item.receiptPath)}><Text style={styles.adminRefreshText}>Ver comprobante ↗</Text></TouchableOpacity>
                     <TouchableOpacity accessibilityRole="button" style={styles.adminRefresh} onPress={() => void lookupPremiumAccount(item.publicId)}><Text style={styles.adminRefreshText}>Revisar y habilitar</Text></TouchableOpacity>
@@ -5525,9 +5535,16 @@ export default function Home() {
               {!!adminPremiumError && <Text style={styles.modalError}>{adminPremiumError}</Text>}
               {adminPremiumAccount && <View style={styles.workCard}>
                 <Text style={styles.workProvider}>{adminPremiumAccount.name} · {displayPublicId(adminPremiumAccount.publicId, adminPremiumAccount.city)}</Text>
+                {!!adminPremiumAccount.submissionName && <Text style={styles.adminModuleCopy}>Solicitó: {adminPremiumAccount.submissionName}</Text>}
+                {!!adminPremiumAccount.contactWhatsapp && <Text style={styles.adminModuleCopy}>WhatsApp de contacto: {adminPremiumAccount.contactWhatsapp}</Text>}
                 <Text style={styles.adminModuleCopy}>{adminPremiumAccount.pendingMonths ? `Transferencia pendiente · plan de ${adminPremiumAccount.pendingMonths} meses` : "Sin comprobante pendiente"}</Text>
                 {!!adminPremiumAccount.receiptUrl && <TouchableOpacity accessibilityRole="link" onPress={() => void openExternalUrl(adminPremiumAccount.receiptUrl!)}><Text style={styles.cardLink}>Ver comprobante privado ↗</Text></TouchableOpacity>}
                 {!!adminPremiumAccount.endsAt && <Text style={styles.adminModuleCopy}>Vence: {new Date(adminPremiumAccount.endsAt).toLocaleDateString("es-AR")}</Text>}
+                <Text style={styles.adminModuleCopy}>Capa Premium a habilitar</Text>
+                <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded: adminPremiumMonthsOpen }} style={styles.premiumTierSelect} onPress={() => setAdminPremiumMonthsOpen((current) => !current)}>
+                  <Text style={styles.premiumTierSelectText}>{adminPremiumMonths} {adminPremiumMonths === 1 ? "mes" : "meses"}</Text><Text style={styles.premiumTierSelectChevron}>{adminPremiumMonthsOpen ? "⌃" : "⌄"}</Text>
+                </TouchableOpacity>
+                {adminPremiumMonthsOpen && <View style={styles.premiumTierOptions}>{([1, 3, 6, 12] as const).map((months) => <TouchableOpacity key={months} accessibilityRole="radio" accessibilityState={{ selected: adminPremiumMonths === months }} style={styles.premiumTierOption} onPress={() => { setAdminPremiumMonths(months); setAdminPremiumMonthsOpen(false); }}><Text style={styles.premiumTierOptionText}>{months} {months === 1 ? "mes" : "meses"}</Text></TouchableOpacity>)}</View>}
                 <TouchableOpacity accessibilityRole="checkbox" accessibilityState={{ checked: adminPremiumAccount.premium, disabled: adminPremiumBusy }} disabled={adminPremiumBusy} style={styles.secondaryButton} onPress={() => void togglePremiumAccount()}><Text style={styles.secondaryText}>{adminPremiumAccount.premium ? "☑ PREMIUM? · habilitado" : "□ PREMIUM? · habilitar"}</Text></TouchableOpacity>
               </View>}
             </View>
@@ -8564,6 +8581,12 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     customQualityInput: { flex: 1, marginBottom: 0 },
     customQualityButton: { borderRadius: 12, borderWidth: 1, borderColor: colors.blue, paddingHorizontal: 13, paddingVertical: 12 },
     customQualityButtonText: { color: colors.blue, fontSize: 11, fontWeight: "900" },
+    premiumTierSelect: { minHeight: 42, borderRadius: 10, borderWidth: 1, borderColor: colors.blue, backgroundColor: colors.surfaceSoft, paddingHorizontal: 12, flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 4, marginBottom: 5 },
+    premiumTierSelectText: { color: colors.stone, fontSize: 12, fontWeight: "900" },
+    premiumTierSelectChevron: { color: colors.blue, fontSize: 16, fontWeight: "900" },
+    premiumTierOptions: { borderWidth: 1, borderColor: colors.line, borderRadius: 10, backgroundColor: colors.surface, marginBottom: 8, overflow: "hidden" },
+    premiumTierOption: { paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: colors.line },
+    premiumTierOptionText: { color: colors.stone, fontSize: 12, fontWeight: "800" },
     reviewQualitiesText: { color: colors.green, fontSize: 10, fontWeight: "900", marginTop: 6 },
     reviewMeta: { color: colors.stone, fontSize: 11, marginTop: 6 },
     appealReviewButton: { alignSelf: "flex-start", marginTop: 10, borderWidth: 1, borderColor: colors.blue, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8 },
