@@ -1426,7 +1426,6 @@ export default function Home() {
           setProviderProfile(null);
           setTab("Inicio");
           setAuthMode("login");
-          setRequested("Por seguridad, ingresá nuevamente después de 15 minutos fuera de la app.");
         }
       }
     });
@@ -1508,7 +1507,6 @@ export default function Home() {
         await supabase?.auth.signOut({ scope: "local" }).catch(() => undefined);
         restoredSession = null;
         setAuthMode("login");
-        setRequested("Por seguridad, ingresá nuevamente después de 15 minutos fuera de la app.");
       }
       void AsyncStorage.removeItem(BACKGROUND_SESSION_KEY);
       if (restoredSession?.email.endsWith("@laburapp.demo") && !demoAccessEnabled) {
