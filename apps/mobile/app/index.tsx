@@ -782,6 +782,11 @@ async function openExternalUrl(url: string) {
   }
   await Linking.openURL(url);
 }
+
+function premiumExternalUrl(accountPublicId: string | null) {
+  const account = accountPublicId ? `?account=${encodeURIComponent(accountPublicId)}` : "";
+  return `https://alsema.world/#premium${account}`;
+}
 const legalPageUrls: Record<LegalPageKey, string> = {
   terms: "https://laburapp.work/legal/terms",
   privacy: "https://laburapp.work/legal/privacy",
@@ -5693,7 +5698,7 @@ export default function Home() {
                 </View>
                 {session.role !== "admin" && <View style={styles.providerPanel}>
                   <View style={styles.subscriptionStatusRow}><Text style={styles.panelEyebrow}>SUSCRIPCIÓN</Text><Text style={styles.publishedBadge}>{clientPlan === "plus" ? "PREMIUM" : "GRATIS"}</Text></View>
-                  <View style={styles.subscriptionPlanRow}><Text style={styles.adminModuleTitle}>{clientPlan === "plus" ? "Premium activo" : "Conocé Premium"}</Text><TouchableOpacity accessibilityRole="button" style={styles.subscriptionCompareButton} onPress={() => { setSubscriptionError(""); setSubscriptionModal(true); }}><Text style={styles.subscriptionCompareText}>Compará planes</Text></TouchableOpacity></View>
+                  <View style={styles.subscriptionPlanRow}><Text style={styles.adminModuleTitle}>Conocé Premium</Text><TouchableOpacity accessibilityRole="link" style={styles.subscriptionCompareButton} onPress={() => void openExternalUrl(premiumExternalUrl(accountPublicId))}><Text style={styles.subscriptionCompareText}>Enlace externo ↗</Text></TouchableOpacity></View>
                   {!!membershipEndsAt && clientPlan === "plus" && <Text style={styles.adminModuleCopy}>Vigente hasta {new Date(membershipEndsAt).toLocaleDateString("es-AR")}.</Text>}
                 </View>}
                 {hasProviderProfile ? (
@@ -6022,8 +6027,8 @@ export default function Home() {
                 </View>
                 <View style={styles.usageHighlightCard}>
                   <Text style={styles.usageStepTitle}>Gratis y Premium</Text>
-                  <Text style={styles.usageStepBody}>Gratis: hasta 3 solicitudes de presupuesto por semana, 2 servicios de prestador y 3 trabajos publicados. Premium: 7 solicitudes semanales, más cualidades en reseñas, hasta 6 servicios y 6 trabajos destacados. El plan semestral ofrece los topes ampliados que se muestran en la pantalla de planes.</Text>
-                  <TouchableOpacity accessibilityRole="button" style={styles.usageCardLink} onPress={() => { setInfoPage(null); setSubscriptionError(""); setSubscriptionModal(true); }}><Text style={styles.cardLink}>Ver planes Premium</Text></TouchableOpacity>
+                  <Text style={styles.usageStepBody}>La cuenta gratuita permite usar las funciones principales de LaburApp. Si querés conocer las opciones Premium, consultá la información oficial en el sitio de Alsema.</Text>
+                  <TouchableOpacity accessibilityRole="link" style={styles.usageCardLink} onPress={() => void openExternalUrl(premiumExternalUrl(accountPublicId))}><Text style={styles.cardLink}>Conocé Premium en Alsema ↗</Text></TouchableOpacity>
                 </View>
                 <Text style={styles.usageContact}>Consultas y sugerencias: contacto@laburapp.work</Text>
               </ScrollView>
@@ -6679,42 +6684,10 @@ export default function Home() {
         <View style={styles.modalBackdrop}><View style={[styles.modalCard, styles.reviewModalCard]}>
           <TouchableOpacity accessibilityRole="button" accessibilityLabel="Cerrar suscripción" style={styles.modalClose} onPress={() => setSubscriptionModal(false)}><Text style={styles.modalCloseText}>×</Text></TouchableOpacity>
           <ScrollView style={styles.reviewModalScroll} contentContainerStyle={styles.reviewModalContent} keyboardShouldPersistTaps="handled">
-            <Text style={styles.modalTitle}>Suscripción Premium</Text>
-            <Text style={styles.modalCopy}>Elegí un período.{"\n"}El pago es únicamente por transferencia.{"\n"}Premium se activa después de verificar tu comprobante, puede demorar hasta 72 hs.</Text>
+            <Text style={styles.modalTitle}>Conocé Premium</Text>
+            <Text style={styles.modalCopy}>La información, condiciones y gestión de Premium están disponibles en el sitio oficial de Alsema.</Text>
             {!!accountPublicId && <Text style={styles.subscriptionAccountId}>Tu ID de cuenta: {displayPublicId(accountPublicId, accountCity)}</Text>}
-            <View style={styles.subscriptionBankCard}>
-              <View style={styles.subscriptionAliasRow}>
-                <Text style={styles.subscriptionAlias}>ALSEMA.BBVA <Text style={styles.subscriptionAliasCheck}>✓</Text></Text>
-                <TouchableOpacity accessibilityRole="button" accessibilityLabel="Copiar alias ALSEMA.BBVA" hitSlop={8} style={styles.subscriptionCopyButton} onPress={() => void Clipboard.setStringAsync("ALSEMA.BBVA").then(() => setAliasCopied(true))}>
-                  <Text style={styles.subscriptionCopyIcon}>{aliasCopied ? "✓" : "⧉"}</Text>
-                </TouchableOpacity>
-              </View>
-              {aliasCopied && <Text style={styles.subscriptionCopiedText}>Alias copiado</Text>}
-              <View style={styles.subscriptionBankDetails}>
-                <View>
-                  <Text style={styles.subscriptionBankDetailLabel}>Titular</Text>
-                  <Text style={styles.subscriptionBankDetailValue}>Albonio Sergio Martin</Text>
-                </View>
-                <View>
-                  <Text style={styles.subscriptionBankDetailLabel}>Número de cuenta</Text>
-                  <Text selectable style={styles.subscriptionBankDetailValue}>228-35388/8</Text>
-                </View>
-                <View>
-                  <Text style={styles.subscriptionBankDetailLabel}>CBU</Text>
-                  <Text selectable style={styles.subscriptionBankDetailValue}>0170228840000035538882</Text>
-                </View>
-              </View>
-              <Text style={styles.adminModuleCopy}>Antes de confirmar, comprobá en tu banco que el alias y los datos del destinatario sean correctos.</Text>
-            </View>
-            <View style={styles.subscriptionPlansRow}>{subscriptionPlans.map((plan) => <TouchableOpacity key={plan.months} accessibilityRole="radio" accessibilityLabel={`${plan.months} ${plan.months === 1 ? "mes" : "meses"}, ${plan.price.toLocaleString("es-AR")} pesos`} accessibilityState={{ selected: subscriptionMonths === plan.months }} style={[styles.subscriptionPlanChoice, subscriptionMonths === plan.months && styles.roleChoiceActive]} onPress={() => setSubscriptionMonths(plan.months)}><Text style={[styles.subscriptionPlanMonths, subscriptionMonths === plan.months && styles.roleChoiceTextActive]}>{plan.months} {plan.months === 1 ? "mes" : "meses"}</Text><Text style={styles.subscriptionPlanPrice}>${plan.price.toLocaleString("es-AR")}</Text></TouchableOpacity>)}</View>
-            <View accessibilityLiveRegion="polite" style={styles.selectedPlanCard}><Text style={styles.selectedPlanTitle}>{selectedSubscriptionPlan.title}</Text><Text style={styles.subscriptionBenefits}>{selectedSubscriptionPlan.benefits}</Text></View>
-            <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded: comparePlansOpen }} onPress={() => setComparePlansOpen((current) => !current)}><Text style={styles.comparePlansLink}>Compará planes {comparePlansOpen ? "⌃" : "⌄"}</Text></TouchableOpacity>
-            {comparePlansOpen && <View style={styles.planComparison}><Text style={styles.planComparisonText}>Gratis: hasta 3 presupuestos por semana, 3 trabajos publicados y 2 servicios de prestador.</Text><Text style={styles.planComparisonText}>Premium: 7 presupuestos semanales, + cualidades en reseñas. 6 servicios profesionales y 6 trabajos destacados.</Text></View>}
-            <Text style={styles.subscriptionReceiptReminder}>RECORDÁ ADJUNTAR EL COMPROBANTE DE TRANSFERENCIA</Text>
-            <TouchableOpacity accessibilityRole="button" accessibilityLabel={subscriptionReceiptUri ? "Cambiar archivo adjuntado" : "Adjuntar comprobante de transferencia"} style={styles.secondaryButton} onPress={() => void pickSubscriptionReceipt()}><Text style={styles.secondaryText}>{subscriptionReceiptUri ? "✓ Archivo adjuntado" : "Adjuntar comprobante"}</Text></TouchableOpacity>
-            {!!subscriptionReceiptUri && <Image accessibilityLabel="Vista previa del comprobante de suscripción" source={{ uri: subscriptionReceiptUri }} resizeMode="contain" style={{ width: "100%", height: 180 }} />}
-            {!!subscriptionError && <Text style={styles.modalError}>{subscriptionError}</Text>}
-            <TouchableOpacity accessibilityRole="button" disabled={subscriptionBusy || !subscriptionReceiptUri} style={[styles.modalPrimary, (subscriptionBusy || !subscriptionReceiptUri) && styles.buttonDisabled]} onPress={() => void requestSubscription()}><Text style={styles.modalPrimaryText}>{subscriptionBusy ? "Enviando…" : "Enviar comprobante"}</Text></TouchableOpacity>
+            <TouchableOpacity accessibilityRole="link" style={styles.modalPrimary} onPress={() => void openExternalUrl(premiumExternalUrl(accountPublicId))}><Text style={styles.modalPrimaryText}>Abrir enlace externo ↗</Text></TouchableOpacity>
           </ScrollView>
         </View></View>
       </AppModal>
