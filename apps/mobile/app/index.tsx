@@ -740,6 +740,17 @@ type AdminSubscriptionRequest = {
   contactWhatsapp: string | null;
 };
 
+const ADMIN_LAYOUT_DEFAULT = ["reviews", "summary", "premium", "verification", "registry", "credentials"] as const;
+type AdminLayoutSection = typeof ADMIN_LAYOUT_DEFAULT[number];
+const ADMIN_LAYOUT_LABELS: Record<AdminLayoutSection, string> = {
+  reviews: "Revisión de reseñas",
+  summary: "Resumen general",
+  premium: "Habilitar Premium",
+  verification: "Estado de verificaciones",
+  registry: "Buscar en registros públicos",
+  credentials: "Certificaciones y matrículas",
+};
+
 const CONTACT_WARNING = "No está permitido compartir teléfonos de contacto o emails.";
 
 function notifyMailEvent(event: "subscription.received" | "subscription.activated", details: { requestId?: string; publicId?: string }) {
@@ -1369,6 +1380,9 @@ export default function Home() {
   const [adminSubscriptionRequests, setAdminSubscriptionRequests] = useState<AdminSubscriptionRequest[]>([]);
   const [adminSubscriptionsLoading, setAdminSubscriptionsLoading] = useState(true);
   const [adminSubscriptionsError, setAdminSubscriptionsError] = useState("");
+  const [adminLayoutOrder, setAdminLayoutOrder] = useState<AdminLayoutSection[]>([...ADMIN_LAYOUT_DEFAULT]);
+  const [adminLayoutEditing, setAdminLayoutEditing] = useState(false);
+  const [adminLayoutLoaded, setAdminLayoutLoaded] = useState(false);
   const [clientPhotoBusy, setClientPhotoBusy] = useState(false);
   const reviewQualityLimit = clientPlan === "plus" ? 6 : 3;
   const weeklyRequestLimit = clientPlan === "plus" ? PREMIUM_WEEKLY_REQUEST_LIMIT : FREE_WEEKLY_REQUEST_LIMIT;
@@ -1502,6 +1516,46 @@ export default function Home() {
     if (!session?.email || !hiddenRequestIdsLoaded || hiddenRequestIdsAccount !== session.email.toLowerCase()) return;
     void AsyncStorage.setItem(`laburapp:hidden-requests:${session.email.toLowerCase()}`, JSON.stringify(hiddenRequestIds));
   }, [session?.email, hiddenRequestIds, hiddenRequestIdsLoaded, hiddenRequestIdsAccount]);
+
+  useEffect(() => {
+    if (session?.role !== "admin" || !session.email) {
+      setAdminLayoutOrder([...ADMIN_LAYOUT_DEFAULT]);
+      setAdminLayoutLoaded(false);
+      return;
+    }
+    setAdminLayoutLoaded(false);
+    let active = true;
+    void AsyncStorage.getItem(`laburapp:admin-layout:${session.email.toLowerCase()}`).then((saved) => {
+      if (!active) return;
+      try {
+        if (saved) {
+          const parsed: unknown = JSON.parse(saved);
+          if (Array.isArray(parsed) && parsed.length === ADMIN_LAYOUT_DEFAULT.length && ADMIN_LAYOUT_DEFAULT.every((key) => parsed.includes(key))) {
+            setAdminLayoutOrder(parsed as AdminLayoutSection[]);
+          }
+        }
+      } catch {
+        setAdminLayoutOrder([...ADMIN_LAYOUT_DEFAULT]);
+      } finally { setAdminLayoutLoaded(true); }
+    });
+    return () => { active = false; };
+  }, [session?.email, session?.role]);
+
+  useEffect(() => {
+    if (session?.role !== "admin" || !session.email || !adminLayoutLoaded) return;
+    void AsyncStorage.setItem(`laburapp:admin-layout:${session.email.toLowerCase()}`, JSON.stringify(adminLayoutOrder));
+  }, [adminLayoutOrder, session?.email, session?.role, adminLayoutLoaded]);
+
+  function moveAdminLayoutSection(section: AdminLayoutSection, direction: -1 | 1) {
+    setAdminLayoutOrder((current) => {
+      const index = current.indexOf(section);
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= current.length) return current;
+      const next = [...current];
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  }
 
   useEffect(() => {
     void AsyncStorage.getItem(THEME_STORAGE_KEY).then((savedTheme) => {
@@ -4421,7 +4475,7 @@ export default function Home() {
       target_public_id: adminPremiumAccount.publicId, enable_premium: !adminPremiumAccount.premium, selected_plan_months: adminPremiumMonths,
     });
     setAdminPremiumBusy(false);
-    if (result.error) return setAdminPremiumError("No pudimos modificar Premium. Verificá la transferencia y reintentá.");
+    if (result.error) return setAdminPremiumError("No pudimos modificar Premium. Reintentá; si continúa, verificá que la actualización administrativa esté aplicada.");
     if (!adminPremiumAccount.premium) notifyMailEvent("subscription.activated", { publicId: adminPremiumAccount.publicId });
     void lookupPremiumAccount();
     void loadAdminPlatformMetrics();
@@ -5431,8 +5485,13 @@ export default function Home() {
             })}
           </View>
         ) : tab === "Panel" ? (
-          <View style={[styles.sectionPage, responsive.isDesktop && styles.sectionPageDesktop]}>
-            <Text style={styles.pageTitle}>Panel de administración</Text>
+          <View style={[styles.sectionPage, responsive.isDesktop && styles.sectionPageDesktop, responsive.isDesktop && styles.adminSectionPageDesktop]}>
+            <View style={styles.adminPageTitleRow}>
+              <Text style={styles.pageTitle}>Panel de administración</Text>
+              <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded: adminLayoutEditing }} style={[styles.adminLayoutButton, adminLayoutEditing && styles.adminLayoutButtonActive]} onPress={() => setAdminLayoutEditing((current) => !current)}>
+                <Text style={styles.adminLayoutButtonText}>▦ Ordenar layout</Text>
+              </TouchableOpacity>
+            </View>
             <Text style={styles.pageCopy}>
               Vista operativa reservada para cuentas con rol administrador.
             </Text>
@@ -5445,7 +5504,19 @@ export default function Home() {
               </TouchableOpacity>
             </View>
             <Text style={styles.adminViewHelp}>Estas vistas no cambian tus permisos de administrador.</Text>
-            <View style={styles.providerPanel}>
+            {adminLayoutEditing && <View style={styles.adminLayoutEditor}>
+              <Text style={styles.adminLayoutEditorTitle}>Ordená los bloques</Text>
+              <Text style={styles.adminLayoutEditorCopy}>Usá las flechas. Tu orden queda guardado en este panel.</Text>
+              {adminLayoutOrder.map((section, index) => <View key={section} style={styles.adminLayoutEditorRow}>
+                <Text style={styles.adminLayoutEditorLabel}>{ADMIN_LAYOUT_LABELS[section]}</Text>
+                <View style={styles.adminLayoutEditorActions}>
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Subir ${ADMIN_LAYOUT_LABELS[section]}`} disabled={index === 0} style={[styles.adminLayoutArrow, index === 0 && styles.adminLayoutArrowDisabled]} onPress={() => moveAdminLayoutSection(section, -1)}><Text style={styles.adminLayoutArrowText}>↑</Text></TouchableOpacity>
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel={`Bajar ${ADMIN_LAYOUT_LABELS[section]}`} disabled={index === adminLayoutOrder.length - 1} style={[styles.adminLayoutArrow, index === adminLayoutOrder.length - 1 && styles.adminLayoutArrowDisabled]} onPress={() => moveAdminLayoutSection(section, 1)}><Text style={styles.adminLayoutArrowText}>↓</Text></TouchableOpacity>
+                </View>
+              </View>)}
+            </View>}
+            <View style={styles.adminWorkspace}>
+            <View style={[styles.providerPanel, styles.adminWorkspaceCard, { order: adminLayoutOrder.indexOf("reviews") } as any]}>
               <View style={styles.adminQueueHeader}>
                 <View><Text style={styles.panelEyebrow}>MODERACIÓN</Text><Text style={styles.adminModuleTitle}>Revisión de reseñas</Text></View>
                 <TouchableOpacity accessibilityRole="button" style={styles.adminRefresh} onPress={() => void loadAdminPublicReviews()}><Text style={styles.adminRefreshText}>Actualizar</Text></TouchableOpacity>
@@ -5462,7 +5533,7 @@ export default function Home() {
                 </View>
               </View>)}
             </View>
-            <View style={styles.providerPanel}>
+            <View style={[styles.providerPanel, styles.adminWorkspaceCard, { order: adminLayoutOrder.indexOf("summary") } as any]}>
               <View style={styles.adminQueueHeader}>
                 <View>
                   <Text style={styles.panelEyebrow}>DATOS REALES DE LA PLATAFORMA</Text>
@@ -5503,10 +5574,10 @@ export default function Home() {
               {!!topAdminCity && <Text style={styles.adminSegmentCopy}>Mayor comunidad: <Text style={styles.adminSegmentStrong}>{topAdminCity.city}</Text> · {topAdminCity.users} usuarios · {topAdminCity.providers} prestadores. Publicados: {adminPlatformMetrics?.users.published_providers ?? 0} · Verificados: {adminPlatformMetrics?.users.verified_providers ?? 0}.</Text>}
               {!!adminPlatformMetrics?.cities.length && <View style={styles.adminCityRow}>{adminPlatformMetrics.cities.map((item) => <Text key={item.city} style={styles.adminCityChip}>{item.city}: {item.users} / P {item.providers}</Text>)}</View>}
             </View>
-            <View style={styles.providerPanel}>
+            <View style={[styles.providerPanel, styles.adminWorkspaceCard, { order: adminLayoutOrder.indexOf("premium") } as any]}>
               <Text style={styles.panelEyebrow}>SUSCRIPCIONES POR TRANSFERENCIA</Text>
               <Text style={styles.adminModuleTitle}>Habilitar Premium por ID</Text>
-              <Text style={styles.adminModuleCopy}>Quien paga encuentra su ID en Perfil. Los comprobantes enviados aparecen acá con nombre, ID, plan y fecha. Confirmá la transferencia en BBVA antes de activar Premium.</Text>
+              <Text style={styles.adminModuleCopy}>Buscá una cuenta por su ID y elegí la duración. El comprobante es opcional: también podés otorgar Premium manualmente.</Text>
               <View style={styles.adminSubscriptionList}>
                 <View style={styles.adminQueueHeader}>
                   <View style={{ flex: 1 }}>
@@ -5527,28 +5598,30 @@ export default function Home() {
                   </View>
                 </View>)}
               </View>
-              <Text style={styles.adminModuleCopy}>¿Tenés un ID concreto? Buscalo acá. Acepta LP000001 o USH-LP000001. Sin comprobante pendiente, la activación manual dura un mes.</Text>
+              <Text style={styles.adminModuleCopy}>¿Tenés un ID concreto? Buscalo acá. Acepta LP000001 o USH-LP000001. Elegí siempre la duración, con o sin comprobante.</Text>
               <View style={styles.customQualityRow}>
                 <TextInput accessibilityLabel="ID público de la cuenta" value={adminPremiumId} onChangeText={setAdminPremiumId} autoCapitalize="characters" placeholder="LP000001" placeholderTextColor="#71818B" style={[styles.modalInput, styles.customQualityInput]} onSubmitEditing={() => void lookupPremiumAccount()} />
                 <TouchableOpacity accessibilityRole="button" style={styles.customQualityButton} onPress={() => void lookupPremiumAccount()} disabled={adminPremiumBusy}><Text style={styles.customQualityButtonText}>Buscar</Text></TouchableOpacity>
               </View>
               {!!adminPremiumError && <Text style={styles.modalError}>{adminPremiumError}</Text>}
-              {adminPremiumAccount && <View style={styles.workCard}>
-                <Text style={styles.workProvider}>{adminPremiumAccount.name} · {displayPublicId(adminPremiumAccount.publicId, adminPremiumAccount.city)}</Text>
-                {!!adminPremiumAccount.submissionName && <Text style={styles.adminModuleCopy}>Solicitó: {adminPremiumAccount.submissionName}</Text>}
-                {!!adminPremiumAccount.contactWhatsapp && <Text style={styles.adminModuleCopy}>WhatsApp de contacto: {adminPremiumAccount.contactWhatsapp}</Text>}
-                <Text style={styles.adminModuleCopy}>{adminPremiumAccount.pendingMonths ? `Transferencia pendiente · plan de ${adminPremiumAccount.pendingMonths} meses` : "Sin comprobante pendiente"}</Text>
-                {!!adminPremiumAccount.receiptUrl && <TouchableOpacity accessibilityRole="link" onPress={() => void openExternalUrl(adminPremiumAccount.receiptUrl!)}><Text style={styles.cardLink}>Ver comprobante privado ↗</Text></TouchableOpacity>}
-                {!!adminPremiumAccount.endsAt && <Text style={styles.adminModuleCopy}>Vence: {new Date(adminPremiumAccount.endsAt).toLocaleDateString("es-AR")}</Text>}
-                <Text style={styles.adminModuleCopy}>Capa Premium a habilitar</Text>
-                <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded: adminPremiumMonthsOpen }} style={styles.premiumTierSelect} onPress={() => setAdminPremiumMonthsOpen((current) => !current)}>
-                  <Text style={styles.premiumTierSelectText}>{adminPremiumMonths} {adminPremiumMonths === 1 ? "mes" : "meses"}</Text><Text style={styles.premiumTierSelectChevron}>{adminPremiumMonthsOpen ? "⌃" : "⌄"}</Text>
-                </TouchableOpacity>
-                {adminPremiumMonthsOpen && <View style={styles.premiumTierOptions}>{([1, 3, 6, 12] as const).map((months) => <TouchableOpacity key={months} accessibilityRole="radio" accessibilityState={{ selected: adminPremiumMonths === months }} style={styles.premiumTierOption} onPress={() => { setAdminPremiumMonths(months); setAdminPremiumMonthsOpen(false); }}><Text style={styles.premiumTierOptionText}>{months} {months === 1 ? "mes" : "meses"}</Text></TouchableOpacity>)}</View>}
-                <TouchableOpacity accessibilityRole="checkbox" accessibilityState={{ checked: adminPremiumAccount.premium, disabled: adminPremiumBusy }} disabled={adminPremiumBusy} style={styles.secondaryButton} onPress={() => void togglePremiumAccount()}><Text style={styles.secondaryText}>{adminPremiumAccount.premium ? "☑ PREMIUM? · habilitado" : "□ PREMIUM? · habilitar"}</Text></TouchableOpacity>
+              {adminPremiumAccount && <View style={[styles.workCard, styles.adminPremiumAccountCard]}>
+                <View style={styles.adminPremiumAccountMain}>
+                  <Text style={styles.workProvider}>{adminPremiumAccount.name} · {displayPublicId(adminPremiumAccount.publicId, adminPremiumAccount.city)}</Text>
+                  {!!adminPremiumAccount.submissionName && <Text style={styles.adminModuleCopy}>Solicitó: {adminPremiumAccount.submissionName}</Text>}
+                  {!!adminPremiumAccount.contactWhatsapp && <Text style={styles.adminModuleCopy}>WhatsApp de contacto: {adminPremiumAccount.contactWhatsapp}</Text>}
+                  <Text style={styles.adminModuleCopy}>{adminPremiumAccount.pendingMonths ? `Transferencia pendiente · plan de ${adminPremiumAccount.pendingMonths} meses` : "Habilitación manual · sin comprobante"}</Text>
+                  {!!adminPremiumAccount.endsAt && <Text style={styles.adminModuleCopy}>Vence: {new Date(adminPremiumAccount.endsAt).toLocaleDateString("es-AR")}</Text>}
+                  <Text style={styles.adminModuleCopy}>Capa Premium a habilitar</Text>
+                  <TouchableOpacity accessibilityRole="button" accessibilityState={{ expanded: adminPremiumMonthsOpen }} style={styles.premiumTierSelect} onPress={() => setAdminPremiumMonthsOpen((current) => !current)}>
+                    <Text style={styles.premiumTierSelectText}>{adminPremiumMonths} {adminPremiumMonths === 1 ? "mes" : "meses"}</Text><Text style={styles.premiumTierSelectChevron}>{adminPremiumMonthsOpen ? "⌃" : "⌄"}</Text>
+                  </TouchableOpacity>
+                  {adminPremiumMonthsOpen && <View style={styles.premiumTierOptions}>{([1, 3, 6, 12] as const).map((months) => <TouchableOpacity key={months} accessibilityRole="radio" accessibilityState={{ selected: adminPremiumMonths === months }} style={styles.premiumTierOption} onPress={() => { setAdminPremiumMonths(months); setAdminPremiumMonthsOpen(false); }}><Text style={styles.premiumTierOptionText}>{months} {months === 1 ? "mes" : "meses"}</Text></TouchableOpacity>)}</View>}
+                  <TouchableOpacity accessibilityRole="button" disabled={adminPremiumBusy} style={styles.adminPremiumEnableButton} onPress={() => void togglePremiumAccount()}><Text style={styles.adminPremiumEnableButtonText}>{adminPremiumAccount.premium ? "DESHABILITAR PREMIUM" : "HABILITAR PREMIUM 🔥"}</Text></TouchableOpacity>
+                </View>
+                {!!adminPremiumAccount.receiptUrl && <TouchableOpacity accessibilityRole="link" style={styles.adminPremiumReceipt} onPress={() => void openExternalUrl(adminPremiumAccount.receiptUrl!)}><Text style={styles.adminPremiumReceiptIcon}>▧</Text><Text style={styles.adminPremiumReceiptText}>Ver comprobante privado ↗</Text></TouchableOpacity>}
               </View>}
             </View>
-            <View style={styles.providerPanel}>
+            <View style={[styles.providerPanel, styles.adminWorkspaceCard, { order: adminLayoutOrder.indexOf("verification") } as any]}>
               <Text style={styles.panelEyebrow}>REVISIÓN DE CERTIFICACIONES</Text>
               <Text style={styles.adminModuleTitle}>Estado de verificaciones</Text>
               <View style={styles.adminMetrics}>
@@ -5565,7 +5638,7 @@ export default function Home() {
                 ))}
               </View>
             </View>
-            <View style={styles.providerPanel}>
+            <View style={[styles.providerPanel, styles.adminWorkspaceCard, { order: adminLayoutOrder.indexOf("registry") } as any]}>
               <Text style={styles.panelEyebrow}>CONSULTA DE MATRÍCULAS</Text>
               <Text style={styles.adminModuleTitle}>Buscar en registros públicos</Text>
               <Text style={styles.adminModuleCopy}>Ingresá apellido, DNI o matrícula. La coincidencia orienta la revisión, pero no aprueba automáticamente al profesional.</Text>
@@ -5586,7 +5659,7 @@ export default function Home() {
               </View>}
             </View>
 
-            <View style={styles.providerPanel}>
+            <View style={[styles.providerPanel, styles.adminWorkspaceCard, { order: adminLayoutOrder.indexOf("credentials") } as any]}>
               <View style={styles.adminQueueHeader}>
                 <View><Text style={styles.panelEyebrow}>COLA DE REVISIÓN</Text><Text style={styles.adminModuleTitle}>Certificaciones y matrículas</Text></View>
                 <TouchableOpacity accessibilityRole="button" disabled={adminReviewsLoading} style={styles.adminRefresh} onPress={() => void loadAdminCredentialReviews()}><Text style={styles.adminRefreshText}>{adminReviewsLoading ? "Actualizando…" : "Actualizar"}</Text></TouchableOpacity>
@@ -5650,15 +5723,6 @@ export default function Home() {
                 </View>;
               })}
             </View>
-            <View style={styles.reviewBox}>
-              <Text style={styles.reviewTitle}>
-                {isDemoSession ? "Vista de demostración" : "Seguridad"}
-              </Text>
-              <Text style={styles.reviewText}>
-                {isDemoSession
-                  ? "Estos indicadores son simulados para recorrer el panel. La cuenta administradora real se valida mediante Supabase antes de permitir operaciones."
-                  : "El rol administrador se valida mediante Supabase. La interfaz no concede permisos por sí sola."}
-              </Text>
             </View>
           </View>
         ) : (
@@ -5942,22 +6006,22 @@ export default function Home() {
                   <Text style={styles.panelEyebrow}>TU CUENTA</Text>
                   {session && <>
                     <TouchableOpacity accessibilityRole="button" style={styles.profileFooterLinkButton} onPress={signOut}><Text style={styles.logoutText}>Cerrar sesión</Text></TouchableOpacity>
-                    <TouchableOpacity accessibilityRole="button" style={styles.profileFooterLinkButton} onPress={() => void openNotificationPreferences()}><Text style={styles.profileLegalLink}>Notificaciones</Text></TouchableOpacity>
                     {session.role !== "admin" && !isDemoSession && <TouchableOpacity accessibilityRole="button" style={styles.profileFooterLinkButton} onPress={() => { setDeleteAccountError(""); setDeleteAccountModal(true); }}><Text style={styles.deleteAccountButtonText}>Eliminar cuenta</Text></TouchableOpacity>}
                   </>}
                 </View>
                 <View style={styles.profileFooterColumn}>
-                  <Text style={styles.panelEyebrow}>LABURAPP</Text>
+                  <Text style={styles.panelEyebrow}>LINKS</Text>
                   {([
                     ["terms", "Términos y condiciones"],
                     ["privacy", "Política de privacidad"],
-                    ["about", "Nosotros"],
                     ["usage", "Mecánica de uso"],
+                    ["about", "Nosotros"],
                   ] as const).map(([key, label]) => (
                     <TouchableOpacity key={key} accessibilityRole="link" style={styles.profileFooterLinkButton} onPress={() => key === "usage" ? (setInfoReturnAuthMode(null), setInfoPage("usage")) : void openExternalUrl(legalPageUrls[key])}>
                       <Text style={styles.profileLegalLink}>{label} ↗</Text>
                     </TouchableOpacity>
                   ))}
+                  <TouchableOpacity accessibilityRole="button" style={styles.profileFooterLinkButton} onPress={() => void openNotificationPreferences()}><Text style={styles.profileLegalLink}>Notificaciones</Text></TouchableOpacity>
                 </View>
               </View>
               <View style={styles.profileFooterColumns}>
@@ -5968,14 +6032,12 @@ export default function Home() {
                     <TouchableOpacity accessibilityRole="link" accessibilityLabel="Instagram de LaburApp" style={styles.profileSocialButton} onPress={() => setRequested("La cuenta oficial de Instagram todavía no está vinculada.")}><View style={styles.profileInstagramIcon}><View style={styles.profileInstagramLens} /><View style={styles.profileInstagramDot} /></View></TouchableOpacity>
                   </View>
                 </View>
-                {session && session.role !== "admin" && <View style={styles.profileFooterColumn}>
-                  <View style={styles.thanksCard}>
-                    <Text style={styles.thanksTitle}>Acompañá a la comunidad</Text>
-                    <Text style={styles.thanksCopy}>Aporte voluntario del 1% por trabajo terminado.</Text>
-                    <TouchableOpacity accessibilityRole="button" style={styles.thanksButton} onPress={() => { setContributionError(""); setThanksModalVisible(true); }}><Text style={styles.thanksButtonText}>Acompañanos</Text></TouchableOpacity>
-                  </View>
-                </View>}
               </View>
+              {session && session.role !== "admin" && <View style={styles.thanksCard}>
+                <Text style={styles.thanksTitle}>Acompañá a la comunidad</Text>
+                <Text style={styles.thanksCopy}>Aporte voluntario del 1% por trabajo terminado.</Text>
+                <TouchableOpacity accessibilityRole="link" style={styles.thanksButton} onPress={() => void openExternalUrl("https://alsema.world/Comunidad")}><Text style={styles.thanksButtonText}>Aporte a la comunidad ↗</Text></TouchableOpacity>
+              </View>}
               <Text style={styles.profileLegalCaption}>Servicios locales, acuerdos claros.</Text>
               <TouchableOpacity accessibilityRole="link" onPress={() => void openExternalUrl("https://www.flaticon.com/free-icon/qr-code_2678167")}>
                 <Text style={styles.qrAttribution}>Ícono QR: mim_studio / Flaticon ↗</Text>
@@ -7891,12 +7953,35 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     deleteAccountConfirm: { minHeight: 50, borderRadius: 12, backgroundColor: colors.danger, alignItems: "center", justifyContent: "center", paddingHorizontal: 14, marginTop: 8 },
     deleteAccountConfirmText: { color: "white", fontWeight: "900", textAlign: "center" },
     adminViewSwitcher: { flexDirection: "row", flexWrap: "wrap", gap: 10, marginTop: 14 },
+    adminSectionPageDesktop: { maxWidth: 1760 },
+    adminPageTitleRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 },
+    adminLayoutButton: { minHeight: 38, borderWidth: 1, borderColor: colors.blue, borderRadius: 10, alignItems: "center", justifyContent: "center", paddingHorizontal: 12, backgroundColor: colors.surface },
+    adminLayoutButtonActive: { backgroundColor: colors.brandNavy },
+    adminLayoutButtonText: { color: colors.blue, fontSize: 11, fontWeight: "900" },
+    adminLayoutEditor: { borderWidth: 1, borderColor: colors.blue, borderRadius: 14, backgroundColor: colors.raised, padding: 13, marginBottom: 12 },
+    adminLayoutEditorTitle: { color: colors.navy, fontSize: 14, fontWeight: "900" },
+    adminLayoutEditorCopy: { color: colors.stone, fontSize: 10, marginTop: 3, marginBottom: 9 },
+    adminLayoutEditorRow: { minHeight: 39, flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8, borderTopWidth: 1, borderTopColor: colors.line, paddingVertical: 5 },
+    adminLayoutEditorLabel: { color: colors.navy, fontSize: 11, fontWeight: "800", flex: 1 },
+    adminLayoutEditorActions: { flexDirection: "row", gap: 6 },
+    adminLayoutArrow: { width: 32, height: 29, borderWidth: 1, borderColor: colors.blue, borderRadius: 8, alignItems: "center", justifyContent: "center" },
+    adminLayoutArrowDisabled: { opacity: 0.32 },
+    adminLayoutArrowText: { color: colors.blue, fontSize: 16, fontWeight: "900", lineHeight: 19 },
+    adminWorkspace: { flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start", gap: 14 },
+    adminWorkspaceCard: { flexGrow: 1, flexBasis: 460, minWidth: 0, marginTop: 0 },
     adminViewButton: { flexGrow: 1, minHeight: 44, borderRadius: 12, borderWidth: 1, borderColor: colors.blue, backgroundColor: colors.brandNavy, alignItems: "center", justifyContent: "center", paddingHorizontal: 14 },
     adminViewButtonText: { color: "white", fontSize: 11, fontWeight: "900" },
     adminViewHelp: { color: colors.stone, fontSize: 10, marginTop: 7, marginBottom: 10 },
     adminMetrics: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
     adminSubscriptionList: { backgroundColor: colors.surfaceSoft, borderWidth: 1, borderColor: colors.line, borderRadius: 14, padding: 13, gap: 10, marginTop: 12, marginBottom: 14 },
     adminSubscriptionItem: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.line, borderRadius: 12, padding: 12 },
+    adminPremiumAccountCard: { flexDirection: "row", flexWrap: "wrap", alignItems: "stretch", gap: 12 },
+    adminPremiumAccountMain: { flex: 1, minWidth: 0 },
+    adminPremiumReceipt: { width: 170, minHeight: 150, borderWidth: 1, borderColor: colors.blue, borderRadius: 12, backgroundColor: colors.raised, padding: 12, alignItems: "center", justifyContent: "center", gap: 7 },
+    adminPremiumReceiptIcon: { color: colors.blue, fontSize: 30, fontWeight: "900" },
+    adminPremiumReceiptText: { color: colors.blue, fontSize: 11, fontWeight: "900", textAlign: "center", lineHeight: 15 },
+    adminPremiumEnableButton: { minHeight: 45, borderRadius: 11, backgroundColor: colors.orange, alignItems: "center", justifyContent: "center", paddingHorizontal: 14, marginTop: 8 },
+    adminPremiumEnableButtonText: { color: "#FFFFFF", fontSize: 12, fontWeight: "900", textAlign: "center" },
     adminSubscriptionActions: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 7 },
     adminMetric: {
       flexGrow: 1,
