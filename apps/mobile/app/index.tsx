@@ -6038,10 +6038,6 @@ export default function Home() {
                 <Text style={styles.thanksCopy}>Aporte voluntario del 1% por trabajo terminado.</Text>
                 <TouchableOpacity accessibilityRole="link" style={styles.thanksButton} onPress={() => void openExternalUrl("https://alsema.world/Comunidad")}><Text style={styles.thanksButtonText}>Aporte a la comunidad ↗</Text></TouchableOpacity>
               </View>}
-              <Text style={styles.profileLegalCaption}>Servicios locales, acuerdos claros.</Text>
-              <TouchableOpacity accessibilityRole="link" onPress={() => void openExternalUrl("https://www.flaticon.com/free-icon/qr-code_2678167")}>
-                <Text style={styles.qrAttribution}>Ícono QR: mim_studio / Flaticon ↗</Text>
-              </TouchableOpacity>
             </View>
           </View>
         )}
