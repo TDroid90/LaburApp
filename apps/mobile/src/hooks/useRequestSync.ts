@@ -50,6 +50,7 @@ export function useRequestSync({ client, enabled, userKey, onRefresh }: Options)
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "messages" }, scheduleRefresh)
       .on("postgres_changes", { event: "*", schema: "public", table: "credentials" }, scheduleRefresh)
       .on("postgres_changes", { event: "*", schema: "public", table: "subscription_requests" }, scheduleRefresh)
+      .on("postgres_changes", { event: "*", schema: "public", table: "client_memberships" }, scheduleRefresh)
       .subscribe((nextStatus) => {
         if (disposed) return;
         realtimeConnected = nextStatus === "SUBSCRIBED";
