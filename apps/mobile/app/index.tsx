@@ -6056,8 +6056,15 @@ export default function Home() {
                   <Text style={styles.panelEyebrow}>TU CUENTA</Text>
                   {session && <>
                     <TouchableOpacity accessibilityRole="button" style={styles.profileFooterLinkButton} onPress={signOut}><Text style={styles.logoutText}>Cerrar sesión</Text></TouchableOpacity>
-                    {session.role !== "admin" && !isDemoSession && <TouchableOpacity accessibilityRole="button" style={styles.profileFooterLinkButton} onPress={() => { setDeleteAccountError(""); setDeleteAccountModal(true); }}><Text style={styles.deleteAccountButtonText}>Eliminar cuenta</Text></TouchableOpacity>}
+                    {!isDemoSession && <TouchableOpacity accessibilityRole="button" style={styles.profileFooterLinkButton} onPress={() => { setDeleteAccountError(""); setDeleteAccountModal(true); }}><Text style={styles.deleteAccountButtonText}>Eliminar cuenta</Text></TouchableOpacity>}
                   </>}
+                  <View style={styles.profileFooterSocialSection}>
+                    <Text style={styles.panelEyebrow}>SEGUINOS</Text>
+                    <View style={styles.profileSocialRow}>
+                      <TouchableOpacity accessibilityRole="link" accessibilityLabel="Facebook de LaburApp" style={styles.profileSocialButton} onPress={() => setRequested("La cuenta oficial de Facebook todavía no está vinculada.")}><Text style={styles.profileFacebookIcon}>f</Text></TouchableOpacity>
+                      <TouchableOpacity accessibilityRole="link" accessibilityLabel="Instagram de LaburApp" style={styles.profileSocialButton} onPress={() => setRequested("La cuenta oficial de Instagram todavía no está vinculada.")}><View style={styles.profileInstagramIcon}><View style={styles.profileInstagramLens} /><View style={styles.profileInstagramDot} /></View></TouchableOpacity>
+                    </View>
+                  </View>
                 </View>
                 <View style={styles.profileFooterColumn}>
                   <Text style={styles.panelEyebrow}>LINKS</Text>
@@ -6074,20 +6081,11 @@ export default function Home() {
                   <TouchableOpacity accessibilityRole="button" style={styles.profileFooterLinkButton} onPress={() => void openNotificationPreferences()}><Text style={styles.profileLegalLink}>Notificaciones</Text></TouchableOpacity>
                 </View>
               </View>
-              <View style={styles.profileFooterColumns}>
-                <View style={styles.profileFooterColumn}>
-                  <Text style={styles.panelEyebrow}>SEGUINOS</Text>
-                  <View style={styles.profileSocialRow}>
-                    <TouchableOpacity accessibilityRole="link" accessibilityLabel="Facebook de LaburApp" style={styles.profileSocialButton} onPress={() => setRequested("La cuenta oficial de Facebook todavía no está vinculada.")}><Text style={styles.profileFacebookIcon}>f</Text></TouchableOpacity>
-                    <TouchableOpacity accessibilityRole="link" accessibilityLabel="Instagram de LaburApp" style={styles.profileSocialButton} onPress={() => setRequested("La cuenta oficial de Instagram todavía no está vinculada.")}><View style={styles.profileInstagramIcon}><View style={styles.profileInstagramLens} /><View style={styles.profileInstagramDot} /></View></TouchableOpacity>
-                  </View>
-                </View>
-              </View>
-              {session && session.role !== "admin" && <View style={styles.thanksCard}>
+              {session && <View style={styles.profileFooterContribution}><View style={styles.thanksCard}>
                 <Text style={styles.thanksTitle}>Acompañá a la comunidad</Text>
                 <Text style={styles.thanksCopy}>Aporte voluntario del 1% por trabajo terminado.</Text>
                 <TouchableOpacity accessibilityRole="link" style={styles.thanksButton} onPress={() => void openExternalUrl("https://alsema.world/Comunidad")}><Text style={styles.thanksButtonText}>Aporte a la comunidad ↗</Text></TouchableOpacity>
-              </View>}
+              </View></View>}
             </View>
           </View>
         )}
@@ -8211,6 +8209,8 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     profileLegalFooter: { width: "100%", borderTopWidth: 1, borderTopColor: colors.line, marginTop: 26, paddingTop: 20, paddingBottom: 12, gap: 18 },
     profileFooterColumns: { width: "100%", flexDirection: "row", alignItems: "flex-start", gap: 12 },
     profileFooterColumn: { flex: 1, minWidth: 0, alignItems: "flex-start" },
+    profileFooterSocialSection: { marginTop: 20, alignItems: "flex-start" },
+    profileFooterContribution: { width: "100%", borderTopWidth: 1, borderTopColor: colors.line, paddingTop: 18 },
     profileFooterLinkButton: { minHeight: 36, justifyContent: "center", paddingVertical: 5 },
     profileLegalLinks: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
     profileLegalLink: { color: colors.blue, fontSize: 12, lineHeight: 17, fontWeight: "800", textDecorationLine: "underline" },
