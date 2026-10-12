@@ -1257,6 +1257,7 @@ export default function Home() {
   const [adminPublicReviews, setAdminPublicReviews] = useState<Array<{ id: string; created_at: string; rating: number; comment: string | null; moderated_at: string | null; client_name: string; provider_name: string }>>([]);
   const [adminPublicReviewsError, setAdminPublicReviewsError] = useState("");
   const [adminPublicReviewsBusy, setAdminPublicReviewsBusy] = useState(false);
+  const [expandedAdminReviewId, setExpandedAdminReviewId] = useState<string | null>(null);
   const [adminReviewError, setAdminReviewError] = useState("");
   const [adminReviewFeedback, setAdminReviewFeedback] = useState<{ tone: "success" | "warning"; message: string } | null>(null);
   const [expandedAdminCredentialId, setExpandedAdminCredentialId] = useState<string | null>(null);
@@ -5565,15 +5566,21 @@ export default function Home() {
                 <View><Text style={styles.panelEyebrow}>MODERACIÓN</Text><Text style={styles.adminModuleTitle}>Revisión de reseñas</Text></View>
                 <TouchableOpacity accessibilityRole="button" style={styles.adminRefresh} onPress={() => void loadAdminPublicReviews()}><Text style={styles.adminRefreshText}>Actualizar</Text></TouchableOpacity>
               </View>
+              <Text style={styles.adminPublicReviewHelp}>Ocultar la quita del perfil sin borrarla; Eliminar es definitivo.</Text>
               {!!adminPublicReviewsError && <Text style={styles.modalError}>{adminPublicReviewsError}</Text>}
               {!adminPublicReviews.length && !adminPublicReviewsError && <Text style={styles.adminModuleCopy}>No hay reseñas para revisar.</Text>}
-              {adminPublicReviews.map((review) => <View key={review.id} style={styles.workCard}>
-                <Text style={styles.workProvider}>{review.client_name} → {review.provider_name} · {"★".repeat(review.rating)}</Text>
-                <Text style={styles.adminModuleCopy}>{review.comment || "Sin comentario"}</Text>
-                <Text style={styles.adminModuleCopy}>{new Date(review.created_at).toLocaleDateString("es-AR")} · {review.moderated_at ? "Oculta" : "Visible"}</Text>
-                <View style={styles.adminSubscriptionActions}>
-                  <TouchableOpacity accessibilityRole="button" disabled={adminPublicReviewsBusy} style={styles.adminRefresh} onPress={() => void moderatePublicReview(review.id, review.moderated_at ? "restore" : "hide")}><Text style={styles.adminRefreshText}>{review.moderated_at ? "Restaurar" : "Ocultar"}</Text></TouchableOpacity>
-                  <TouchableOpacity accessibilityRole="button" disabled={adminPublicReviewsBusy} style={styles.adminRefresh} onPress={() => void moderatePublicReview(review.id, "delete")}><Text style={styles.adminRefreshText}>Eliminar</Text></TouchableOpacity>
+              {adminPublicReviews.map((review) => <View key={review.id} style={styles.adminPublicReviewRow}>
+                <View style={styles.adminPublicReviewBody}>
+                  <View style={styles.adminPublicReviewHeading}>
+                    <Text numberOfLines={1} style={styles.adminPublicReviewTitle}>{review.client_name} → {review.provider_name} · {"★".repeat(review.rating)}</Text>
+                    <Text style={styles.adminPublicReviewMeta}>{new Date(review.created_at).toLocaleDateString("es-AR")} · {review.moderated_at ? "Oculta" : "Visible"}</Text>
+                  </View>
+                  <Text numberOfLines={expandedAdminReviewId === review.id ? undefined : 1} style={styles.adminPublicReviewComment}>{review.comment || "Sin comentario"}</Text>
+                  {!!review.comment && review.comment.length > 40 && <TouchableOpacity accessibilityRole="button" style={styles.adminPublicReviewExpand} onPress={() => setExpandedAdminReviewId((current) => current === review.id ? null : review.id)}><Text style={styles.adminPublicReviewExpandText}>{expandedAdminReviewId === review.id ? "Contraer" : "Leer completa"}</Text></TouchableOpacity>}
+                </View>
+                <View style={styles.adminPublicReviewActions}>
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel={review.moderated_at ? "Restaurar reseña en el perfil público" : "Ocultar reseña del perfil público sin borrarla"} disabled={adminPublicReviewsBusy} style={styles.adminPublicReviewButton} onPress={() => void moderatePublicReview(review.id, review.moderated_at ? "restore" : "hide")}><Text style={styles.adminPublicReviewButtonText}>{review.moderated_at ? "Restaurar" : "Ocultar"}</Text></TouchableOpacity>
+                  <TouchableOpacity accessibilityRole="button" accessibilityLabel="Eliminar reseña definitivamente" disabled={adminPublicReviewsBusy} style={styles.adminPublicReviewButton} onPress={() => void moderatePublicReview(review.id, "delete")}><Text style={styles.adminPublicReviewButtonText}>Eliminar</Text></TouchableOpacity>
                 </View>
               </View>)}
             </View>
@@ -8071,6 +8078,18 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     adminQueueHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
     adminRefresh: { minHeight: 36, borderWidth: 1, borderColor: colors.line, borderRadius: 9, alignItems: "center", justifyContent: "center", paddingHorizontal: 11 },
     adminRefreshText: { color: colors.blue, fontSize: 9, fontWeight: "900" },
+    adminPublicReviewHelp: { color: colors.stone, fontSize: 10, marginTop: 5, marginBottom: 2 },
+    adminPublicReviewRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8, borderWidth: 1, borderColor: colors.line, borderRadius: 10, backgroundColor: colors.surface, paddingHorizontal: 10, paddingVertical: 7, marginTop: 6 },
+    adminPublicReviewBody: { flexGrow: 1, flexBasis: 270, minWidth: 0 },
+    adminPublicReviewHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
+    adminPublicReviewTitle: { flex: 1, minWidth: 0, color: colors.navy, fontSize: 12, fontWeight: "900" },
+    adminPublicReviewMeta: { color: colors.stone, fontSize: 9 },
+    adminPublicReviewComment: { color: colors.stone, fontSize: 10, lineHeight: 14, marginTop: 2 },
+    adminPublicReviewExpand: { alignSelf: "flex-start", paddingVertical: 3 },
+    adminPublicReviewExpandText: { color: colors.blue, fontSize: 9, fontWeight: "800" },
+    adminPublicReviewActions: { flexDirection: "row", alignItems: "center", gap: 5 },
+    adminPublicReviewButton: { minHeight: 28, borderWidth: 1, borderColor: colors.line, borderRadius: 7, alignItems: "center", justifyContent: "center", paddingHorizontal: 8 },
+    adminPublicReviewButtonText: { color: colors.blue, fontSize: 9, fontWeight: "900" },
     adminEmpty: { color: colors.stone, fontSize: 11, textAlign: "center", paddingVertical: 18 },
     adminCredentialCard: { borderWidth: 1, borderColor: colors.line, borderRadius: 13, backgroundColor: colors.raised, overflow: "hidden", marginTop: 8 },
     adminCredentialCardPending: { borderColor: "#FF7800", borderWidth: 2 },
