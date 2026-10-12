@@ -55,7 +55,7 @@ export function PortfolioEditor({ darkMode, maxWorks, initialWorks, availableSer
   onSubmit: (works: SavedPortfolioWork[]) => void;
 }) {
   const styles = useMemo(() => createStyles(darkMode), [darkMode]);
-  const [works, setWorks] = useState(() => initialWorks.slice(0, maxWorks));
+  const [works, setWorks] = useState(() => initialWorks);
   const [expandedIds, setExpandedIds] = useState<string[]>(() => initialWorks.filter((work) => !work.service || work.photos.length !== 3).map((work) => work.id));
   const [openServiceId, setOpenServiceId] = useState<string | null>(null);
   const [pending, setPending] = useState<{ workId: string; photoId: string; sourceUri: string } | null>(null);
@@ -122,6 +122,7 @@ export function PortfolioEditor({ darkMode, maxWorks, initialWorks, availableSer
 
   function submit() {
     setLocalError("");
+    if (works.length > maxWorks) return setLocalError(`Tu plan admite hasta ${maxWorks} trabajos. Quitá los excedentes antes de guardar.`);
     if (works.some((work) => !availableServices.includes(work.service))) return setLocalError("Elegí uno de tus servicios en cada trabajo.");
     if (works.some((work) => work.description.trim().length < 10 || work.description.trim().length > 300)) return setLocalError("Describí cada trabajo con entre 10 y 300 caracteres.");
     if (works.some((work) => containsContactAttempt(work.description))) return setLocalError("No incluyas teléfonos, correos, redes ni enlaces en los trabajos.");
@@ -130,7 +131,7 @@ export function PortfolioEditor({ darkMode, maxWorks, initialWorks, availableSer
   }
 
   return <View style={styles.card}>
-    <Text style={styles.eyebrow}>{maxWorks > 3 ? "PORTFOLIO PREMIUM" : "PORTFOLIO GRATUITO"}</Text>
+    <Text style={styles.eyebrow}>{maxWorks > 2 ? "PORTFOLIO PREMIUM" : "PORTFOLIO GRATUITO"}</Text>
     <Text style={styles.title}>Trabajos realizados</Text>
     <Text style={styles.copy}>Podés publicar hasta {maxWorks} trabajos, con 3 fotos cuadradas por trabajo.</Text>
     <ScrollView style={styles.scroll} contentContainerStyle={styles.scrollContent} keyboardShouldPersistTaps="handled">

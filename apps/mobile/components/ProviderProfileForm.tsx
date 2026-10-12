@@ -45,8 +45,8 @@ function inferredService(trade: string): SavedServiceOffer {
   return { ...defaultService(), family: match.family.name, service: match.specialty, specialties: [match.specialty], description: specialtyDescription(match.family.name, match.specialty) };
 }
 
-function normalizeServices(profile: SavedProviderProfile, limit: number) {
-  const realServices = (profile.services ?? []).filter((item) => !isDiagnostic(item.service)).slice(0, limit).map((item) => ({
+function normalizeServices(profile: SavedProviderProfile) {
+  const realServices = (profile.services ?? []).filter((item) => !isDiagnostic(item.service)).map((item) => ({
     ...item,
     family: item.family ?? "",
     specialties: item.specialties?.length ? item.specialties.slice(0, 2) : item.service ? [item.service] : [],
@@ -55,9 +55,9 @@ function normalizeServices(profile: SavedProviderProfile, limit: number) {
   return realServices.length ? realServices : [inferredService(profile.trade)];
 }
 
-export function ProviderProfileForm({ darkMode, premium, initialProfile, email, busy, remoteError, onCancel, onSubmit }: {
+export function ProviderProfileForm({ darkMode, serviceLimit, initialProfile, email, busy, remoteError, onCancel, onSubmit }: {
   darkMode: boolean;
-  premium: boolean;
+  serviceLimit: number;
   initialProfile: SavedProviderProfile;
   email: string;
   busy: boolean;
@@ -68,13 +68,13 @@ export function ProviderProfileForm({ darkMode, premium, initialProfile, email, 
   const { width } = useWindowDimensions();
   const styles = useMemo(() => createStyles(darkMode), [darkMode]);
   const compact = width < 720;
-  const serviceLimit = premium ? 6 : 2;
+  const premium = serviceLimit > 2;
   const legacyDiagnostic = initialProfile.services?.find((item) => isDiagnostic(item.service));
   const initialCoverage = initialProfile.coverageAreas?.filter((area) => coverageChoices.includes(area)) ?? (initialProfile.zones === "Toda la provincia" ? coverageChoices : initialProfile.city ? [initialProfile.city] : []);
   const [draft, setDraft] = useState<SavedProviderProfile>(() => ({
     ...initialProfile,
     diagnosticPrice: initialProfile.diagnosticPrice ?? legacyDiagnostic?.price ?? 35000,
-    services: normalizeServices(initialProfile, serviceLimit),
+    services: normalizeServices(initialProfile),
     certifications: initialProfile.certifications ?? [],
     credentials: initialProfile.credentials ?? [],
     tariffItems: (initialProfile.tariffItems ?? []).filter((item) => !isDiagnostic(item.label)).slice(0, 5),
@@ -263,6 +263,7 @@ export function ProviderProfileForm({ darkMode, premium, initialProfile, email, 
     if (containsContactAttempt(draft.bio)) return setLocalError("No incluyas teléfonos, correos, redes ni enlaces en tu presentación.");
     if (!draft.coverageAreas?.length || draft.coverageAreas.some((area) => !coverageChoices.includes(area))) return setLocalError("Elegí al menos una localidad o zona de cobertura.");
     if (!draft.availabilityStart || !draft.availabilityEnd || draft.availabilityStart >= draft.availabilityEnd) return setLocalError("Elegí un horario de disponibilidad válido.");
+    if (services.length > serviceLimit) return setLocalError(`Tu plan admite hasta ${serviceLimit} servicios. Quitá los excedentes antes de guardar.`);
     if (!services.length || services.some((item) => !serviceSpecialtiesAreValid(item.family, item.specialties?.length ? item.specialties : item.service ? [item.service] : []))) return setLocalError("Elegí una familia y hasta dos especialidades válidas para cada servicio.");
     if (services.some((item) => (item.description?.trim().length ?? 0) < 10 || (item.description?.trim().length ?? 0) > 240)) return setLocalError("Describí cada servicio con entre 10 y 240 caracteres.");
     if (services.some((item) => containsContactAttempt(item.description ?? ""))) return setLocalError("No incluyas teléfonos, correos, redes ni enlaces en la descripción del servicio.");
@@ -404,7 +405,7 @@ export function ProviderProfileForm({ darkMode, premium, initialProfile, email, 
         })}
       </View>
 
-      <View style={styles.servicesHeading}><View><Text style={styles.sectionTitle}>Tus servicios</Text><Text style={styles.help}>Elegí el rubro y después una especialidad concreta.</Text></View><Text style={styles.freeBadge}>{premium ? "PREMIUM · 6" : "GRATIS · 2"}</Text></View>
+      <View style={styles.servicesHeading}><View><Text style={styles.sectionTitle}>Tus servicios</Text><Text style={styles.help}>Elegí el rubro y después una especialidad concreta.</Text></View><Text style={styles.freeBadge}>{premium ? "PREMIUM" : "GRATIS"} · {serviceLimit}</Text></View>
       {services.map((item, index) => {
         const family = providerServiceCatalog.find((option) => option.name === item.family);
         const descriptionLength = item.description?.length ?? 0;
@@ -430,8 +431,8 @@ export function ProviderProfileForm({ darkMode, premium, initialProfile, email, 
         setMembershipNotice(false);
         setDraft({ ...draft, services: [...services, defaultService(`${Date.now()}-${services.length}`)] });
       }}><Text style={styles.addServiceText}>＋ Agregar otro servicio</Text></TouchableOpacity>
-      {membershipNotice && <View style={styles.membershipNotice}><Text style={styles.lockedTitle}>Alcanzaste el límite de {serviceLimit} servicios</Text><Text style={styles.lockedText}>{premium ? "Podés editar o quitar uno de los servicios publicados." : "Premium habilita hasta 6 servicios profesionales."}</Text></View>}
-      {!premium && <View style={styles.lockedService}><View><Text style={styles.lockedTitle}>Hasta 6 servicios</Text><Text style={styles.lockedText}>Disponible con Premium.</Text></View><Text style={styles.membershipBadge}>PREMIUM</Text></View>}
+      {membershipNotice && <View style={styles.membershipNotice}><Text style={styles.lockedTitle}>Alcanzaste el límite de {serviceLimit} servicios</Text><Text style={styles.lockedText}>Podés editar o quitar uno de los servicios publicados.</Text></View>}
+      {!premium && <View style={styles.lockedService}><View><Text style={styles.lockedTitle}>Más servicios</Text><Text style={styles.lockedText}>Disponibles según tu plan Premium.</Text></View><Text style={styles.membershipBadge}>PREMIUM</Text></View>}
     </ScrollView>
     {!!(localError || remoteError) && <Text style={styles.error}>{localError || remoteError}</Text>}
     <View style={styles.actions}><TouchableOpacity accessibilityRole="button" style={styles.cancel} onPress={onCancel}><Text style={styles.cancelText}>Cancelar</Text></TouchableOpacity><TouchableOpacity accessibilityRole="button" disabled={busy} style={[styles.save, busy && styles.disabled]} onPress={submit}><Text style={styles.saveText}>{busy ? "Guardando…" : "Guardar y publicar"}</Text></TouchableOpacity></View>

@@ -85,6 +85,7 @@ import {
   topTieKeys,
 } from "../src/features/discovery/provider-ranking";
 import { DOCUMENT_IMAGE_POLICY, longestSideResize, PHOTO_IMAGE_POLICY, pickedImageError } from "../src/services/image-safety";
+import { planLimits } from "../src/features/subscriptions/plan-limits";
 
 const providers = [
   {
@@ -782,8 +783,6 @@ function notifyMailEvent(event: "subscription.received" | "subscription.activate
     }
   })();
 }
-const FREE_WEEKLY_REQUEST_LIMIT = 3;
-const PREMIUM_WEEKLY_REQUEST_LIMIT = 7;
 const REQUEST_LIFETIME_MS = 5 * 24 * 60 * 60 * 1000;
 const CLIENT_HISTORY_MS = 183 * 24 * 60 * 60 * 1000;
 
@@ -1254,7 +1253,7 @@ export default function Home() {
   const [adminPreviewRole, setAdminPreviewRole] = useState<"admin" | "client" | "provider">("admin");
   const [adminCredentialReviews, setAdminCredentialReviews] = useState<AdminCredentialReview[]>([]);
   const [adminReviewsLoading, setAdminReviewsLoading] = useState(false);
-  const [adminPublicReviews, setAdminPublicReviews] = useState<Array<{ id: string; created_at: string; rating: number; comment: string | null; moderated_at: string | null; client_name: string; provider_name: string }>>([]);
+  const [adminPublicReviews, setAdminPublicReviews] = useState<Array<{ id: string; created_at: string; rating: number; comment: string | null; moderated_at: string | null; client_name: string; provider_name: string; report_count: number; report_category: string | null; report_details: string | null }>>([]);
   const [adminPublicReviewsError, setAdminPublicReviewsError] = useState("");
   const [adminPublicReviewsBusy, setAdminPublicReviewsBusy] = useState(false);
   const [expandedAdminReviewId, setExpandedAdminReviewId] = useState<string | null>(null);
@@ -1367,6 +1366,7 @@ export default function Home() {
   const intentionalSignOutRef = useRef(false);
   const suppressLocalSaveRef = useRef(false);
   const [clientPlan, setClientPlan] = useState<"free" | "plus">("free");
+  const [activePlanMonths, setActivePlanMonths] = useState(0);
   const [membershipEndsAt, setMembershipEndsAt] = useState<string | null>(null);
   const [accountPublicId, setAccountPublicId] = useState<string | null>(null);
   const [accountCity, setAccountCity] = useState<string | null>(null);
@@ -1399,8 +1399,9 @@ export default function Home() {
   const [adminLayoutEditing, setAdminLayoutEditing] = useState(false);
   const [adminLayoutLoaded, setAdminLayoutLoaded] = useState(false);
   const [clientPhotoBusy, setClientPhotoBusy] = useState(false);
-  const reviewQualityLimit = clientPlan === "plus" ? 6 : 3;
-  const weeklyRequestLimit = clientPlan === "plus" ? PREMIUM_WEEKLY_REQUEST_LIMIT : FREE_WEEKLY_REQUEST_LIMIT;
+  const currentPlanLimits = planLimits(clientPlan === "plus" ? activePlanMonths : 0);
+  const reviewQualityLimit = currentPlanLimits.reviewAspects;
+  const weeklyRequestLimit = currentPlanLimits.weeklyRequests;
   const [quoteBuilderRequestId, setQuoteBuilderRequestId] = useState<
     string | null
   >(null);
@@ -2209,13 +2210,14 @@ export default function Home() {
       if (session.role !== "admin") {
         const [membership, identity] = await Promise.all([client
           .from("client_memberships")
-          .select("plan_code, status, current_period_ends_at")
+          .select("plan_code, status, current_period_ends_at, active_plan_months")
           .eq("client_id", currentUserId)
           .maybeSingle(), client.from("profiles").select("public_id, city").eq("id", currentUserId).maybeSingle()]);
         if (!cancelled) {
           const active = membership.data?.plan_code === "plus" && membership.data.status === "active"
             && (!membership.data.current_period_ends_at || new Date(membership.data.current_period_ends_at).getTime() > Date.now());
           setClientPlan(active ? "plus" : "free");
+          setActivePlanMonths(active ? Number(membership.data?.active_plan_months ?? 0) : 0);
           setMembershipEndsAt(membership.data?.current_period_ends_at ?? null);
           setAccountPublicId(identity.data?.public_id ?? null);
           setAccountCity(identity.data?.city ?? null);
@@ -2350,6 +2352,7 @@ export default function Home() {
   useEffect(() => {
     if (session) return;
     setClientPlan("free");
+    setActivePlanMonths(0);
     setMembershipEndsAt(null);
     setAccountPublicId(null);
     setAccountCity(null);
@@ -2373,7 +2376,7 @@ export default function Home() {
     setAdminPublicReviewsError("");
   }
 
-  async function moderatePublicReview(id: string, action: "hide" | "restore" | "delete" | "delete-confirmed") {
+  async function moderatePublicReview(id: string, action: "acknowledge" | "hide" | "restore" | "delete" | "delete-confirmed") {
     if (!supabase || session?.role !== "admin" || adminPublicReviewsBusy) return;
     if (action === "delete") {
       if (Platform.OS === "web" && !window.confirm("¿Eliminar esta reseña definitivamente?")) return;
@@ -2925,9 +2928,7 @@ export default function Home() {
     ).length;
     if (weeklyRequests >= weeklyRequestLimit)
       return setQuoteError(
-        clientPlan === "plus"
-          ? "Ya usaste tus 7 solicitudes Premium de esta semana. El cupo se renueva al comenzar la próxima semana."
-          : "Ya usaste tus 3 solicitudes gratuitas de esta semana. Para pedir más necesitás Premium.",
+        `Ya usaste tus ${weeklyRequestLimit} solicitudes de esta semana. El cupo se renueva al comenzar la próxima semana.`,
       );
     if (quoteDescription.trim().length < 10)
       return setQuoteError("Contanos un poco más (mínimo 10 caracteres).");
@@ -2979,10 +2980,8 @@ export default function Home() {
           result = await supabase.from("service_requests").insert(compatiblePayload).select("id").single();
         }
         if (result.error) throw new Error(
-          result.error.message.includes("PREMIUM_WEEKLY_REQUEST_LIMIT")
-            ? "Ya usaste tus 7 solicitudes Premium de esta semana. El cupo se renueva la próxima semana."
-            : result.error.message.includes("FREE_WEEKLY_REQUEST_LIMIT")
-            ? "Ya usaste tus 3 solicitudes gratuitas de esta semana. Para pedir más necesitás Cliente Plus."
+          result.error.message.includes("PLAN_WEEKLY_REQUEST_LIMIT") || result.error.message.includes("PREMIUM_WEEKLY_REQUEST_LIMIT") || result.error.message.includes("FREE_WEEKLY_REQUEST_LIMIT")
+            ? `Ya usaste tus ${weeklyRequestLimit} solicitudes de esta semana. El cupo se renueva la próxima semana.`
             : result.error.message.toLowerCase().includes("row-level security")
               ? "Tu sesión venció. Volvé a ingresar antes de enviar la solicitud."
               : "No pudimos guardar la solicitud. Revisá los datos e intentá nuevamente.",
@@ -3216,7 +3215,12 @@ export default function Home() {
     setProfileDraft(nextDraft);
     setProfileError("");
     setProfileBusy(true);
-    const services = (nextDraft.services ?? []).slice(0, clientPlan === "plus" ? 6 : 2);
+    const services = nextDraft.services ?? [];
+    if (services.length > currentPlanLimits.services) {
+      setProfileError(`Tu plan permite ${currentPlanLimits.services} servicios. Quitá los excedentes antes de guardar.`);
+      setProfileBusy(false);
+      return;
+    }
     const diagnosticPrice = nextDraft.diagnosticPrice ?? 0;
     const tariffItems = [
       {
@@ -3471,9 +3475,12 @@ export default function Home() {
     if (portfolioBusy) return;
     setPortfolioError("");
     setPortfolioBusy(true);
-    const trimmedWorks = nextWorks
-      .slice(0, clientPlan === "plus" ? 6 : 3)
-      .map((work) => ({ ...work, description: work.description.trim() }));
+    if (nextWorks.length > currentPlanLimits.works) {
+      setPortfolioError(`Tu plan permite ${currentPlanLimits.works} trabajos. Quitá los excedentes antes de guardar.`);
+      setPortfolioBusy(false);
+      return;
+    }
+    const trimmedWorks = nextWorks.map((work) => ({ ...work, description: work.description.trim() }));
     if (!supabase || isDemoSession) {
       setProviderProfile((current) =>
         current ? { ...current, portfolioWorks: trimmedWorks } : current,
@@ -3772,6 +3779,7 @@ export default function Home() {
       setAccountPublicId(null);
       setAccountCity(null);
       setClientPlan("free");
+      setActivePlanMonths(0);
       setMembershipEndsAt(null);
       setTab("Inicio");
       setDeleteAccountModal(false);
@@ -5062,9 +5070,9 @@ export default function Home() {
             {effectiveRole !== "admin" && (
               <View style={styles.requestQuotaCard}>
                 <View>
-                  <Text style={styles.panelEyebrow}>PLAN GRATIS</Text>
+                  <Text style={styles.panelEyebrow}>{clientPlan === "plus" ? `PLAN ${currentPlanLimits.label.toLocaleUpperCase("es-AR")}` : "PLAN GRATIS"}</Text>
                   <Text style={styles.requestQuotaTitle}>Presupuestos de esta semana</Text>
-                  {clientPlan === "free" && weeklyRequestCount >= FREE_WEEKLY_REQUEST_LIMIT && (
+                  {clientPlan === "free" && weeklyRequestCount >= weeklyRequestLimit && (
                     <TouchableOpacity accessibilityRole="button" onPress={() => setRequested("Cliente Plus habilitará solicitudes adicionales y beneficios exclusivos.")}>
                       <Text style={styles.upgradeLink}>Ver Cliente Plus</Text>
                     </TouchableOpacity>
@@ -5566,19 +5574,21 @@ export default function Home() {
                 <View><Text style={styles.panelEyebrow}>MODERACIÓN</Text><Text style={styles.adminModuleTitle}>Revisión de reseñas</Text></View>
                 <TouchableOpacity accessibilityRole="button" style={styles.adminRefresh} onPress={() => void loadAdminPublicReviews()}><Text style={styles.adminRefreshText}>Actualizar</Text></TouchableOpacity>
               </View>
-              <Text style={styles.adminPublicReviewHelp}>Ocultar la quita del perfil sin borrarla; Eliminar es definitivo.</Text>
+              <Text style={styles.adminPublicReviewHelp}>OK la retira solo de esta bandeja. Ocultar la quita del perfil; Eliminar es definitivo.</Text>
               {!!adminPublicReviewsError && <Text style={styles.modalError}>{adminPublicReviewsError}</Text>}
               {!adminPublicReviews.length && !adminPublicReviewsError && <Text style={styles.adminModuleCopy}>No hay reseñas para revisar.</Text>}
-              {adminPublicReviews.map((review) => <View key={review.id} style={styles.adminPublicReviewRow}>
+              {adminPublicReviews.map((review) => <View key={review.id} style={[styles.adminPublicReviewRow, review.report_count > 0 && styles.adminPublicReviewRowReported]}>
                 <View style={styles.adminPublicReviewBody}>
                   <View style={styles.adminPublicReviewHeading}>
                     <Text numberOfLines={1} style={styles.adminPublicReviewTitle}>{review.client_name} → {review.provider_name} · {"★".repeat(review.rating)}</Text>
                     <Text style={styles.adminPublicReviewMeta}>{new Date(review.created_at).toLocaleDateString("es-AR")} · {review.moderated_at ? "Oculta" : "Visible"}</Text>
                   </View>
                   <Text numberOfLines={expandedAdminReviewId === review.id ? undefined : 1} style={styles.adminPublicReviewComment}>{review.comment || "Sin comentario"}</Text>
+                  {review.report_count > 0 && <Text style={styles.adminPublicReviewWarning}>⚠ {review.report_count} reporte{review.report_count === 1 ? "" : "s"} o apelación{review.report_count === 1 ? "" : "es"}{review.report_details ? ` · ${review.report_details}` : ""}</Text>}
                   {!!review.comment && review.comment.length > 40 && <TouchableOpacity accessibilityRole="button" style={styles.adminPublicReviewExpand} onPress={() => setExpandedAdminReviewId((current) => current === review.id ? null : review.id)}><Text style={styles.adminPublicReviewExpandText}>{expandedAdminReviewId === review.id ? "Contraer" : "Leer completa"}</Text></TouchableOpacity>}
                 </View>
                 <View style={styles.adminPublicReviewActions}>
+                  {!review.moderated_at && <TouchableOpacity accessibilityRole="button" accessibilityLabel="Dar OK y quitar de esta bandeja sin ocultar la reseña pública" disabled={adminPublicReviewsBusy} style={[styles.adminPublicReviewButton, styles.adminPublicReviewOk]} onPress={() => void moderatePublicReview(review.id, "acknowledge")}><Text style={styles.adminPublicReviewOkText}>✓ OK</Text></TouchableOpacity>}
                   <TouchableOpacity accessibilityRole="button" accessibilityLabel={review.moderated_at ? "Restaurar reseña en el perfil público" : "Ocultar reseña del perfil público sin borrarla"} disabled={adminPublicReviewsBusy} style={styles.adminPublicReviewButton} onPress={() => void moderatePublicReview(review.id, review.moderated_at ? "restore" : "hide")}><Text style={styles.adminPublicReviewButtonText}>{review.moderated_at ? "Restaurar" : "Ocultar"}</Text></TouchableOpacity>
                   <TouchableOpacity accessibilityRole="button" accessibilityLabel="Eliminar reseña definitivamente" disabled={adminPublicReviewsBusy} style={styles.adminPublicReviewButton} onPress={() => void moderatePublicReview(review.id, "delete")}><Text style={styles.adminPublicReviewButtonText}>Eliminar</Text></TouchableOpacity>
                 </View>
@@ -5670,7 +5680,7 @@ export default function Home() {
                     <Text style={styles.premiumTierSelectText}>{adminPremiumMonths} {adminPremiumMonths === 1 ? "mes" : "meses"}</Text><Text style={styles.premiumTierSelectChevron}>{adminPremiumMonthsOpen ? "⌃" : "⌄"}</Text>
                   </TouchableOpacity>
                   {adminPremiumMonthsOpen && <View style={styles.premiumTierOptions}>{([1, 3, 6, 12] as const).map((months) => <TouchableOpacity key={months} accessibilityRole="radio" accessibilityState={{ selected: adminPremiumMonths === months }} style={styles.premiumTierOption} onPress={() => { setAdminPremiumMonths(months); setAdminPremiumMonthsOpen(false); }}><Text style={styles.premiumTierOptionText}>{months} {months === 1 ? "mes" : "meses"}</Text></TouchableOpacity>)}</View>}
-                  <Text style={styles.adminModuleCopy}>Todas las duraciones activan 6 servicios, 6 trabajos finalizados visibles y 7 solicitudes semanales. El plazo elegido también determina la prioridad en la búsqueda.</Text>
+                  <Text style={styles.adminModuleCopy}>{planLimits(adminPremiumMonths).label}: {planLimits(adminPremiumMonths).services} servicios · {planLimits(adminPremiumMonths).works} trabajos · {planLimits(adminPremiumMonths).weeklyRequests} solicitudes semanales · {planLimits(adminPremiumMonths).reviewAspects} cualidades por reseña.</Text>
                   {adminPremiumAccount.premium && <Text style={styles.adminModuleCopy}>Si ya tiene Premium, el plazo elegido se suma al vencimiento actual.</Text>}
                   <TouchableOpacity accessibilityRole="button" disabled={adminPremiumBusy} style={styles.adminPremiumEnableButton} onPress={() => void updatePremiumAccount(true)}><Text style={styles.adminPremiumEnableButtonText}>{adminPremiumBusy ? "GUARDANDO…" : adminPremiumAccount.premium ? "EXTENDER PREMIUM 🔥" : "HABILITAR PREMIUM 🔥"}</Text></TouchableOpacity>
                   {adminPremiumAccount.premium && <TouchableOpacity accessibilityRole="button" disabled={adminPremiumBusy} style={styles.adminRefresh} onPress={() => void updatePremiumAccount(false)}><Text style={styles.adminRefreshText}>Deshabilitar Premium</Text></TouchableOpacity>}
@@ -5964,7 +5974,7 @@ export default function Home() {
                           TRABAJOS REALIZADOS
                         </Text>
                         <View style={styles.providerHeaderActions}>
-                          <Text style={styles.servicePlanBadge}>{clientPlan === "plus" ? "6 PREMIUM" : "3 GRATIS"}</Text>
+                          <Text style={styles.servicePlanBadge}>{currentPlanLimits.works} {clientPlan === "plus" ? "PREMIUM" : "GRATIS"}</Text>
                           {session.role !== "admin" && (
                             <TouchableOpacity accessibilityRole="button" accessibilityLabel="Editar trabajos realizados" style={styles.editProfileButton} onPress={openPortfolioEditor}>
                               <Text style={styles.editProfileButtonText}>EDITAR</Text>
@@ -6256,7 +6266,7 @@ export default function Home() {
             <View style={styles.publicProfileSection}>
               <View style={styles.workCardTop}>
                 <Text style={styles.panelEyebrow}>TRABAJOS REALIZADOS</Text>
-                <Text style={styles.servicePlanBadge}>{clientPlan === "plus" ? "6 · PREMIUM" : "3 · PLAN GRATIS"}</Text>
+                <Text style={styles.servicePlanBadge}>{selectedPublicWorks.length} visibles</Text>
               </View>
               {selectedPublicWorks.map((work, workIndex) => (
                 <View key={work.id} style={styles.publicPortfolioWork}>
@@ -6587,7 +6597,7 @@ export default function Home() {
         <View style={styles.modalBackdrop}>
           <ProviderProfileForm
             darkMode={darkMode}
-            premium={clientPlan === "plus"}
+            serviceLimit={currentPlanLimits.services}
             key={`${profileDraft.displayName}-${profileModal}`}
             initialProfile={profileDraft}
             email={session?.email ?? ""}
@@ -6605,7 +6615,7 @@ export default function Home() {
         <View style={styles.modalBackdrop}>
           <PortfolioEditor
             darkMode={darkMode}
-            maxWorks={clientPlan === "plus" ? 6 : 3}
+            maxWorks={currentPlanLimits.works}
             key={`${providerProfile?.publicId}-${portfolioModal}`}
             initialWorks={providerProfile?.portfolioWorks ?? []}
             availableServices={Array.from(
@@ -8080,6 +8090,10 @@ function createStyles(colors: ThemeColors, safeTop = 0, safeBottom = 0) {
     adminRefreshText: { color: colors.blue, fontSize: 9, fontWeight: "900" },
     adminPublicReviewHelp: { color: colors.stone, fontSize: 10, marginTop: 5, marginBottom: 2 },
     adminPublicReviewRow: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8, borderWidth: 1, borderColor: colors.line, borderRadius: 10, backgroundColor: colors.surface, paddingHorizontal: 10, paddingVertical: 7, marginTop: 6 },
+    adminPublicReviewRowReported: { borderColor: colors.danger, borderWidth: 2 },
+    adminPublicReviewWarning: { color: colors.danger, fontSize: 10, fontWeight: "900", marginTop: 3 },
+    adminPublicReviewOk: { borderColor: "#20B77A", backgroundColor: colors.successSurface },
+    adminPublicReviewOkText: { color: "#20B77A", fontSize: 10, fontWeight: "900" },
     adminPublicReviewBody: { flexGrow: 1, flexBasis: 270, minWidth: 0 },
     adminPublicReviewHeading: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 8 },
     adminPublicReviewTitle: { flex: 1, minWidth: 0, color: colors.navy, fontSize: 12, fontWeight: "900" },
