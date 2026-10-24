@@ -9,7 +9,10 @@
     "api/sheets-mirror.mjs": { "maxDuration": 30 },
     "api/credential-retention.mjs": { "maxDuration": 60 },
     "api/registry-lookup.mjs": { "maxDuration": 30 },
-    "api/mail.mjs": { "maxDuration": 30 }
+    "api/mail.mjs": { "maxDuration": 30 },
+    "api/early-access.mjs": { "maxDuration": 30 },
+    "api/early-access-feed.mjs": { "maxDuration": 30 },
+    "api/meta-messages.mjs": { "maxDuration": 30 }
   },
   "crons": [
     { "path": "/api/credential-retention", "schedule": "17 3 * * *" }

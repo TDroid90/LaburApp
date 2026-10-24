@@ -36,7 +36,13 @@ export class MailService {
       signal: AbortSignal.timeout(12_000),
     });
 
-    if (!response.ok) throw new Error(`MAIL_PROVIDER_ERROR_${response.status}`);
-    return response.json();
+    const responseBody = await response.json().catch(() => null);
+    if (!response.ok) {
+      const providerReason = String(responseBody?.message || responseBody?.name || "unknown")
+        .replace(/[^a-zA-Z0-9_. -]/g, "")
+        .slice(0, 160);
+      throw new Error(`MAIL_PROVIDER_ERROR_${response.status}_${providerReason}`);
+    }
+    return responseBody;
   }
 }
