@@ -1,5 +1,5 @@
-import { MailService } from "./mail-service.mjs";
-import { renderMailTemplate } from "./mail-templates.mjs";
+import { MailService } from "../lib/server/mail-service.mjs";
+import { renderMailTemplate } from "../lib/server/mail-templates.mjs";
 
 export const config = { api: { bodyParser: false } };
 

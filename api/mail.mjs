@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
-import { authEmailContent, subscriptionActivatedEmail, subscriptionReceivedEmail } from "./mail-templates.mjs";
-import { MailService } from "./mail-service.mjs";
-import { verifyStandardWebhook } from "./standard-webhook.mjs";
+import { authEmailContent, subscriptionActivatedEmail, subscriptionReceivedEmail } from "../lib/server/mail-templates.mjs";
+import { MailService } from "../lib/server/mail-service.mjs";
+import { verifyStandardWebhook } from "../lib/server/standard-webhook.mjs";
 
 export const config = { api: { bodyParser: false } };
 
